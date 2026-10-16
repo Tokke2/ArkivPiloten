@@ -1,0 +1,11 @@
+# PDF Sorter - beroenden (REQ-N2).
+# SAMTLIGA beroenden är VALFRIA: appen startar utan dem och talar om i
+# statusraden vad som saknas. OCR kräver dessutom systemprogrammet Tesseract.
+#
+# Testad kombination i leveransmiljön 2026-08-26:
+pypdf==6.16.2
+Pillow==12.3.0
+
+# Full stack för bästa läsning, systemfält m.m. - installera vid behov:
+#   pip install pymupdf pypdf pystray pillow pytesseract
+# (Versioner pinas per installationsmiljö; appens reservvägar gäller alltid.)

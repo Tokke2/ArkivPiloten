@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stöd ArkivPiloten 💙 — Håll appen gratis &amp; smart</title>
+<meta name="description" content="ArkivPiloten är gratis och utan reklam. Din donation håller sortering, OCR och matchning i världsklass. Tack!">
+<style>
+:root{--bg:#F5F8FF;--paper:#FFFFFF;--line:#D8E3F8;--line2:#C3D4F4;--text:#101828;--muted:#475467;--faint:#8896AB;--accent:#2563C7;--accent2:#1B4A9C;--ok:#1A9E4A;--warm:#FFF0B3;--mint:#C7F0DB;--rose:#FF8C8A;--amber:#FFB347}
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
+a{color:inherit} .wrap{max-width:860px;margin:0 auto;padding:28px 18px 48px}
+.topbar{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.topbar .pill{margin-left:auto;display:inline-flex;align-items:center;gap:6px;background:white;border:1px solid var(--line);padding:6px 10px;border-radius:999px;font-size:12px;color:var(--muted);box-shadow:0 2px 10px rgba(0,0,0,.04)}
+.topbar .pill b{color:var(--text)}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:#fff}
+.lang button{border:0;background:transparent;padding:6px 12px;font-size:12px;font-weight:800;cursor:pointer;color:var(--muted)}
+.lang button.on{background:var(--accent);color:#fff}
+.hero{position:relative;overflow:hidden;background:linear-gradient(135deg,#E8F0FF 0%,#DCE8FA 48%,#C7F0DB 100%);border:1px solid var(--line);border-radius:26px;padding:26px;box-shadow:0 14px 40px rgba(0,0,0,.07);display:grid;grid-template-columns:112px 1fr;gap:20px;align-items:center}
+.hero .icon{width:112px;height:112px;border-radius:22px;background:white;box-shadow:0 10px 28px rgba(0,0,0,.14),inset 0 0 0 1px rgba(0,0,0,.04);display:grid;place-items:center;overflow:hidden}
+.hero .icon img{width:96px;height:96px;object-fit:contain}
+.eyebrow{display:inline-flex;align-items:center;gap:7px;background:var(--accent);color:white;font-weight:800;letter-spacing:.06em;font-size:11px;padding:5px 10px;border-radius:999px}
+.hero h1{margin:10px 0 8px;font-size:30px;line-height:1.08;letter-spacing:-.02em}
+.hero h1 span{background:linear-gradient(90deg,#2563C7,#1A9E4A);-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p{margin:0;color:var(--muted);font-size:15px;line-height:1.6}
+.hero .ctas{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:12px 18px;border-radius:14px;font-weight:800;font-size:14px;text-decoration:none;border:1px solid transparent;cursor:pointer;transition:transform .12s ease,box-shadow .12s ease,background .12s ease}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:linear-gradient(135deg,#4D8DEE,#2563C7);color:white;box-shadow:0 8px 20px rgba(37,99,199,.35);border-color:rgba(255,255,255,.6)}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 12px 26px rgba(37,99,199,.45)}
+.btn-ghost{background:white;border-color:var(--line);color:var(--text);box-shadow:0 4px 14px rgba(0,0,0,.05)}
+.btn-ghost:hover{border-color:var(--line2);transform:translateY(-1px)}
+.btn-paypal{background:#0070BA;color:white;box-shadow:0 8px 18px rgba(0,112,186,.28)}
+.btn-kofi{background:#FF5E5B;color:white;box-shadow:0 8px 18px rgba(255,94,91,.28)}
+.btn-swish{background:#00C67A;color:white;box-shadow:0 8px 18px rgba(0,198,122,.28)}
+.stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+.stat{background:rgba(255,255,255,.78);border:1px solid rgba(255,255,255,.9);backdrop-filter:blur(6px);padding:8px 12px;border-radius:999px;font-size:12px;color:var(--muted);display:inline-flex;gap:6px;align-items:center}
+.stat b{color:var(--text)}
+.hero:after{content:"";position:absolute;right:-40px;top:-40px;width:180px;height:180px;background:radial-gradient(circle at 30% 30%, rgba(37,99,199,.25), transparent 65%);pointer-events:none}
+.section{margin-top:18px} .card{background:white;border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:0 6px 24px rgba(0,0,0,.05)}
+.kicker{font-size:11px;letter-spacing:.08em;font-weight:800;color:var(--faint);text-transform:uppercase;margin:0 0 8px}
+h2{margin:0 0 8px;font-size:18px;letter-spacing:-.01em}
+.muted{color:var(--muted);font-size:13.5px;line-height:1.6}
+.tiers{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-top:14px}
+@media(max-width:760px){.hero{grid-template-columns:1fr;text-align:center}.hero .icon{margin:0 auto}.hero .ctas{justify-content:center}.tiers{grid-template-columns:1fr}}
+.tier{position:relative;background:white;border:1px solid var(--line);border-radius:18px;padding:16px 14px 14px;box-shadow:0 6px 22px rgba(0,0,0,.05);display:flex;flex-direction:column}
+.tier.popular{border-color:#4D8DEE;box-shadow:0 10px 30px rgba(77,141,238,.22);transform:translateY(-2px)}
+.tier .badge{position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#4D8DEE,#2563C7);color:white;font-size:11px;font-weight:800;letter-spacing:.06em;padding:5px 10px;border-radius:999px;box-shadow:0 4px 14px rgba(37,99,199,.4);white-space:nowrap}
+.tier h3{margin:2px 0 4px;font-size:16px}
+.price{font-size:28px;font-weight:900;letter-spacing:-.03em}
+.price small{font-size:13px;font-weight:600;color:var(--muted)}
+.tier ul{margin:10px 0 14px;padding:0;list-style:none;display:grid;gap:7px}
+.tier li{display:flex;gap:8px;font-size:13px;line-height:1.45;color:var(--muted)}
+.tier li i{width:20px;height:20px;border-radius:999px;display:grid;place-items:center;background:#E8F8F0;color:#1A9E4A;font-size:12px;flex-shrink:0;margin-top:1px;font-style:normal}
+.tier .btn{width:100%;margin-top:auto}
+.tier .hint{margin-top:8px;text-align:center;font-size:11px;color:var(--faint)}
+.impact{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px}
+@media(max-width:680px){.impact{grid-template-columns:1fr}}
+.impact .item{background:linear-gradient(135deg,#FFFFFF,#F5F8FF);border:1px solid var(--line);border-radius:16px;padding:14px;display:flex;gap:12px;align-items:flex-start}
+.impact .ico{width:36px;height:36px;border-radius:12px;display:grid;place-items:center;font-size:16px;flex-shrink:0}
+.impact .item h4{margin:0 0 4px;font-size:13px}
+.impact .item p{margin:0;color:var(--muted);font-size:12.5px;line-height:1.55}
+.swishbox{margin-top:14px;background:white;border:1px solid var(--line);border-radius:18px;padding:16px;display:flex;gap:18px;flex-wrap:wrap;align-items:center;box-shadow:0 6px 22px rgba(0,0,0,.05)}
+.swishbox .qr{width:180px;height:180px;border:1px solid var(--line);border-radius:14px;display:grid;place-items:center;background:#fff;color:var(--faint);font-size:12px;text-align:center;padding:8px}
+.swishbox .qr img{width:164px;height:164px}
+.trust{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.trust span{display:inline-flex;align-items:center;gap:6px;background:white;border:1px solid var(--line);padding:7px 10px;border-radius:999px;font-size:12px;color:var(--muted)}
+.quotes{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+@media(max-width:680px){.quotes{grid-template-columns:1fr}}
+.quote{background:white;border:1px solid var(--line);border-radius:16px;padding:14px}
+.quote p{margin:0;font-size:13px;line-height:1.6;color:var(--muted)}
+.quote b{color:var(--text)}
+.quote .who{margin-top:10px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--faint)}
+.who .dot{width:26px;height:26px;border-radius:999px;background:linear-gradient(135deg,#E8F0FF,#C7F0DB);display:grid;place-items:center;font-size:12px}
+details{background:white;border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:10px}
+details[open]{box-shadow:0 6px 18px rgba(0,0,0,.05)}
+summary{font-weight:800;cursor:pointer;list-style:none}
+summary::-webkit-details-marker{display:none}
+details p{margin:8px 0 0;color:var(--muted);font-size:13px;line-height:1.6}
+footer{margin-top:18px;text-align:center;color:var(--faint);font-size:12px;line-height:1.6}
+footer a{color:var(--accent2);font-weight:800;text-decoration:none}
+@media(prefers-reduced-motion:no-preference){.hero .icon{animation:float 4s ease-in-out infinite}}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+ <div class="topbar">
+  <div style="display:flex;align-items:center;gap:8px;font-weight:900;letter-spacing:-.02em"><span style="width:28px;height:28px;border-radius:9px;background:linear-gradient(135deg,#E8F0FF,#C7F0DB);display:grid;place-items:center;border:1px solid #D8E3F8">📄</span> ArkivPiloten</div>
+  <div class="lang"><button id="sv" class="on" onclick="setLang('sv')">SV</button><button id="en" onclick="setLang('en')">EN</button></div>
+  <div class="pill"><span>🔒</span> <b data-sv="Säker betalning" data-en="Secure payment">Säker betalning</b> <span data-sv="via PayPal, Ko-fi &amp; Swish • ingen inloggning i appen" data-en="via PayPal, Ko-fi &amp; Swish • no in-app login">via PayPal, Ko-fi &amp; Swish • ingen inloggning i appen</span></div>
+ </div>
+ <div class="hero">
+  <div class="icon"><img src="data:image/png;base64,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" alt="ArkivPiloten"></div>
+  <div>
+   <span class="eyebrow">✨ <span data-sv="GRATIS • UTAN REKLAM • PORTABEL" data-en="FREE • AD-FREE • PORTABLE">GRATIS • UTAN REKLAM • PORTABEL</span></span>
+   <h1 data-sv='Älskar du ordning? <span>Hjälp oss hålla den gratis</span> 💙' data-en="Love order? <span>Help us keep it free</span> 💙">Älskar du ordning? <span>Hjälp oss hålla den gratis</span> 💙</h1>
+   <p data-sv="<b>ArkivPiloten</b> sorterar dina PDF:er åt dig — känner igen avsändare, läser skannat med OCR och lägger allt i rätt mapp. Inga prenumerationer. Ingen reklam. Din donation är det som gör att vi kan fortsätta — och bli ännu bättre." data-en="<b>ArkivPiloten</b> sorts your PDFs for you — recognises senders, reads scans with OCR and files everything correctly. No subscriptions. No ads. Your donation is what lets us continue — and get even better."><b>ArkivPiloten</b> sorterar dina PDF:er åt dig — känner igen avsändare, läser skannat med OCR och lägger allt i rätt mapp. Inga prenumerationer. Ingen reklam. Din donation är det som gör att vi kan fortsätta — och bli ännu bättre.</p>
+   <div class="ctas">
+    <a class="btn btn-primary" href="https://paypal.me/Rickard3dPrint" target="_blank" rel="noopener">💙 <span data-sv="Stöd via PayPal →" data-en="Support via PayPal →">Stöd via PayPal →</span></a>
+    <a class="btn btn-ghost" href="https://ko-fi.com/tokke2" target="_blank" rel="noopener">☕ <span data-sv="Bjud på en kaffe" data-en="Buy me a coffee">Bjud på en kaffe</span></a>
+   </div>
+   <div class="stats">
+    <span class="stat">⭐ <b>4,9/5</b> <span data-sv="av testarna" data-en="from testers">av testarna</span></span>
+    <span class="stat">📚 <b>100%</b> <span data-sv="gratis — alltid" data-en="free — always">gratis — alltid</span></span>
+    <span class="stat">🔓 <span data-sv="Portabel &amp; offline" data-en="Portable &amp; offline">Portabel &amp; offline</span></span>
+    <span class="stat">⚡ <b>1 <span data-sv="klick" data-en="click">klick</span></b> → <span data-sv="rätt mapp" data-en="right folder">rätt mapp</span></span>
+   </div>
+  </div>
+ </div>
+ <div class="section card" id="varfor">
+  <p class="kicker" data-sv="Varför din hjälp betyder allt" data-en="Why your help means everything">Varför din hjälp betyder allt</p>
+  <h2 data-sv="Du fixar inte bara ditt arkiv — du hjälper alla med pappershögar" data-en="You don't just fix your archive — you help everyone with paper piles">Du fixar inte bara ditt arkiv — du hjälper alla med pappershögar</h2>
+  <p class="muted" data-sv="Varje donation går direkt till det som märks: bättre matchning, snabbare OCR, självläkande loggar och nya funktioner. Ingen mellanhand. <b>Du stödjer en liten indie-utvecklare</b>, inte ett bolag." data-en="Every donation goes straight to what shows: better matching, faster OCR, self-healing logs and new features. No middleman. <b>You support a small indie developer</b>, not a company.">Varje donation går direkt till det som märks: bättre matchning, snabbare OCR, självläkande loggar och nya funktioner. Ingen mellanhand. <b>Du stödjer en liten indie-utvecklare</b>, inte ett bolag.</p>
+  <div class="impact">
+   <div class="item"><div class="ico" style="background:#E8F8F0;color:#1A9E4A">🧲</div><div><h4 data-sv="Perfekt ordning" data-en="Perfect order">Perfekt ordning</h4><p data-sv="Avsändare, org.nr och datum blir rätt — filerna hamnar där de ska utan handpåläggning." data-en="Sender, org.nr and dates come out right — files land where they belong, hands-free.">Avsändare, org.nr och datum blir rätt — filerna hamnar där de ska utan handpåläggning.</p></div></div>
+   <div class="item"><div class="ico" style="background:#FFF0B3;color:#B7791F">🛡️</div><div><h4 data-sv="Alltid uppdaterad" data-en="Always updated">Alltid uppdaterad</h4><p data-sv="Buggfixar och nya förslag varje vecka. Din donation = tid för underhåll." data-en="Bug fixes and new suggestions every week. Your donation = time for maintenance.">Buggfixar och nya förslag varje vecka. Din donation = tid för underhåll.</p></div></div>
+   <div class="item"><div class="ico" style="background:#E8D9FF;color:#7A3B9C">💝</div><div><h4 data-sv="För alla — gratis" data-en="For everyone — free">För alla — gratis</h4><p data-sv="Ingen betalvägg. Donationer håller appen gratis för studenter, äldre och kontor." data-en="No paywall. Donations keep the app free for students, seniors and offices.">Ingen betalvägg. Donationer håller appen gratis för studenter, äldre och kontor.</p></div></div>
+  </div>
+  <div class="trust">
+   <span>🔒 PayPal, Ko-fi &amp; Swish — <span data-sv="krypterat &amp; säkert" data-en="encrypted &amp; safe">krypterat &amp; säkert</span></span>
+   <span>🧾 <span data-sv="Kvitto direkt från betaltjänsten" data-en="Receipt straight from the provider">Kvitto direkt från betaltjänsten</span></span>
+   <span>🕊️ <span data-sv="Ingen spårning — bara tacksamhet" data-en="No tracking — just gratitude">Ingen spårning — bara tacksamhet</span></span>
+   <span>🇸 <span data-sv="Svensk utvecklare — snabb återkoppling" data-en="Swedish developer — fast feedback">Svensk utvecklare — snabb återkoppling</span></span>
+  </div>
+ </div>
+ <div class="swishbox" id="swish" style="justify-content:center;padding:20px">
+  <div class="qr" id="qrbox" style="width:230px;height:230px;border:0;box-shadow:none">
+   <img src="swish_qr.png" alt="Swish QR" style="width:214px;height:214px">
+  </div>
+ </div>
+ <div class="section">
+  <p class="kicker" data-sv="Vanliga frågor — lugnt &amp; tryggt" data-en="FAQ — calm &amp; safe">Vanliga frågor — lugnt &amp; tryggt</p>
+  <details open>
+   <summary>💳 <span data-sv="Hur betalar jag säkert?" data-en="How do I pay safely?">Hur betalar jag säkert?</span></summary>
+   <p data-sv="Knapparna går direkt till <b>paypal.me</b>, <b>ko-fi.com</b> och <b>swish.se</b> (HTTPS, krypterat). Varken appen eller utvecklaren ser ditt kortnummer. Kvitto kommer från betaltjänsten direkt." data-en="The buttons go straight to <b>paypal.me</b>, <b>ko-fi.com</b> and <b>swish.se</b> (HTTPS, encrypted). Neither the app nor the developer sees your card number. The receipt comes straight from the provider.">Knapparna går direkt till <b>paypal.me</b>, <b>ko-fi.com</b> och <b>swish.se</b> (HTTPS, krypterat). Varken appen eller utvecklaren ser ditt kortnummer. Kvitto kommer från betaltjänsten direkt.</p>
+  </details>
+  <details>
+   <summary>🔁 <span data-sv="Kan jag bli månadsgivare?" data-en="Can I give monthly?">Kan jag bli månadsgivare?</span></summary>
+   <p data-sv="Ja! På Ko-fi kan du välja <b>månadsvis</b> (valfritt belopp, avsluta när du vill). På PayPal och Swish: skicka valfritt belopp när du vill — ingen bindning." data-en="Yes! On Ko-fi you can pick <b>monthly</b> (any amount, cancel anytime). On PayPal and Swish: send any amount anytime — no commitment.">Ja! På Ko-fi kan du välja <b>månadsvis</b> (valfritt belopp, avsluta när du vill). På PayPal och Swish: skicka valfritt belopp när du vill — ingen bindning.</p>
+  </details>
+  <details>
+   <summary>🇪 <span data-sv="Fungerar Swish?" data-en="Does Swish work?">Fungerar Swish?</span></summary>
+   <p data-sv="Ja — fyll i ditt Swish-nummer i appen (Hjälp → Stöd projektet) så ritas QR-koden direkt och jämförs med originalet. Sidan här visar koden när numret är sparat." data-en="Yes — enter your Swish number in the app (Help → Support project) and the QR is drawn instantly and compared with the original. This page shows the code once the number is saved.">Ja — fyll i ditt Swish-nummer i appen (Hjälp → Stöd projektet) så ritas QR-koden direkt och jämförs med originalet. Sidan här visar koden när numret är sparat.</p>
+  </details>
+  <details>
+   <summary>🎁 <span data-sv="Vad får jag som tack?" data-en="What do I get in return?">Vad får jag som tack?</span></summary>
+   <p data-sv="Evig tacksamhet, prioriterad återkoppling, och känslan att hålla appen gratis för alla. Koden förblir öppen — ingen betalvägg, ingen funktion låst bakom donation." data-en="Eternal gratitude, priority feedback, and the feeling of keeping the app free for everyone. The code stays open — no paywall, no feature locked behind donation.">Evig tacksamhet, prioriterad återkoppling, och känslan att hålla appen gratis för alla. Koden förblir öppen — ingen betalvägg, ingen funktion låst bakom donation.</p>
+  </details>
+ </div>
+ <div class="card" style="margin-top:16px;background:linear-gradient(135deg,#0F172A 0%,#1E293B 100%);color:white;border-color:#1E293B;text-align:center;padding:20px 16px">
+  <div style="width:56px;height:56px;border-radius:16px;background:linear-gradient(135deg,#E8F0FF,#C7F0DB);display:grid;place-items:center;margin:0 auto 10px;font-size:22px">💙</div>
+  <h2 style="color:white;margin:0 0 6px" data-sv="Redo att sprida lite arkivglädje?" data-en="Ready to spread some archive joy?">Redo att sprida lite arkivglädje?</h2>
+  <p style="margin:0;color:#CBD5E1;font-size:13.5px;line-height:1.6" data-sv="Välj det som känns bra — 39 kr eller 299 kr, engångs eller månadsvis. Du gör skillnad direkt." data-en="Pick what feels right — 39 or 299 SEK, one-off or monthly. You make a difference instantly.">Välj det som känns bra — 39 kr eller 299 kr, engångs eller månadsvis. Du gör skillnad direkt.</p>
+  <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px">
+   <a class="btn btn-primary" href="https://paypal.me/Rickard3dPrint" target="_blank" rel="noopener">💙 <span data-sv="Donera via PayPal" data-en="Donate via PayPal">Donera via PayPal</span></a>
+   <a class="btn" style="background:white;color:#101828" href="https://ko-fi.com/tokke2" target="_blank" rel="noopener">☕ <span data-sv="Donera via Ko-fi" data-en="Donate via Ko-fi">Donera via Ko-fi</span></a>
+  </div>
+  <div style="margin-top:10px;font-size:11px;color:#94A3B8" data-sv="Säker betalning • Kvitto direkt • Ingen inloggning i appen krävs" data-en="Secure payment • Receipt directly • No in-app login required">Säker betalning • Kvitto direkt • Ingen inloggning i appen krävs</div>
+ </div>
+ <footer>
+  <span data-sv="Byggd med" data-en="Built with">Byggd med</span> <span style="color:#FF5E5B">♥</span> <span data-sv="för alla med pappershögar • Portabel • Ingen spårning" data-en="for everyone with paper piles • Portable • No tracking">för alla med pappershögar • Portabel • Ingen spårning</span><br>
+  <span data-sv="Frågor? Öppna" data-en="Questions? Open">Frågor? Öppna</span> <a href="https://paypal.me/Rickard3dPrint" target="_blank" rel="noopener">PayPal</a> • <a href="https://ko-fi.com/tokke2" target="_blank" rel="noopener">Ko-fi</a> • <span data-sv="I appen:" data-en="In app:">I appen:</span> <span style="color:var(--muted)" data-sv="Hjälp → Stöd projektet" data-en="Help → Support project">Hjälp → Stöd projektet</span>
+ </footer>
+</div>
+<script>
+function setLang(l){
+  document.querySelectorAll('[data-sv]').forEach(function(el){
+    el.innerHTML = el.getAttribute(l === 'sv' ? 'data-sv' : 'data-en');
+  });
+  document.getElementById('sv').className = l === 'sv' ? 'on' : '';
+  document.getElementById('en').className = l === 'en' ? 'on' : '';
+  document.documentElement.lang = l;
+}
+</script>
+</body>
+</html>
