@@ -168,10 +168,15 @@ def config_dir() -> Path:
     """VAR allt rörande appen sparas - 100 % PORTABELT
     (ANVÄNDARORDER 2026-10-05: "ska funka överallt, även på usb").
 
-    Ordning: 1) PDFSORTER_HOME om användaren satt den. 2) APPMAPPEN -
-    regler, inställningar, historik, loggar m.m. följer med pdfsorter.py
-    vart den än liggger (USB, nätverksdisk, valfri mapp). 3) Fallback
-    till OS-platsen om appmappen är skrivskyddad.
+    Ordning: 1) PDFSORTER_HOME om användaren uttryckligen satt den.
+    2) ALLTID APPMAPPEN (användarorder 2026-10-16: "allt som skapas ska
+    hamna i undermappar av appmappen, inget sparas utanför"). Regler,
+    inställningar, historik, loggar m.m. följer med pdfsorter.py vart
+    den än ligger (USB, nätverksdisk, valfri mapp). Ingen tyst fallback
+    till %APPDATA%/hemkatalogen längre - är appmappen skrivskyddad är
+    det bättre att lagringen synligt misslyckas än att data hamnar på
+    ett ställe användaren aldrig hittar. Gamla OS-platsen läses bara
+    en gång som migrationskälla (se migrate_to_portable).
     """
     env = os.environ.get("PDFSORTER_HOME", "")
     p = _CONFIG_DIR_CACHE.get(env)
@@ -179,10 +184,8 @@ def config_dir() -> Path:
         return p
     if env:
         p = Path(env).expanduser()
-    elif _skrivbar(_app_dir()):
-        p = _app_dir()
     else:
-        p = _os_config_dir()
+        p = _app_dir()
     p.mkdir(parents=True, exist_ok=True)
     _CONFIG_DIR_CACHE[env] = p
     return p
@@ -530,6 +533,14 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "tesseract_path": "",        # manuell sökväg till tesseract.exe
     "learned_matching": True,    # N14: lärande klassificerare (kan stängas av)
     "swish_number": "0721817177",  # Swish-nummer för donations-QR (N15)
+    "check_updates": True,       # 2026-10-16: sök Git-uppdatering vid start
+    "auto_update": False,        # 2026-10-16: installera utan att fråga först
+    "ui_language": "sv",           # 1.1.0: gränssnittsspråk sv | en
+    "tag_pdf_metadata": True,      # 1.1.0: skriv kategori som PDF-metadata
+    "orgnr_lookup": False,         # 1.1.0: slå upp okända avsändare via nätet
+    "schedule_enabled": False,     # 1.1.0: schemalagd sortering
+    "schedule_time": "07:00",      # 1.1.0: klockslag för schemalagd sortering
+    "schedule_last_run": "",       # 1.1.0: datum senaste schemalagda körning
     "year_subfolder": True,      # N16: årsmapp från filens datum, automatiskt
     "action": "move",             # move | copy
     "on_conflict": "rename",      # rename | skip | overwrite
@@ -543,6 +554,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "min_text_chars": 0,         # för lite läst text -> fråga hellre
     "require_anchor": False,     # minst ett stödord i brevhuvud/filnamn
     "reject_recipient_only": True,   # neka när alla träffar är mottagarens
+    "require_anchor_or_strong": True,  # 2026-10-16: bara löptext flyttar aldrig
     "unmatched_folder": "",       # tom = lämna kvar filen i inmappen
     "ask_when_unsure": True,
     "popup_immediately": False,   # under bevakning: samla i kö i stället
@@ -832,8 +844,24 @@ _journal_lines = 0
 _HIST_MEM: Dict[str, Any] = {"sig": None, "events": None}  # mtime-cache
 
 
+_JOURNAL_FLYTTAD = False
+
+
 def _journal_path() -> Path:
-    return config_dir() / "history.journal"
+    """Historikjournalen bor i json/ som alla andra datafiler
+    (2026-10-16: inget i appmappens rot). En journal som ligger kvar i
+    roten från äldre versioner flyttas hit en gång."""
+    global _JOURNAL_FLYTTAD
+    ny = json_dir() / "history.journal"
+    if not _JOURNAL_FLYTTAD:
+        _JOURNAL_FLYTTAD = True
+        gammal = config_dir() / "history.journal"
+        try:
+            if gammal.is_file() and not ny.exists():
+                shutil.move(str(gammal), str(ny))
+        except OSError:
+            pass
+    return ny
 
 
 def _journal_write(line: str) -> None:
@@ -1182,7 +1210,6 @@ def build_matching_report(days: int = 10) -> str:
 
     total = len(recent)
     by = Counter(e.get("decided_by", "") for e in recent)
-    bycat = Counter(e.get("category", "(okänd)") for e in recent)
     ocr_count = sum(1 for e in recent if e.get("used_ocr"))
     with_date = sum(1 for e in recent if e.get("date"))
     no_source = sum(1 for e in recent if not e.get("date_source"))

@@ -3,6 +3,78 @@
 > ikonfiler (ArkivPiloten.ico/png), desktop.ini och bat-filen bär det
 > nya namnet; ws-mappen heter ArkivPiloten. Historiska kravtexter
 > nedan behåller sina originalord.
+>
+> **Leverans 1.2.0 (2026-10-16) — säkrare matchning, full installation,
+> en ikon överallt. Namnet ArkivPiloten behålls (användarbeslut).**
+> (a) Säkrare matchning: `_auto_blocker()` samlar alla beviskrav och
+> prövar även en ny vinnare innan lärd klassificerare/historik får byta
+> den; lärd profil ensam flyttar aldrig en fil (visas som förslag);
+> Normal+ kräver avsändarzon/starkt ID/flersidigt bevis - bara löptext
+> räcker aldrig; hårt golv på 12 lästa tecken utan bevisat ID;
+> SHA-256-fingeravtryck av analyserade byte kontrolleras i `apply()`/
+> `send_to_unmatched()` före flytt. Buggfix: `json_dir` saknades i
+> huvudfilens importer, så lärda klassificeraren aldrig kunde starta.
+> (b) Installation: bat-filen uppgraderar pip, installerar HELA
+> requirements.txt (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray,
+> pytesseract - pinnade) med retry + importkontroll, installerar
+> Tesseract (winget, swe+eng, bästa försök) och kör `--status` före
+> start. Appens PIP_PAKET utökat till samma fulla stack.
+> (c) Ikon: ny master-ikon `ArkivPiloten.png` (512px, PDF -> pil ->
+> tre färgade mappar) är enda källan överallt - fönster/tray via
+> `make_icon_image()` (kodritad reserv med samma motiv), genvägar/
+> autostart/Utforskaren via `ArkivPiloten.ico` (16-256px), README
+> och donationssidan.
+>
+> **Leverans 1.3.0 (2026-10-16) — allt i appmappen, autostart alla OS,
+> paket-/Python-uppdateringar, Git-autouppdatering.**
+> (a) Allt i undermappar: config_dir() faller aldrig tillbaka till
+> OS-plats (bara PDFSORTER_HOME eller appmappen; gamla OS-platsen är
+> enbart migrationskälla). history.journal -> json/, genererad ikon ->
+> icons/, Tesseract-installeraren -> temp/, bat-filens TEMP/TMP/
+> PIP_CACHE_DIR/install.log -> temp/, cache/pip resp. logs/ i appmappen.
+> (b) Autostart: Linux arkivpiloten.desktop (gamla pdfsorter.desktop
+> städas), macOS-plist loggar till logs/autostart.log, Windows får
+> Startup-mapp som reserv om registret nekar; autostart_status() för
+> --status/diagnostik; självläkande synk vid start som förut.
+> (c) Paket/Python: --install-packages (+ update_python_packages())
+> installerar hela requirements.txt med importkontroll; bat-filen
+> har winget-reserv för Python. Senaste Python via python.org som förut.
+> (d) Git-uppdatering: check_for_update() (api.github.com, versionsjämf.),
+> perform_update() laddar zip till temp/, packar upp i updates/staging
+> (zip-slip-skydd), validerar compile() + version, säkerhetskopierar
+> till backups/update_<tid>/, ersätter bara UPDATE_FILES atomiskt och
+> loggar updates/last_update.json. CLI --check-update/--update,
+> GUI-knapp i Hjälp-fliken + automatisk sökning vid start
+> (check_updates/auto_update i inställningarna).
+>
+> **Leverans 1.3.1 (2026-10-16) — kvalitetsrunda.** pyflakes-granskning
+> hittade samma buggklass som json_dir-fyndet: `search_tesseract`
+> användes i GUI:t men importerades aldrig (Sök datorn-knappen),
+> `shutil` saknades i systemmodulen (auto_install_tesseract dog direkt
+> på Windows) och `Dict` saknades i typing-importen. Alla fixade,
+> plus död kod (`bycat`) borttagen. Nytt `--check`-självtest i
+> huvudprogrammet (versionslikhet, hela importytan mot systemmodulen,
+> matchningsregressioner, ikon, autostart-status) som fångar klassen
+> permanent - det hittade direkt även saknade `DEFAULT_SETTINGS`.
+> End-to-end verifierat via CLI: faktura med org.nr -> Pilkington/<år>,
+> brev som bara nämner leverantören i löptext lämnas kvar.
+
+> **Leverans 1.1.0 (2026-10-16) — beställarens val 1, 6, 7 (ej zip), 9, 10.**
+> (1) Tvåspråkigt gränssnitt: `ui_language` sv/en, 102 översatta
+> widgettexter appliceras efter bygget (okända strängar står kvar på
+> svenska). (6) PDF-taggning: kategori skrivs som keywords/subject vid
+> varje sortering (`tag_pdf_metadata`, standard på) - arkivet blir
+> sökbart i Utforskaren/Acrobat. (7) Årsarkiv-export som ÖPPEN
+> mappstruktur per år + sökbar index.html + checksums.sha256, från
+> Historik-fliken eller `--export-archive MAPP` (kopierar, flyttar
+> aldrig). (9) Org.nr-uppslag via nätet för okända avsändare
+> (`orgnr_lookup`, standard AV): Luhn-validerat nummer slås upp och
+> föreslås i granskningsdialogen; `--lookup-orgnr` för CLI.
+> (10) Schemalagd sortering: `schedule_enabled`/`schedule_time`,
+> tick var 30 s i GUI:t, en körning/dag (`schedule_last_run`).
+> Verifierat: --check ALLT OK, taggning E2E (keywords "ArkivPiloten;
+> Pilkington"), export med index/checksummor, uppslag degraderar
+> tyst offline.
 
 # PDF Sorter — Specifikation
 

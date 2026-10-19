@@ -1,11 +1,17 @@
-# PDF Sorter - beroenden (REQ-N2).
-# SAMTLIGA beroenden är VALFRIA: appen startar utan dem och talar om i
-# statusraden vad som saknas. OCR kräver dessutom systemprogrammet Tesseract.
+# ArkivPiloten - ALLA Python-tillagg (REQ-N2, utokad 2026-10-16).
+# Installeraren (bat-filen) och appen sjalv installerar hela den har
+# listan - inte bara ett minimum - sa att lasning, OCR och systemfalt
+# fungerar fullt ut direkt. Appen startar anda om nagot paket saknas
+# och talar da om i statusraden vad som saknas.
 #
-# Testad kombination i leveransmiljön 2026-08-26:
-pypdf==6.16.2
+# OCR kraver dessutom systemprogrammet Tesseract (med spraken swe+eng)
+# - det installeras av bat-filen via winget, eller fran appen via
+# Hjalp -> Komplettera installationen.
+#
+# Pinnade versioner (senast testade kombinationen):
+PyMuPDF==1.28.2
+pypdf==6.21.0
+pdfminer.six==20260107
 Pillow==12.3.0
-
-# Full stack för bästa läsning, systemfält m.m. - installera vid behov:
-#   pip install pymupdf pypdf pystray pillow pytesseract
-# (Versioner pinas per installationsmiljö; appens reservvägar gäller alltid.)
+pystray==0.19.5
+pytesseract==0.3.13
