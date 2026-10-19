@@ -3221,6 +3221,338 @@ class ConflictDialog:
 
 
 # --------------------------------------------------------------------------
+# REGELTESTARE — klistra text och se vinnare direkt (207)
+# --------------------------------------------------------------------------
+# Uppdateras från högerklicksmenyn i tray också: App._open_rule_tester()
+# postas via App._post så att tray-tråden aldrig rör Tk direkt.
+# Design: 10-sekunders-trimning utan att skapa filer — klistra texten ur
+# PDF:en, ange valfritt filnamn, tryck Testa och se vinnare/poäng/zon.
+
+class RuleTesterDialog:
+    """Regeltestare 207: torrkör matchningen på inklistrad text.
+
+    Visar samma poängsättning som den riktiga sorteringen (score_text +
+    decide) men utan att läsa fil från disk. Användaren kan trimma
+    stödord på 10 sekunder: klistra → Testa → se vad som vinner och
+    varför — och justera reglerna därefter.
+    """
+
+    def __init__(self, parent, app):
+        tk, ttk, filedialog, messagebox, simpledialog = _tk()
+        self.tk, self.ttk = tk, ttk
+        self.filedialog, self.messagebox = filedialog, messagebox
+        self.app = app
+        self.parent = parent
+        try:
+            C = app.C
+            theme = app.theme
+        except Exception:
+            C = COLORS
+            theme = None
+        self.C = C
+        self.theme = theme
+
+        self.win = tk.Toplevel(parent)
+        self.win.configure(background=C["bg"])
+        self.win.after(80, lambda: dark_titlebar(
+            self.win, bool(getattr(theme, "dark", False)) if theme else False))
+        self.win.title("Regeltestare — klistra text och se vinnare")
+        self.win.transient(parent)
+        _fit_geometry(self.win, 960, 720, 860, 600)
+        self.win.columnconfigure(0, weight=1)
+        self.win.rowconfigure(2, weight=1)
+
+        pad = dict(padx=14, pady=(10, 0))
+
+        # -- topp: filnamnshjälp -----------------------------------------
+        top = ttk.Frame(self.win, style="Card.TFrame")
+        top.grid(row=0, column=0, sticky="ew", **pad)
+        top.columnconfigure(1, weight=1)
+        ttk.Label(top, text="Filnamn (valfritt, påverkar zonvikten):",
+                  style="Card.TLabel").grid(row=0, column=0, sticky="w",
+                                            padx=12, pady=(10, 2))
+        self.var_filename = tk.StringVar(value="")
+        fn_entry = ttk.Entry(top, textvariable=self.var_filename)
+        fn_entry.grid(row=0, column=1, sticky="ew", padx=(6, 12), pady=(10, 2))
+        # Hjälptext under
+        ttk.Label(top, text="Tips: döper du filen i förväg (t.ex. Pilkington_556033-9086.pdf) ser du filnamns-bonus +0,1 när namnet bekräftas i texten.",
+                  style="CardMuted.TLabel", wraplength=900, justify="left"
+                  ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+
+        # -- textrutan ------------------------------------------------------
+        mid = ttk.LabelFrame(self.win, text="  Klistra text här (ur PDF:ens textlager eller OCR)  ")
+        mid.grid(row=1, column=0, sticky="nsew", padx=14, pady=(8, 0))
+        mid.columnconfigure(0, weight=1)
+        mid.rowconfigure(0, weight=1)
+        self.text_in = tk.Text(mid, wrap="word", height=12, undo=True,
+                                font=(theme.f_mono[0] if theme and hasattr(theme, "f_mono") else "Courier", 9),
+                                background=C["surface"], foreground=C["text"],
+                                selectbackground=C["accent_light"],
+                                insertbackground=C["text"],
+                                padx=8, pady=8, highlightthickness=0, borderwidth=0)
+        self.text_in.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+        sb = ttk.Scrollbar(mid, orient="vertical", command=self.text_in.yview)
+        sb.grid(row=0, column=1, sticky="ns", pady=8, padx=(0, 8))
+        self.text_in.configure(yscrollcommand=sb.set)
+        # Ctrl+A i textrutan
+        self.text_in.bind("<Control-a>", lambda e: (self.text_in.tag_add("sel", "1.0", "end"), "break"))
+        self.text_in.bind("<Control-A>", lambda e: (self.text_in.tag_add("sel", "1.0", "end"), "break"))
+
+        # -- knapprad -------------------------------------------------------
+        btn_row = ttk.Frame(self.win)
+        btn_row.grid(row=2, column=0, sticky="ew", padx=14, pady=6)
+        btn_row.columnconfigure(0, weight=1)
+        ttk.Button(btn_row, text="Klistra från urklipp",
+                   command=self._paste).grid(row=0, column=0, sticky="w")
+        ttk.Button(btn_row, text="Rensa",
+                   command=self._clear).grid(row=0, column=1, padx=6)
+        self.btn_test = ttk.Button(btn_row, text="Testa  ▶", style="Accent.TButton",
+                                   command=self._run)
+        self.btn_test.grid(row=0, column=2, padx=12)
+        ttk.Label(btn_row, text="Enter = Testa   Esc = Stäng",
+                  style="Muted.TLabel").grid(row=0, column=3, sticky="e")
+
+        # -- resultat -------------------------------------------------------
+        res = ttk.LabelFrame(self.win, text="  Resultat — poäng per kategori  ")
+        res.grid(row=3, column=0, sticky="nsew", padx=14, pady=(8, 0))
+        res.columnconfigure(0, weight=1)
+        res.rowconfigure(1, weight=1)
+        self.win.rowconfigure(3, weight=1)
+
+        # Beslutstext över tabellen
+        self.lbl_decision = ttk.Label(res, text="Klistra text och tryck Testa — resultatet visas här.",
+                                      style="Card.TLabel", wraplength=900, justify="left")
+        self.lbl_decision.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 0))
+
+        cols = ("rank", "kategori", "poang", "ord", "zon", "bevis")
+        self.tree = ttk.Treeview(res, columns=cols, show="headings", height=10)
+        # Kolumnbredder optimerade för 960px
+        T = theme
+        try:
+            T.fit_columns(self.tree, (
+                ("rank", "#", 4, "center", False),
+                ("kategori", "KATEGORI", 16, "w", False),
+                ("poang", "POÄNG", 7, "center", False),
+                ("ord", "MATCHADE ORD", 26, "w", True),
+                ("zon", "ZON (var)", 22, "w", True),
+                ("bevis", "BEVIS", 6, "center", False)))
+        except Exception:
+            for c, w in (("rank", 40), ("kategori", 140), ("poang", 60), ("ord", 260), ("zon", 220), ("bevis", 60)):
+                self.tree.heading(c, text=c)
+                self.tree.column(c, width=w, stretch=(c in ("ord", "zon")))
+        self.tree.grid(row=1, column=0, sticky="nsew", padx=(8, 0), pady=6)
+        ysb = ttk.Scrollbar(res, orient="vertical", command=self.tree.yview)
+        ysb.grid(row=1, column=1, sticky="ns", pady=6)
+        self.tree.configure(yscrollcommand=ysb.set)
+        try:
+            if T:
+                T.zebra(self.tree)
+        except Exception:
+            pass
+        # Dubbelklick = kopiera rad
+        self.tree.bind("<Double-1>", lambda e: self._copy_selected())
+
+        # -- botten ---------------------------------------------------------
+        bot = ttk.Frame(self.win)
+        bot.grid(row=4, column=0, sticky="ew", padx=14, pady=(6, 12))
+        bot.columnconfigure(0, weight=1)
+        ttk.Button(bot, text="Kopiera resultat",
+                   command=self._copy_all).grid(row=0, column=0, sticky="w")
+        ttk.Button(bot, text="Stäng",
+                   command=self._close).grid(row=0, column=1, sticky="e")
+
+        self.win.bind("<Return>", lambda e: self._run())
+        self.win.bind("<Escape>", lambda e: self._close())
+        self.win.protocol("WM_DELETE_WINDOW", self._close)
+        # Fokusera textrutan direkt
+        self.win.after(120, lambda: self.text_in.focus_set())
+        # Om urklipp redan innehåller text, föreslå klistra
+        self.win.after(200, self._prefill_from_clipboard)
+
+        # Logga öppning
+        try:
+            session_log("regeltestare", "Regeltestare öppnad"
+                        + (" från tray" if getattr(app, "_rule_tester_from_tray", False) else ""))
+        except Exception:
+            pass
+
+    def _prefill_from_clipboard(self) -> None:
+        try:
+            txt = self.win.clipboard_get()
+            if txt and isinstance(txt, str) and 10 < len(txt.strip()) < 20000:
+                # Fyll inte över befintlig inmatning
+                if not self.text_in.get("1.0", "end-1c").strip():
+                    # Visa som placeholder-hint i beslutstexten
+                    self.lbl_decision.configure(text="Urklipp upptäckt — tryck Klistra från urklipp eller Ctrl+V och Testa.")
+        except Exception:
+            pass
+
+    def _paste(self) -> None:
+        try:
+            txt = self.win.clipboard_get()
+            if txt:
+                self.text_in.delete("1.0", "end")
+                self.text_in.insert("1.0", txt)
+                self.text_in.focus_set()
+                self._run()
+        except Exception as exc:
+            self.messagebox.showwarning(APP_NAME, f"Kunde inte läsa urklipp:\n{exc}", parent=self.win)
+
+    def _clear(self) -> None:
+        self.text_in.delete("1.0", "end")
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+        self.lbl_decision.configure(text="Rensad — klistra ny text och tryck Testa.")
+        self.var_filename.set("")
+
+    def _run(self) -> None:
+        text = self.text_in.get("1.0", "end-1c").strip()
+        if not text:
+            self.messagebox.showinfo(APP_NAME, "Klistra in text från PDF:en först.", parent=self.win)
+            return
+        if len(text) < 3:
+            self.lbl_decision.configure(text="Texten är för kort för att testa — klistra in minst några ord.")
+            return
+        filename = (self.var_filename.get() or "").strip() or "test.pdf"
+        # Säkerställ filändelse för zonvikten (filename boost kräver .pdf-namn)
+        if "." not in filename:
+            filename += ".pdf"
+        try:
+            # Bygg en fejk-Extraction som decide() förstår — utan fil-I/O.
+            ext = Extraction(path=Path(filename))
+            ext.text = text
+            ext.filename_text = filename
+            # Dela första 2 rader → header/sender, sista 2 → footer för realistisk zonvikt
+            lines = [l for l in text.splitlines() if l.strip()]
+            if lines:
+                head = "\n".join(lines[:2])
+                foot = "\n".join(lines[-2:])
+                ext.metadata["_page_header"] = head
+                ext.metadata["_page_footer"] = foot
+            # token_pages tom — flersidesbonus kräver sidräkning som vi inte har i inklistrad text
+
+            # Kör scoring + decision (samma kodväg som riktig sortering)
+            scores = score_text(self.app.rules, ext.combined, filename,
+                                ext.page_header, ext.page_footer,
+                                getattr(ext, "token_pages", None), body=text)
+            dec = decide(self.app.rules, ext, self.app.settings)
+
+            # Fyll tabellen
+            for row in self.tree.get_children():
+                self.tree.delete(row)
+            if not scores:
+                self.tree.insert("", "end", values=("", "Ingen träff", "", "Ingen kategori matchade", "", ""))
+            else:
+                for i, s in enumerate(scores):
+                    # Zon-per-ord för de första 4 matchningarna
+                    zon_str = ", ".join(f"{w} {ZONE_LABELS.get(s.zone_of(w), s.zone_of(w))}" for w in s.matched[:4])
+                    if len(s.matched) > 4:
+                        zon_str += f" +{len(s.matched)-4} till"
+                    bevis = ""
+                    if s.is_conclusive:
+                        bevis = "★ säkert ID"
+                    elif s.has_strong:
+                        bevis = "● starkt"
+                    elif s.only_recipient:
+                        bevis = "mottagare"
+                    # Multisidesbonus visas som parentes
+                    if getattr(s, "multipage", None):
+                        zon_str += f"  [flersidig: {', '.join(s.multipage[:2])}]"
+                    self.tree.insert("", "end", values=(
+                        i + 1, s.name, f"{s.score:g}", ", ".join(s.matched[:6]), zon_str, bevis))
+
+            # Beslutstext
+            if dec.status == "auto" and dec.best:
+                best = dec.best
+                txt = f"✓ AUTO — {best.name} vinner med {best.score:g} poäng. Filen skulle flyttas direkt."
+                if dec.reason:
+                    txt += f"  ({dec.reason})"
+                # Förklara bevisblocker om nära gräns
+                if best.is_conclusive:
+                    txt += f"  Säker: {', '.join(best.conclusive[:2])} står som avsändar-ID."
+                style = "ok"
+            elif dec.status == "ask":
+                best = dec.best
+                if best:
+                    # Försök förklara blocker
+                    blocker = _auto_blocker(best, self.app.rules, effective_thresholds(self.app.settings), len(text))
+                    reason = dec.reason or blocker or "för svaga bevis"
+                    txt = f"❓ FRÅGA — {best.name} leder med {best.score:g} p, men: {reason}."
+                    if len(dec.scores) > 1:
+                        txt += f" Tvåa: {dec.scores[1].name} {dec.scores[1].score:g} p."
+                    if getattr(dec, "learned_hint", None):
+                        txt += f"  (lärd hint: {dec.learned_hint[0]})"
+                    style = "warn"
+                else:
+                    txt = f"❓ FRÅGA — {dec.reason or 'Ingen kategori matchade.'}"
+                    if getattr(dec, "learned_hint", None):
+                        txt += f"  (lärd hint: {dec.learned_hint[0]})"
+                    style = "warn"
+            elif dec.status == "error":
+                txt = f"⚠ FEL — {dec.reason or 'Kunde inte bedöma texten.'}"
+                style = "err"
+            else:
+                txt = f"{dec.status}: {dec.reason}"
+                style = "info"
+            self.lbl_decision.configure(text=txt)
+            try:
+                session_log("regeltestare", f"Test: '{filename}' → {dec.status} "
+                            f"{(dec.best.name + ' ' + str(dec.best.score)) if dec.best else ''} "
+                            f"({len(scores)} kandidater) — {txt[:120]}")
+            except Exception:
+                pass
+        except Exception as exc:
+            self.messagebox.showerror(APP_NAME, f"Regeltestaren kunde inte köras:\n{exc}", parent=self.win)
+            try:
+                session_error("regeltestare", exc)
+            except Exception:
+                pass
+
+    def _copy_selected(self) -> None:
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        txt = "  |  ".join(str(v) for v in vals)
+        try:
+            self.win.clipboard_clear()
+            self.win.clipboard_append(txt)
+            self.lbl_decision.configure(text=f"Kopierad: {txt[:120]}")
+        except Exception:
+            pass
+
+    def _copy_all(self) -> None:
+        try:
+            rows = []
+            rows.append(f"Regeltestare — {self.var_filename.get() or 'test.pdf'} — {APP_NAME} {APP_VERSION}")
+            rows.append(f"Beslut: {self.lbl_decision.cget('text')}")
+            rows.append("")
+            rows.append("RANK | KATEGORI | POÄNG | MATCHADE ORD | ZON | BEVIS")
+            rows.append("-" * 80)
+            for item in self.tree.get_children():
+                vals = self.tree.item(item, "values")
+                rows.append(" | ".join(str(v) for v in vals))
+            if len(rows) <= 4:
+                rows.append("(ingen data — kör Testa först)")
+            txt = "\n".join(rows)
+            self.win.clipboard_clear()
+            self.win.clipboard_append(txt)
+            try:
+                session_log("regeltestare", "Resultat kopierat till urklipp")
+            except Exception:
+                pass
+            self.lbl_decision.configure(text="Resultat kopierat — klistra in i t.ex. anteckningar för att jämföra före/efter.")
+        except Exception as exc:
+            self.messagebox.showwarning(APP_NAME, f"Kunde inte kopiera:\n{exc}", parent=self.win)
+
+    def _close(self) -> None:
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------
 # Huvudfönstret
 # --------------------------------------------------------------------------
 
@@ -7153,6 +7485,48 @@ class App:
     def _sync_tray(self) -> None:
         if self.tray:
             self.tray.refresh()
+
+    # -- 207 Regeltestare (även från tray-högerklick) --------------------
+    def _open_rule_tester(self) -> None:
+        """Öppna Regeltestare-dialogen — även från tray-menyn."""
+        # Om en tester redan är öppen, lyft den i stället för ny
+        dlg = getattr(self, "_rule_tester_dialog", None)
+        try:
+            if dlg is not None and getattr(dlg, "win", None) is not None and dlg.win.winfo_exists():
+                try:
+                    dlg.win.lift()
+                    dlg.win.focus_set()
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+        # Markera att öppningen kom ev. från tray (för logg)
+        self._rule_tester_from_tray = True
+        try:
+            self._rule_tester_dialog = RuleTesterDialog(self.root, self)
+            # Rensa markören när dialogen stängs
+            orig_close = self._rule_tester_dialog._close
+            def _wrapped():
+                try:
+                    orig_close()
+                finally:
+                    self._rule_tester_from_tray = False
+                    # Låt referensen ligga kvar men win är borta — nästa öppning skapar ny
+            self._rule_tester_dialog._close = _wrapped
+            try:
+                self._rule_tester_dialog.win.bind("<Destroy>", lambda e: setattr(self, "_rule_tester_from_tray", False) if e.widget is self._rule_tester_dialog.win else None)
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                session_error("regeltestare", exc)
+            except Exception:
+                pass
+            self.messagebox.showerror(APP_NAME, f"Kunde inte öppna Regeltestaren:\n{exc}", parent=self.root)
+        finally:
+            # Nollställ efter kort tid om dialogen lever kvar (annars loggas fel källa)
+            self.root.after(2000, lambda: setattr(self, "_rule_tester_from_tray", False))
 
     def _notify(self, message: str) -> None:
         if self.tray and self.settings.get("notify", True):

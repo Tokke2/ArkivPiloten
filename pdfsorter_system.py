@@ -1268,7 +1268,13 @@ class TrayIcon:
         def watching(_=None) -> bool:
             return bool(self.app.watcher and self.app.watcher.running)
 
-        return Menu(
+        # 207: Regeltestare nås även från tray-högerklick (spec + beställning)
+        try:
+            har_tester = hasattr(self.app, "_open_rule_tester")
+        except Exception:
+            har_tester = False
+
+        items = [
             Item("Visa fönster", lambda: self.app._post(self.app.show_window),
                  default=True),
             Menu.SEPARATOR,
@@ -1277,9 +1283,16 @@ class TrayIcon:
                  checked=watching),
             Item(self._queue_label, lambda: self.app._post(self.app.show_review)),
             Menu.SEPARATOR,
+        ]
+        if har_tester:
+            items.append(
+                Item("Regeltestare…", lambda: self.app._post(self.app._open_rule_tester)))
+            items.append(Menu.SEPARATOR)
+        items += [
             Item("Öppna utmappen", lambda: self.app._post(self.app.open_output)),
             Item("Avsluta", lambda: self.app._post(self.app.quit_app)),
-        )
+        ]
+        return Menu(*items)
 
     def _queue_label(self, _=None) -> str:
         n = len(self.app.queue)
