@@ -33,12 +33,14 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 __all__ = [
     "configure",
@@ -47,7 +49,11 @@ __all__ = [
     "brand_window", "set_app_user_model_id",
     # autostart och genvägar
     "autostart_supported", "autostart_enabled", "set_autostart",
-    "sync_autostart", "autostart_up_to_date",
+    "sync_autostart", "autostart_up_to_date", "autostart_status",
+    "icon_file_path",
+    # uppdatering från Git + Python-paket (2026-10-16)
+    "check_for_update", "perform_update", "update_python_packages",
+    "UPDATE_REPO", "UPDATE_BRANCH",
     "create_desktop_shortcut", "install_helpers",
     # systemfält
     "tray_available", "TrayIcon",
@@ -88,26 +94,13 @@ def _mod_versions_line() -> str:
 
 
 def _default_config_dir() -> Path:
-    # Samma regel som datamodulen (portabel 2026-10-05): PDFSORTER_HOME
-    # vinner, annars APPMAPPEN om skrivbar, annars OS-plats - så att
+    # Samma regel som datamodulen (2026-10-16): PDFSORTER_HOME vinner,
+    # annars ALLTID APPMAPPEN - inget sparas utanför den, så att
     # fristående körningar (--diag m.fl.) och appen alltid enas.
     env = os.environ.get("PDFSORTER_HOME")
     if env:
         return Path(env).expanduser()
-    hem = Path(__file__).resolve().parent
-    try:
-        t = hem / ".pdfsorter_write_test"
-        t.write_text("ok", encoding="utf-8")
-        t.unlink()
-        return hem
-    except OSError:
-        pass
-    if sys.platform.startswith("win"):
-        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        return Path(base) / "ArkivPiloten"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "ArkivPiloten"
-    return Path.home() / ".config" / "pdfsorter"
+    return Path(__file__).resolve().parent
 
 
 #: Sätts av huvudfilen via configure(). Innan dess används en rimlig
@@ -222,20 +215,27 @@ def _icon_detailed(S: int = 256):
         d.rounded_rectangle([x0 * k, y0 * k, x1 * k, y1 * k],
                             radius=max(1, int(radius * k)), fill=fill)
 
-    # Dokumentet högst upp
-    r(96, 22, 160, 100, 12, ICON_PAPER)
-    r(108, 38, 148, 58, 6, ICON_ACCENT)      # röd PDF-flik
-    r(108, 70, 144, 80, 5, ICON_INK)         # en textrad
+    # Dokumentet högst upp (samma motiv som master-ikonen ArkivPiloten.png:
+    # PDF-blad -> pil -> tre färgade mappar)
+    r(92, 18, 164, 104, 12, ICON_PAPER)
+    # Vikt hörn uppe till höger
+    d.polygon([(140, 18), (164, 42), (140, 42)], fill=(206, 216, 232))
+    r(104, 44, 152, 66, 6, ICON_ACCENT)      # rött PDF-band
+    r(106, 76, 146, 86, 5, ICON_INK)         # en textrad
 
-    # Stam och förgrening
-    r(118, 100, 138, 136, 9, ICON_PAPER)
-    r(40, 128, 216, 150, 11, ICON_PAPER)
+    # Nedåtpil: dokumentet delas ut till mapparna
+    d.polygon([(120, 104), (136, 104), (136, 122), (146, 122),
+               (128, 142), (110, 122), (120, 122)], fill=ICON_PAPER)
+
+    # Förgrening
+    r(40, 140, 216, 158, 11, ICON_PAPER)
     for x in (40, 118, 196):
-        r(x, 142, x + 20, 176, 9, ICON_PAPER)
+        r(x, 150, x + 20, 178, 9, ICON_PAPER)
 
-    # De tre målmapparna
+    # De tre målmapparna (med mapptungor, som i master-ikonen)
     for x, col in zip((20, 98, 176), ICON_TARGETS):
-        r(x, 180, x + 60, 234, 14, col)
+        r(x + 4, 172, x + 34, 188, 6, col)   # mapptunga
+        r(x, 182, x + 60, 236, 14, col)
     return img
 
 
@@ -259,26 +259,59 @@ def _icon_simple(S: int = 64):
     # Bladet: bredare, utan textrader
     r(88, 20, 168, 104, 14, ICON_PAPER)
     r(104, 40, 152, 66, 8, ICON_ACCENT)
-    # Kraftig balk, ingen stam (den försvinner ändå)
-    r(32, 124, 224, 152, 13, ICON_PAPER)
+    # Kraftig nedåtpil + balk, ingen stam (den försvinner ändå)
+    d.polygon([(116, 104), (140, 104), (140, 118), (150, 118),
+               (128, 140), (106, 118), (116, 118)], fill=ICON_PAPER)
+    r(32, 134, 224, 158, 13, ICON_PAPER)
     for x in (32, 114, 196):
-        r(x, 146, x + 28, 178, 11, ICON_PAPER)
+        r(x, 152, x + 28, 180, 11, ICON_PAPER)
     # Tre feta mål
     for x, col in zip((14, 96, 178), ICON_TARGETS):
         r(x, 178, x + 64, 238, 15, col)
     return img
 
 
+#: Master-ikonen som levereras bredvid programfilerna. EN ikon överallt
+#: (2026-10-16): samma ArkivPiloten.png används i fönster, systemfält,
+#: genvägar, autostart, Utforskaren (via ArkivPiloten.ico), README och
+#: donationssidan. Cachen håller den inladdade 512px-bilden per körning.
+_MASTER_ICON: Any = None
+_MASTER_ICON_TRIED = False
+
+
+def _master_icon():
+    """Ladda master-ikonen ArkivPiloten.png bredvid den här filen.
+
+    Returnerar en PIL-bild eller None - saknas filen (t.ex. om bara
+    .py-filerna kopierats) ritas ikonen i kod i stället, med samma motiv.
+    """
+    global _MASTER_ICON, _MASTER_ICON_TRIED
+    if _MASTER_ICON_TRIED:
+        return _MASTER_ICON
+    _MASTER_ICON_TRIED = True
+    try:
+        from PIL import Image
+        path = Path(__file__).resolve().parent / "ArkivPiloten.png"
+        with Image.open(path) as im:
+            im.load()
+            _MASTER_ICON = im.convert("RGBA")
+    except Exception:
+        _MASTER_ICON = None
+    return _MASTER_ICON
+
+
 def make_icon_image(size: int = 256, active: bool = False,
                     badge: int = 0) -> Any:
     """Appikonen i valfri storlek.
 
+    Master-ikonen (ArkivPiloten.png) är primär så att exakt samma ikon
+    syns överallt; den kodritade ikonen är reserv med samma motiv.
     Under 32 punkter används ett förenklat motiv - se `_icon_simple()`.
     `active=True` lägger till en grön prick (bevakning på); `badge>0`
     ritar köantalet som en liten bricka (design: synlig kö utan att öppna).
     """
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageEnhance
     except Exception:
         return None
 
@@ -287,16 +320,24 @@ def make_icon_image(size: int = 256, active: bool = False,
     if cached is not None:
         return cached.copy()
 
-    # 32 punkter och under: den detaljerade stammen blir tunnare än en
-    # bildpunkt och textraden smetar ihop med PDF-fliken.
-    liten = size <= 32
-    # Rita alltid stort och skala ned: kantutjämningen blir mycket bättre
-    # än att rita direkt i målstorleken.
-    bas = 128 if liten else 256
-    img = _icon_simple(bas) if liten else _icon_detailed(bas)
-
-    if size != bas:
-        img = img.resize((size, size), Image.LANCZOS)
+    master = _master_icon()
+    if master is not None:
+        img = master.resize((size, size), Image.LANCZOS)
+        if size <= 32:
+            # Små storlekar: lite extra skärpa så att PDF-bandet och
+            # mapparna fortfarande går att urskilja i systemfältet.
+            img = ImageEnhance.Sharpness(img).enhance(1.6)
+            img = ImageEnhance.Contrast(img).enhance(1.05)
+    else:
+        # 32 punkter och under: den detaljerade stammen blir tunnare än
+        # en bildpunkt och textraden smetar ihop med PDF-fliken.
+        liten = size <= 32
+        # Rita alltid stort och skala ned: kantutjämningen blir mycket
+        # bättre än att rita direkt i målstorleken.
+        bas = 128 if liten else 256
+        img = _icon_simple(bas) if liten else _icon_detailed(bas)
+        if size != bas:
+            img = img.resize((size, size), Image.LANCZOS)
 
     # Tunn ljus kant så att ikonen inte försvinner mot mörka aktivitetsfält
     # och titelrader (design: synlig i både ljust och mörkt läge).
@@ -405,8 +446,7 @@ def ensure_icon_file() -> Optional[Path]:
     global _ICON_FILE_OK
     if _ICON_FILE_OK is not None:
         return _ICON_FILE_OK
-    name = "arkivpiloten.ico" if sys.platform.startswith("win") else "arkivpiloten.png"
-    path = config_dir() / name
+    path = icon_file_path()
     ok = path.exists() and path.stat().st_size > 0
     if ok:
         # Lätt validering: kan Pillow öppna filen? Nej = rita om.
@@ -420,6 +460,13 @@ def ensure_icon_file() -> Optional[Path]:
         path = write_icon_file(path) or path
     _ICON_FILE_OK = path if path.exists() else None
     return _ICON_FILE_OK
+
+
+def icon_file_path() -> Path:
+    """Genererad ikonfil bor i appmappens icons/-undermapp
+    (2026-10-16: allt som skapas hamnar i undermappar)."""
+    name = "arkivpiloten.ico" if sys.platform.startswith("win") else "arkivpiloten.png"
+    return config_dir() / "icons" / name
 
 
 #: Eget program-ID för Windows. Sätts före första fönstret så att
@@ -552,12 +599,12 @@ def auto_install_tesseract() -> Tuple[bool, str]:
     # 2) tyst installer som fallback
     if not _hitta_tesseract_mapp():
         try:
-            import tempfile
             session_log("tillägg", f"Laddar ner {TESSERACT_SETUP_URL}")
-            med_tmp = tempfile.NamedTemporaryFile(
-                suffix=".exe", delete=False, prefix="tesseract-setup-")
-            med_tmp.close()
-            setup = Path(med_tmp.name)
+            # Nedladdning till appmappens temp/ (2026-10-16: inget
+            # utanför appmappen) i stället för systemets temp-mapp.
+            tmpdir = config_dir() / "temp"
+            tmpdir.mkdir(parents=True, exist_ok=True)
+            setup = tmpdir / "tesseract-setup.exe"
             _ladda_ner(TESSERACT_SETUP_URL, setup)
             session_log("tillägg", "Kör tyst installation (/S) - eventuellt "
                         "UAC-fönster dyker upp")
@@ -712,7 +759,67 @@ def _win_run_key():
 
 def _linux_autostart_file() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "autostart" / "arkivpiloten.desktop"
+
+
+def _linux_legacy_autostart_file() -> Path:
+    """Gamla namnet från PDF Sorter-tiden - känns igen och städas bort
+    så att inte två poster startar appen (2026-10-16)."""
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "autostart" / "pdfsorter.desktop"
+
+
+def _win_startup_lnk() -> Path:
+    """Windows reservväg: genväg i Startup-mappen (om registret nekar)."""
+    appdata = os.environ.get("APPDATA") or str(
+        Path.home() / "AppData" / "Roaming")
+    return (Path(appdata) / "Microsoft" / "Windows" / "Start Menu"
+            / "Programs" / "Startup" / f"{APP_NAME}.lnk")
+
+
+def _win_make_lnk(target: Path) -> Tuple[bool, str]:
+    """Skapa en .lnk-genväg till appen (delas av skrivbord + Startup)."""
+    script = _main_script
+    try:
+        icon = ensure_icon_file()
+        exe = sys.executable or "python.exe"
+        exe_w = Path(exe).with_name("pythonw.exe")
+        if exe_w.exists():
+            exe = str(exe_w)
+        ps = (
+            f"$s=(New-Object -COM WScript.Shell).CreateShortcut("
+            f"'{_ps_quote(target)}');"
+            f"$s.TargetPath='{_ps_quote(exe)}';"
+            f"$s.Arguments='\"{_ps_quote(script)}\" --tray';"
+            f"$s.WorkingDirectory='{_ps_quote(script.parent)}';"
+            + (f"$s.IconLocation='{_ps_quote(icon)}';" if icon else "") +
+            "$s.Save()")
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       check=True, capture_output=True, timeout=30,
+                       **_win_dold())
+        return True, str(target)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def autostart_status() -> dict:
+    """Samlad autostart-status för alla OS (statusrader/diagnostik)."""
+    entry = ""
+    try:
+        if sys.platform.startswith("win"):
+            entry = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+                     f"\{APP_NAME} (reserv: {_win_startup_lnk()})")
+        elif sys.platform == "darwin":
+            entry = str(_mac_plist_file())
+        else:
+            entry = str(_linux_autostart_file())
+    except Exception:
+        pass
+    return {"platform": sys.platform,
+            "supported": autostart_supported(),
+            "enabled": autostart_enabled(),
+            "klass": classify_autostart(),
+            "entry": entry}
 
 
 def _mac_plist_file() -> Path:
@@ -729,10 +836,11 @@ def autostart_enabled() -> bool:
                     winreg.QueryValueEx(key, APP_NAME)
                     return True
                 except FileNotFoundError:
-                    return False
+                    return _win_startup_lnk().exists()
         if sys.platform == "darwin":
             return _mac_plist_file().exists()
-        return _linux_autostart_file().exists()
+        return (_linux_autostart_file().exists()
+                or _linux_legacy_autostart_file().exists())
     except Exception:
         return False
 
@@ -750,7 +858,12 @@ def _autostart_current() -> Optional[str]:
         if sys.platform == "darwin":
             p = _mac_plist_file()
             return p.read_text(encoding="utf-8") if p.exists() else None
+        if sys.platform.startswith("win"):
+            lnk = _win_startup_lnk()
+            return f"startup-folder: {lnk}" if lnk.exists() else None
         p = _linux_autostart_file()
+        if not p.exists():
+            p = _linux_legacy_autostart_file()
         return p.read_text(encoding="utf-8") if p.exists() else None
     except Exception:
         return None
@@ -779,6 +892,11 @@ def classify_autostart() -> str:
     cur = _autostart_current()
     if cur is None:
         return "missing"
+    if cur.startswith("startup-folder:"):
+        return "correct"      # reservvägen: genvägen finns = påslagen
+    if (sys.platform.startswith("linux")
+            and not _linux_autostart_file().exists()):
+        return "stale_path"   # bara gamla pdfsorter.desktop -> skriv om
     cmd, _workdir = _launch_target()
 
     def norm(s: str) -> str:
@@ -962,23 +1080,35 @@ def set_autostart(enabled: bool) -> Tuple[bool, str]:
 
     def _do():
         if sys.platform.startswith("win"):
-            import winreg
-            with _win_run_key() as key:
-                if enabled:
-                    winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
-                    # Namnbytet 2026-10-06: städa gamla värdet så att
-                    # autostarten inte ligger dubbelt.
-                    for gammalt in ("PDF Sorter",):
+            try:
+                import winreg
+                with _win_run_key() as key:
+                    if enabled:
+                        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
+                        # Namnbytet 2026-10-06: städa gamla värdet så att
+                        # autostarten inte ligger dubbelt.
+                        for gammalt in ("PDF Sorter",):
+                            try:
+                                winreg.DeleteValue(key, gammalt)
+                            except OSError:
+                                pass
+                    else:
                         try:
-                            winreg.DeleteValue(key, gammalt)
-                        except OSError:
+                            winreg.DeleteValue(key, APP_NAME)
+                        except FileNotFoundError:
                             pass
-                else:
-                    try:
-                        winreg.DeleteValue(key, APP_NAME)
-                    except FileNotFoundError:
-                        pass
-            return True, "Registret uppdaterat"
+                if not enabled:
+                    _win_startup_lnk().unlink(missing_ok=True)
+                return True, "Registret uppdaterat"
+            except Exception:
+                # Reservväg (2026-10-16): nekar registret (policy/AV)
+                # används Startup-mappen i stället - autostart ska
+                # fungera på alla Windows-maskiner, inte bara de snälla.
+                if enabled:
+                    ok, msg = _win_make_lnk(_win_startup_lnk())
+                    return ok, f"Startup-mappen (registerreserv): {msg}"
+                _win_startup_lnk().unlink(missing_ok=True)
+                return True, "Startup-genväg borttagen"
 
         if sys.platform == "darwin":
             plist = _mac_plist_file()
@@ -986,6 +1116,10 @@ def set_autostart(enabled: bool) -> Tuple[bool, str]:
                 plist.unlink(missing_ok=True)
                 return True, "Borttagen"
             plist.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                (config_dir() / "logs").mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
             script = _main_script
             exe = sys.executable or "python3"
             args = ([sys.executable, "--tray"] if getattr(sys, "frozen", False)
@@ -1000,13 +1134,17 @@ def set_autostart(enabled: bool) -> Tuple[bool, str]:
                 f'    <key>ProgramArguments</key>\n    <array>\n{items}    </array>\n'
                 '    <key>RunAtLoad</key>\n    <true/>\n'
                 f'    <key>WorkingDirectory</key>\n    <string>{workdir}</string>\n'
+                f'    <key>StandardOutPath</key>\n    <string>{config_dir() / "logs" / "autostart.log"}</string>\n'
+                f'    <key>StandardErrorPath</key>\n    <string>{config_dir() / "logs" / "autostart.log"}</string>\n'
                 '</dict>\n</plist>\n')
             return True, str(plist)
 
-        # Linux: XDG autostart
+        # Linux: XDG autostart (fungerar i GNOME/KDE/Xfce m.fl.)
         desktop = _linux_autostart_file()
+        legacy = _linux_legacy_autostart_file()
         if not enabled:
             desktop.unlink(missing_ok=True)
+            legacy.unlink(missing_ok=True)
             return True, "Borttagen"
         icon = ensure_icon_file()
         _atomic_text(desktop,
@@ -1018,7 +1156,9 @@ def set_autostart(enabled: bool) -> Tuple[bool, str]:
             f"Path={workdir}\n"
             + (f"Icon={icon}\n" if icon else "") +
             "Terminal=false\n"
-            "X-GNOME-Autostart-enabled=true\n")
+            "X-GNOME-Autostart-enabled=true\n"
+            "X-GNOME-Autostart-Delay=3\n")
+        legacy.unlink(missing_ok=True)   # gamla namnet får inte dubbelstarta
         return True, str(desktop)
 
     try:
@@ -1072,31 +1212,12 @@ def create_desktop_shortcut() -> Tuple[bool, str]:
         return False, "Hittade ingen skrivbordsmapp"
     try:
         if sys.platform.startswith("win"):
-            target = desktop / f"{APP_NAME}.lnk"
-            icon = ensure_icon_file()
-            exe = sys.executable or "python.exe"
-            exe_w = Path(exe).with_name("pythonw.exe")
-            if exe_w.exists():
-                exe = str(exe_w)
-            # Alla sökvägar esacpade: en apostrof i sökvägen (O'Brien,
-            # mappnamn med citationstecken) sprängde tidigare kommandot.
-            ps = (
-                f"$s=(New-Object -COM WScript.Shell).CreateShortcut("
-                f"'{_ps_quote(target)}');"
-                f"$s.TargetPath='{_ps_quote(exe)}';"
-                f"$s.Arguments='\"{_ps_quote(script)}\"';"
-                f"$s.WorkingDirectory='{_ps_quote(script.parent)}';"
-                + (f"$s.IconLocation='{_ps_quote(icon)}';" if icon else "") +
-                "$s.Save()")
-            subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           check=True, capture_output=True, timeout=30,
-                           **_win_dold())
-            return True, str(target)
+            return _win_make_lnk(desktop / f"{APP_NAME}.lnk")
 
         if sys.platform.startswith("linux"):
             icon = ensure_icon_file()
             exe = sys.executable or "python3"
-            target = desktop / "pdfsorter.desktop"
+            target = desktop / "arkivpiloten.desktop"
             _atomic_text(target,
                 "[Desktop Entry]\nType=Application\n"
                 f"Name={APP_NAME}\n"
@@ -1522,7 +1643,7 @@ HELP_CONTENT: List[Tuple[str, str]] = [
     ("body", "Kraschar den skrivs felet till krasch.log i inställningsmappen, "
              "och en ruta visar vad som hände. Saknas ett tillägg installeras "
              "de så här:"),
-    ("code", "pip install pymupdf pypdf pystray pillow pytesseract"),
+    ("code", "pip install pymupdf pypdf pdfminer.six pystray pillow pytesseract"),
     ("note", "Alla är valfria — appen startar ändå och talar om i statusraden "
              "vad som saknas. OCR kräver dessutom programmet Tesseract."),
 ]
@@ -2370,6 +2491,386 @@ def _write_errors_log(text: str) -> None:
         pass
 
 
+# =========================================================================
+# AUTOUPPDATERING FRÅN GIT + UPPDATERING AV PYTHON-PAKET (2026-10-16)
+# =========================================================================
+#: Källan appen uppdaterar sig från när ny version läggs upp på GitHub.
+UPDATE_REPO = "Tokke2/ArkivPiloten"
+UPDATE_BRANCH = "main"
+UPDATE_RAW_BASE = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}"
+UPDATE_ZIP_URL = f"https://codeload.github.com/{UPDATE_REPO}/zip/refs/heads/{UPDATE_BRANCH}"
+
+#: Bara dessa filer får ersättas av en uppdatering - allt i appmappen.
+#: Användardata (json/, logs/, cache/, backups/, updates/) rörs ALDRIG,
+#: och inte heller användarens egna filer i mappen.
+UPDATE_FILES = (
+    "pdfsorter.py", "pdfsorter.pyw", "pdfsorter_data.py",
+    "pdfsorter_read.py", "pdfsorter_system.py", "pdfsorter_theme.py",
+    "requirements.txt", "ArkivPiloten.png", "ArkivPiloten.ico",
+    "ArkivPiloten - Installera senaste Python och starta.bat",
+    "README.md", "PDFSORTER_SPEC.md", "Stöd ArkivPiloten.html",
+    "swish_qr.png", "desktop.ini",
+)
+
+_PIP_PAKET_NAMN = ("PyMuPDF", "pypdf", "pdfminer.six", "Pillow",
+                   "pystray", "pytesseract")
+_PIP_IMPORTNAMN = {"PyMuPDF": "fitz", "pypdf": "pypdf",
+                   "pdfminer.six": "pdfminer", "Pillow": "PIL",
+                   "pystray": "pystray", "pytesseract": "pytesseract"}
+
+
+def _version_tuple(s: str) -> Tuple[int, ...]:
+    ut = []
+    for del_ in str(s).strip().split("."):
+        siff = "".join(ch for ch in del_ if ch.isdigit())
+        ut.append(int(siff) if siff else 0)
+    return tuple(ut or [0])
+
+
+def check_for_update(timeout: int = 15) -> dict:
+    """Finns en nyare version på GitHub? Jämför APP_VERSION mot den
+    pdfsorter.py som ligger på UPDATE_BRANCH - inget laddas ner och
+    inget ändras. Returnerar dict med ok/current/remote/available."""
+    import urllib.request
+    try:
+        # I första hand GitHubs API (raw-innehåll via Accept-header) -
+        # samma slutpunkt som resten av GitHub-integrationen; den
+        # rena raw-domänen som reserv om API:t skulle svara fel.
+        text = None
+        for url, accept in (
+                (f"https://api.github.com/repos/{UPDATE_REPO}/contents/"
+                 f"pdfsorter.py?ref={UPDATE_BRANCH}",
+                 "application/vnd.github.raw+json"),
+                (f"{UPDATE_RAW_BASE}/pdfsorter.py", "*/*")):
+            try:
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": APP_NAME, "Accept": accept})
+                with urllib.request.urlopen(req, timeout=timeout) as svar:
+                    text = svar.read(2_000_000).decode("utf-8", "ignore")
+                break
+            except Exception:
+                continue
+        if text is None:
+            raise ConnectionError("GitHub svarade inte")
+        m = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', text)
+        if not m:
+            return {"ok": False, "current": APP_VERSION, "remote": None,
+                    "available": False,
+                    "error": "kunde inte läsa versionsnumret på GitHub"}
+        remote = m.group(1)
+        return {"ok": True, "current": APP_VERSION, "remote": remote,
+                "available": _version_tuple(remote) > _version_tuple(APP_VERSION)}
+    except Exception as exc:
+        return {"ok": False, "current": APP_VERSION, "remote": None,
+                "available": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _install_from_folder(staged: Path, root: Path,
+                         expected: Optional[str] = None) -> Tuple[bool, str]:
+    """Installera UPDATE_FILES från en uppackad staging-mapp till root.
+
+    Säkerhet: alla .py valideras med compile() FÖRE något rörs, staged
+    version måste vara den väntade, nuvarande filer säkerhetskopieras
+    till backups/update_<tid>/ och varje fil ersätts atomiskt. Går
+    något fel mitt i finns kopiorna kvar att återställa från.
+    """
+    import shutil as _sh
+    staged = Path(staged); root = Path(root)
+    src_root = staged
+    if not (src_root / "pdfsorter.py").is_file():
+        under = [d for d in staged.iterdir() if d.is_dir()
+                 and (d / "pdfsorter.py").is_file()]
+        if len(under) != 1:
+            return False, "zip-filen har oväntat innehåll (ingen appmapp)"
+        src_root = under[0]
+    try:
+        huvud = (src_root / "pdfsorter.py").read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, f"kunde inte läsa staged pdfsorter.py: {exc}"
+    m = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', huvud)
+    staged_version = m.group(1) if m else None
+    if expected and staged_version != expected:
+        return False, (f"versionerna stämmer inte (väntade {expected}, "
+                       f"fick {staged_version}) - avbryter")
+    if staged_version and _version_tuple(staged_version) <= _version_tuple(APP_VERSION):
+        return False, f"staged version {staged_version} är inte nyare än {APP_VERSION}"
+    # Även mot versionen som faktiskt ligger i root just nu - så att ett
+    # andra anrop i samma process (före omstart) inte installerar igen.
+    try:
+        aktuell = (root / "pdfsorter.py").read_text(encoding="utf-8")
+        m2 = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', aktuell)
+        if (staged_version and m2
+                and _version_tuple(staged_version) <= _version_tuple(m2.group(1))):
+            return False, (f"version {staged_version} är redan installerad "
+                           f"i appmappen (starta om appen i stället)")
+    except OSError:
+        pass
+    for namn in UPDATE_FILES:
+        kalla = src_root / namn
+        if namn.endswith(".py") and kalla.is_file():
+            try:
+                compile(kalla.read_bytes(), namn, "exec")
+            except SyntaxError as exc:
+                return False, f"{namn} i uppdateringen kompilerar inte: {exc}"
+    stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+    backup = root / "backups" / f"update_{stamp}"
+    installerade: List[str] = []
+    try:
+        backup.mkdir(parents=True, exist_ok=True)
+        for namn in UPDATE_FILES:
+            kalla = src_root / namn
+            if not kalla.is_file():
+                continue
+            mal = root / namn
+            if mal.is_file():
+                _sh.copy2(mal, backup / namn)
+            tmp = root / (namn + ".update-tmp")
+            with open(kalla, "rb") as fi, open(tmp, "wb") as fo:
+                _sh.copyfileobj(fi, fo)
+            os.replace(tmp, mal)
+            installerade.append(namn)
+        info = {"time": now_iso(), "from": APP_VERSION, "to": staged_version,
+                "files": installerade, "backup": str(backup)}
+        upd = root / "updates"
+        upd.mkdir(parents=True, exist_ok=True)
+        (upd / "last_update.json").write_text(
+            json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError as exc:
+        return False, (f"installationen avbröts ({exc}) - säkerhetskopia "
+                       f"finns i {backup}")
+    session_log("uppdatering",
+                f"{APP_VERSION} -> {staged_version}: "
+                f"{len(installerade)} filer, backup {backup}", "ok")
+    return True, (f"Uppdaterad {APP_VERSION} -> {staged_version} "
+                  f"({len(installerade)} filer). Säkerhetskopia: {backup}. "
+                  f"Starta om appen för att köra den nya versionen.")
+
+
+def perform_update(timeout: int = 180,
+                   root: Optional[Path] = None) -> Tuple[bool, str]:
+    """Hämta senaste versionen från GitHub och installera den i
+    appmappen. Allt mellanlager (zip, staging) bor i appmappens egna
+    undermappar temp/ och updates/ - inget utanför appmappen."""
+    import shutil as _sh
+    import zipfile as _zip
+    root = Path(root) if root else _main_script.parent
+    info = check_for_update(timeout=min(timeout, 30))
+    if not info["ok"]:
+        return False, f"Kunde inte söka uppdatering: {info.get('error', '?')}"
+    if not info["available"]:
+        return True, f"Du har redan den senaste versionen ({APP_VERSION})."
+    tmp = root / "temp"; tmp.mkdir(parents=True, exist_ok=True)
+    staging = root / "updates" / "staging"
+    zippath = tmp / "arkivpiloten-update.zip"
+    try:
+        session_log("uppdatering", f"Laddar ner {UPDATE_ZIP_URL}")
+        _ladda_ner(UPDATE_ZIP_URL, zippath, timeout=timeout)
+        if staging.exists():
+            _sh.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+        with _zip.ZipFile(zippath) as zf:
+            for member in zf.namelist():
+                mal = (staging / member).resolve()
+                if not str(mal).startswith(str(staging.resolve())):
+                    return False, "zip-filen försöker skriva utanför appmappen - avbryter"
+            zf.extractall(staging)
+        ok, msg = _install_from_folder(staging, root, expected=info["remote"])
+        return ok, msg
+    except Exception as exc:
+        session_error("uppdatering", exc)
+        return False, f"Uppdateringen misslyckades: {type(exc).__name__}: {exc}"
+    finally:
+        try:
+            zippath.unlink(missing_ok=True)
+            if staging.exists():
+                _sh.rmtree(staging, ignore_errors=True)
+        except OSError:
+            pass
+
+
+
+
+# ==========================================================================
+# 1.1.0-FUNKTIONER: PDF-taggning, årsarkiv-export (ej zippad), org.nr-uppslag
+# ==========================================================================
+
+def tag_pdf_metadata(path: Path, category: str, sender: str = "") -> bool:
+    """Skriv kategori/avsändare som PDF-metadata (keywords/subject) så att
+    arkivet blir sökbart även i Utforskaren/Acrobat. Tyst False vid fel -
+    taggning får aldrig stoppa en sortering."""
+    try:
+        import fitz  # PyMuPDF
+    except Exception:
+        try:
+            import pymupdf as fitz  # type: ignore
+        except Exception:
+            return False
+    try:
+        doc = fitz.open(str(path))
+        try:
+            meta = dict(doc.metadata or {})
+            nyckel = ["ArkivPiloten", category]
+            if sender and sender not in nyckel:
+                nyckel.append(sender)
+            meta["keywords"] = "; ".join(nyckel)
+            meta["subject"] = category
+            doc.set_metadata(meta)
+            doc.saveIncr()
+        finally:
+            doc.close()
+        return True
+    except Exception:
+        # saveIncr kan nekas (krypterad/udda fil): skriv om till tempfil.
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(str(path))
+            meta = dict(doc.metadata or {})
+            meta["keywords"] = "; ".join(["ArkivPiloten", category] +
+                                         ([sender] if sender else []))
+            meta["subject"] = category
+            doc.set_metadata(meta)
+            tmp = path.with_suffix(".tagtmp.pdf")
+            doc.save(str(tmp))
+            doc.close()
+            tmp.replace(path)
+            return True
+        except Exception:
+            return False
+
+
+def export_year_archive(output_root: Path, dest_dir: Path,
+                        log: Callable[[str], None] = lambda m: None) -> Dict[str, Any]:
+    """Exportera det sorterade arkivet till en ÖPPEN mappstruktur (ej zip):
+    <dest>/ArkivPiloten-Export-<tid>/<år>/<relativ sökväg> + index.html
+    (sökbar) + checksums.sha256. Kopierar - flyttar aldrig."""
+    from datetime import datetime
+    import hashlib
+    import html as _html
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    rot = Path(dest_dir) / f"ArkivPiloten-Export-{stamp}"
+    rot.mkdir(parents=True, exist_ok=True)
+    poster: List[Dict[str, Any]] = []
+    sha_lines: List[str] = []
+    fel = 0
+    pdfs = sorted(p for p in Path(output_root).rglob("*")
+                  if p.is_file() and p.suffix.lower() == ".pdf")
+    for src in pdfs:
+        rel = src.relative_to(Path(output_root))
+        delar = rel.parts
+        år = (delar[1] if len(delar) > 1 and delar[0] and
+              len(delar[1]) == 4 and delar[1].isdigit() else
+              (delar[0] if delar and len(delar[0]) == 4 and delar[0].isdigit()
+               else str(datetime.fromtimestamp(src.stat().st_mtime).year)))
+        kategori = delar[0] if delar else ""
+        mål_rel = Path(år) / rel
+        mål = rot / mål_rel
+        try:
+            mål.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(mål))
+            h = hashlib.sha256()
+            with open(mål, "rb") as fh:
+                for block in iter(lambda: fh.read(1024 * 256), b""):
+                    h.update(block)
+            digest = h.hexdigest()
+            sha_lines.append(f"{digest}  {mål_rel.as_posix()}")
+            poster.append({"år": år, "kategori": kategori,
+                           "fil": src.name, "sökväg": mål_rel.as_posix(),
+                           "storlek": mål.stat().st_size, "sha": digest[:12]})
+            log(f"Exporterade {mål_rel.as_posix()}")
+        except OSError as exc:
+            fel += 1
+            log(f"Kunde inte exportera {src}: {exc}")
+    (rot / "checksums.sha256").write_text("\n".join(sha_lines) + "\n",
+                                          encoding="utf-8")
+    rader = "\n".join(
+        f'<tr><td>{_html.escape(p["år"])}</td><td>{_html.escape(p["kategori"])}</td>'
+        f'<td><a href="{_html.escape(p["sökväg"])}">{_html.escape(p["fil"])}</a></td>'
+        f'<td>{p["storlek"]//1024} KB</td><td><code>{p["sha"]}…</code></td></tr>'
+        for p in poster)
+    index = f"""<!DOCTYPE html>
+<html lang="sv"><head><meta charset="utf-8">
+<title>ArkivPiloten - arkivexport {stamp}</title>
+<style>body{{font-family:system-ui,sans-serif;margin:2rem;background:#0f172a;color:#e2e8f0}}
+input{{padding:.5rem 1rem;width:24rem;border-radius:.5rem;border:1px solid #334155;background:#1e293b;color:#fff}}
+table{{border-collapse:collapse;margin-top:1rem}}td,th{{padding:.35rem .8rem;border-bottom:1px solid #1e293b;text-align:left}}
+a{{color:#7dd3fc}}</style></head><body>
+<h1>📁 ArkivPiloten - arkivexport</h1>
+<p>{len(poster)} filer · {stamp} · kontrollsummor i checksums.sha256</p>
+<input id="q" type="search" placeholder="Sök fil, kategori, år…" oninput="f()">
+<table id="t"><tr><th>År</th><th>Kategori</th><th>Fil</th><th>Storlek</th><th>SHA-256</th></tr>
+{rader}</table>
+<script>function f(){{const q=document.getElementById('q').value.toLowerCase();
+document.querySelectorAll('#t tr').forEach((r,i)=>{{if(i)r.style.display=r.textContent.toLowerCase().includes(q)?'':'none'}})}}</script>
+</body></html>"""
+    (rot / "index.html").write_text(index, encoding="utf-8")
+    return {"mapp": str(rot), "filer": len(poster), "fel": fel}
+
+
+def lookup_company_name_online(orgnr: str, timeout: float = 6.0) -> Optional[str]:
+    """Slå upp firmanamn för ett org.nr på webben (anropas bara när
+    användaren slagit på det). Best-effort: parsar JSON-LD/<title> ur
+    offentliga söksidor. Returnerar None vid varje problem."""
+    ren = "".join(ch for ch in str(orgnr) if ch.isdigit())
+    if len(ren) < 10:
+        return None
+    import urllib.request
+    import urllib.error
+    urls = [f"https://www.allabolag.se/{ren}",
+            f"https://www.merinfo.se/foretag/{ren}"]
+    for url in urls:
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 ArkivPiloten"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                sida = resp.read(300_000).decode("utf-8", "replace")
+        except Exception:
+            continue
+        m = re.search(r'"name"\s*:\s*"([^"]{2,80})"', sida)
+        if m and ren not in m.group(1):
+            return m.group(1).strip()
+        m = re.search(r"<title>([^<]{2,90})</title>", sida, re.I)
+        if m:
+            namn = re.split(r"\s*[-|–]\s*", m.group(1))[0].strip()
+            if namn and ren not in namn and "404" not in namn:
+                return namn
+    return None
+
+def update_python_packages(root: Optional[Path] = None,
+                           timeout: int = 1800) -> Tuple[bool, str]:
+    """Installera/uppdatera ALLA Python-tillägg från appens
+    requirements.txt (pinnade versioner) med den Python som kör appen.
+    Verifierar importerna efteråt och rapporterar per paket."""
+    root = Path(root) if root else _main_script.parent
+    req = root / "requirements.txt"
+    if req.is_file():
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade",
+               "--disable-pip-version-check", "-r", str(req)]
+        kalla = "requirements.txt"
+    else:
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade",
+               "--disable-pip-version-check", *_PIP_PAKET_NAMN]
+        kalla = "standardpaketen"
+    session_log("tillägg", f"Paketuppdatering startad från {kalla}")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, **_win_dold())
+    except Exception as exc:
+        return False, f"pip kunde inte köras: {exc}"
+    if r.returncode != 0:
+        fel = (r.stderr or r.stdout or "").strip().splitlines()
+        return False, ("pip misslyckades: "
+                       + (fel[-1] if fel else f"slutkod {r.returncode}"))
+    import importlib.util as _iu
+    saknas = [n for n in _PIP_PAKET_NAMN
+              if _iu.find_spec(_PIP_IMPORTNAMN[n]) is None]
+    if saknas:
+        return False, ("Paket installerades men går inte att importera: "
+                       + ", ".join(saknas))
+    session_log("tillägg", "Alla Python-paket uppdaterade och importerbara", "ok")
+    return True, "Alla Python-paket är uppdaterade: " + ", ".join(_PIP_PAKET_NAMN)
+
+
+
 # ==========================================================================
 # FRISTÅENDE KÖRNING
 # ==========================================================================
@@ -2380,8 +2881,7 @@ def _self_test() -> int:
     print(f"  Konfiguration:  {config_dir()}")
     print(f"  Huvudprogram:   {_main_script}")
     print(f"  Pillow:         {'ja' if make_icon_image(16) else 'nej'}")
-    ikon = config_dir() / ("arkivpiloten.ico" if sys.platform.startswith("win")
-                           else "arkivpiloten.png")
+    ikon = icon_file_path()
     print(f"  Ikonfil:        {ikon if ikon.exists() else 'ej skapad ännu'}")
     print(f"  Systemfält:     {'ja' if tray_available() else 'nej (pip install pystray)'}")
     print(f"  Autostart:      {'stöds' if autostart_supported() else 'stöds ej'}"
@@ -2420,8 +2920,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  Konfiguration:   {config_dir()}")
         print(f"  Huvudprogram:    {_main_script}")
         print(f"  Pillow/ikon:     {'ja' if make_icon_image(16) else 'nej'}")
-        ikon = config_dir() / ("arkivpiloten.ico" if sys.platform.startswith("win")
-                               else "arkivpiloten.png")
+        ikon = icon_file_path()
         print(f"  Ikonfil:         {ikon if ikon.exists() else 'ej skapad'}")
         print(f"  Systemfält:      {'ja' if tray_available() else 'nej'}")
         print(f"  Autostart:       {'på' if autostart_enabled() else 'av'}"
@@ -2430,7 +2929,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if konflikter:
             for namn, varde in konflikter:
                 print(f"  Autostartkonflikt: {namn} -> {varde[:80]}")
-        j = config_dir() / "history.journal"
+        j = config_dir() / "json" / "history.journal"
         print(f"  Historikjournal: {j.stat().st_size if j.exists() else 0} B")
         logg = config_dir() / "logs"
         print(f"  Loggmapp:        {logg if logg.exists() else 'tom'}")
@@ -2442,7 +2941,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Senaste sorteringen: snabb hälsokoll av läsning/matchning utan
         # att behöva öppna appen.
         try:
-            hist = json.loads((config_dir() / "history.json").read_text("utf-8"))
+            hist = json.loads((config_dir() / "json" / "history.json").read_text("utf-8"))
             evs = hist.get("events", [])
             if evs:
                 sista = evs[-1]

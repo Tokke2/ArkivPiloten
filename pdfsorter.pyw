@@ -27,20 +27,8 @@ def _config_dir():
     env = os.environ.get("PDFSORTER_HOME")
     if env:
         return Path(env).expanduser()
-    hem = Path(__file__).resolve().parent
-    try:
-        t = hem / ".pdfsorter_write_test"
-        t.write_text("ok", encoding="utf-8")
-        t.unlink()
-        return hem
-    except OSError:
-        pass
-    if sys.platform.startswith("win"):
-        bas = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        return Path(bas) / "ArkivPiloten"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "ArkivPiloten"
-    return Path.home() / ".config" / "pdfsorter"
+    # Alltid appmappen (2026-10-16: inget sparas utanför den).
+    return Path(__file__).resolve().parent
 
 
 def _fixa_stdio():

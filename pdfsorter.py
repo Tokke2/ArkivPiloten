@@ -49,13 +49,12 @@ Funktioner
   varandras regler
 
 Var sparas inställningarna?
-    Windows  %APPDATA%\\ArkivPiloten
-    macOS    ~/Library/Application Support/ArkivPiloten
-    Linux    ~/.config/pdfsorter
-Kan överstyras med miljövariabeln PDFSORTER_HOME.
+    Alltid i appmappen (undermapparna json/, logs/, cache/ m.fl.) -
+    inget sparas utanför appmappen på någon plattform.
+    Kan överstyras med miljövariabeln PDFSORTER_HOME.
 
 Beroenden - alla valfria, appen startar ändå:
-    pip install pymupdf pypdf pystray pillow pytesseract
+    pip install pymupdf pypdf pdfminer.six pystray pillow pytesseract
     OCR kräver även systemprogrammet Tesseract.
 
 Kommandorad (frivilligt):
@@ -217,6 +216,7 @@ except ImportError:
 try:
     from pdfsorter_data import (        # noqa: F401
         SCHEMA_VERSION,
+        DEFAULT_SETTINGS,
         SUBFOLDER_TEMPLATES,
         Rules,
         _io_lock,
@@ -230,6 +230,7 @@ try:
         flush_history,
         compact_history_if_large,
         is_ignored_file,
+        json_dir,
         migrate_to_portable,
         list_ignored_files,
         load_history,
@@ -884,17 +885,23 @@ STRICTNESS_LEVELS: Dict[str, Dict[str, Any]] = {
         "min_score": 1.0, "ambiguity_margin": 0.01, "min_keywords": 1,
         "require_strong": False, "score_ratio": 1.0, "min_text_chars": 0,
         "require_anchor": False, "reject_recipient_only": False,
+        "require_anchor_or_strong": False,
         "hint": "Ett svagt ord räcker, var som helst i dokumentet. "
                 "Snabbt, men fler filer hamnar fel.",
     },
     "normal": {
-        "label": "Normal - två olika stödord räcker",
+        "label": "Normal - säkra bevis krävs (standard)",
         "min_score": 1.0, "ambiguity_margin": 0.5, "min_keywords": 2,
         "require_strong": False, "score_ratio": 1.0, "min_text_chars": 0,
         "require_anchor": False, "reject_recipient_only": True,
-        "hint": "Två olika stödord räcker om ingen annan kategori också "
-                "träffar. Ett bevisat org.nr eller en domän räcker ändå "
-                "ensamt. Filer där företaget bara står som mottagare "
+        "require_anchor_or_strong": True,
+        "hint": "Två olika stödord räcker - men minst ett måste stå på "
+                "avsändarens plats (brevhuvud, sidfot, filnamn eller en "
+                "rad med org.nr), vara ett starkt kännetecken (org.nr, "
+                "VAT, bankgiro, domän) eller återkomma på flera sidor. "
+                "Ord som bara nämns i löptexten flyttar aldrig en fil "
+                "automatiskt. Ett bevisat org.nr eller en domän räcker "
+                "ändå ensamt. Filer där företaget bara står som mottagare "
                 "hoppas över.",
     },
     "strikt": {
@@ -902,6 +909,7 @@ STRICTNESS_LEVELS: Dict[str, Dict[str, Any]] = {
         "min_score": 2.0, "ambiguity_margin": 1.0, "min_keywords": 2,
         "require_strong": False, "score_ratio": 1.8, "min_text_chars": 40,
         "require_anchor": True, "reject_recipient_only": True,
+        "require_anchor_or_strong": True,
         "hint": "Två stödord och minst ett i brevhuvudet eller filnamnet. "
                 "Ett bevisat org.nr eller en domän räcker dock ensamt.",
     },
@@ -910,6 +918,7 @@ STRICTNESS_LEVELS: Dict[str, Dict[str, Any]] = {
         "min_score": 3.0, "ambiguity_margin": 2.0, "min_keywords": 2,
         "require_strong": True, "score_ratio": 2.5, "min_text_chars": 60,
         "require_anchor": True, "reject_recipient_only": True,
+        "require_anchor_or_strong": True,
         "hint": "Kräver org.nr, VAT, bankgiro eller domän som avsändaren "
                 "äger. Nästan inga fel, men fler frågor.",
     },
@@ -941,6 +950,8 @@ def effective_thresholds(settings: Dict[str, Any]) -> Dict[str, Any]:
         "min_text_chars": int(settings.get("min_text_chars", 0)),
         "require_anchor": bool(settings.get("require_anchor", False)),
         "reject_recipient_only": bool(settings.get("reject_recipient_only", True)),
+        "require_anchor_or_strong": bool(
+            settings.get("require_anchor_or_strong", True)),
     }
     if preset and level != "egen":
         for key in out:
@@ -1142,6 +1153,95 @@ def flush_learned() -> None:
         pass
 
 
+#: Hårt golv för automatisk sortering, oavsett strikthetsnivå: har färre
+#: tecken än så lästs ur dokumentet är underlaget för tunt att flytta på
+#: - om inte ett bevisat avsändar-ID (org.nr/domän/bankgiro på avsändarens
+#: plats) redan avgör saken. En misslyckad läsning ska ge en fråga, inte
+#: en tyst felplacering (säkerhetsrundan 2026-10-16).
+_MIN_AUTO_TEXT_CHARS = 12
+
+
+def _auto_blocker(score: CategoryScore, rules: Rules,
+                  t: Dict[str, Any], text_len: int) -> Optional[str]:
+    """Varför får den här kategorin INTE sortera filen automatiskt?
+
+    Returnerar en fråge-orsak, eller None om kategorin har tillräckliga
+    bevis för att få flytta filen på egen hand. Alla spärrar som gällde
+    bästa kategorin i decide() bor här, så att samma prov kan köras på
+    tvåan innan lärda modellen/historiken får byta vinnare - en kategori
+    som bara står som mottagare ska aldrig kunna bli auto-vinnare bakvägen
+    (säkerhetsrundan 2026-10-16).
+    """
+    proved = score.is_conclusive
+
+    # 1. För lite läst text - underlaget går inte att lita på
+    need_chars = t["min_text_chars"]
+    if need_chars and text_len < need_chars:
+        return (f"Bara {text_len} tecken lästes ur filen "
+                f"(kräver {need_chars})")
+    if text_len < _MIN_AUTO_TEXT_CHARS and not proved:
+        return (f"Bara {text_len} tecken lästes ur filen - för lite "
+                f"text för att avgöra avsändare automatiskt")
+
+    # 2. Poängen måste nå upp till tröskeln
+    if score.score < t["min_score"] and not proved:
+        return (f"För låg poäng: {score.name} fick {score.score:g}, "
+                f"kräver {t['min_score']:g}")
+
+    # 3. Tillräckligt många olika stödord ska ha träffat.
+    # Kategorin får kräva fler stödord än nivån gör. Praktiskt när en
+    # kategori har breda ord som lätt ger falska träffar: sätt 3 där, och
+    # låt övriga kategorier gå på nivåns vanliga krav.
+    egen = rules.get(score.name) or {}
+    need_kw = max(int(t["min_keywords"]), int(egen.get("min_keywords", 0) or 0))
+    if len(score.matched) < need_kw and not proved:
+        vems = (" (kategorins eget krav)"
+                if int(egen.get("min_keywords", 0) or 0) > int(t["min_keywords"])
+                else "")
+        return (f"Bara {len(score.matched)} stödord matchade {score.name}, "
+                f"kräver {need_kw}{vems}")
+
+    # 4. Alla träffar i mottagarblocket - då är vi kunden, inte de
+    if t["reject_recipient_only"] and score.only_recipient:
+        return (f"{score.name} står bara som mottagare i dokumentet "
+                f"({', '.join(score.matched[:3])}) - filen är till dem, "
+                f"inte från dem")
+
+    # 5. Minst ett stödord på en plats som pekar ut avsändaren
+    if t["require_anchor"] and not score.anchored:
+        return (f"{score.name} nämns bara i löptexten - inget stödord i "
+                f"brevhuvudet, filnamnet eller på en rad med org.nr")
+
+    # 5b. Ett ensamt svagt ord mitt i brödtexten är för tunt underlag även
+    # på lägre nivåer. "Vi monterade glas från Pilkington" gör inte
+    # dokumentet till en Pilkington-faktura. Ett org.nr eller en domän
+    # räcker däremot - sådana nämns inte i förbigående.
+    if (t["reject_recipient_only"] and len(score.matched) == 1
+            and not score.anchored and not score.has_strong):
+        word = score.matched[0]
+        return (f"\"{word}\" nämns bara i löptexten och är inget unikt "
+                f"kännetecken - för tunt för att avgöra avsändare")
+
+    # 5c. Bara löptextträffar flyttar aldrig en fil automatiskt på
+    # Normal-nivån och uppåt: minst ett bevis måste sitta på avsändarens
+    # plats, vara ett starkt kännetecken eller återkomma på flera sidor
+    # (brevhuvud/sidfot). Två svaga ord mitt i en mening om en leverantör
+    # gör inte avsändaren till leverantören (säkerhetsrundan 2026-10-16).
+    if (t.get("require_anchor_or_strong", True) and not score.anchored
+            and not score.has_strong and not score.multipage):
+        return (f"{score.name} nämns bara i löptexten "
+                f"({', '.join(score.matched[:3])}) - inget bevis på "
+                f"avsändarens plats, inget org.nr/domän/bankgiro och "
+                f"inget som återkommer på flera sidor")
+
+    # 6. Minst ett starkt bevis - org.nr, VAT, bankgiro eller domän
+    if t["require_strong"] and not score.has_strong:
+        return (f"{score.name} matchade bara svaga ord "
+                f"({', '.join(score.matched[:3])}) - kräver org.nr, "
+                f"VAT, bankgiro eller domän")
+    return None
+
+
 def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> Decision:
     """Avgör om filen kan sorteras automatiskt eller behöver frågas om.
 
@@ -1168,13 +1268,10 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
             lm_pred = None
 
     if not scores:
-        if (str(settings.get("strictness", "normal")) == "los"
-                and lm_pred is not None and lm_pred[1] >= _LEARNED_CONF_MARGIN):
-            namn, marg, antal = lm_pred
-            cs = CategoryScore(namn, 0.0, ["(lärd profil)"], {})
-            d = Decision(extraction.path, extraction, [cs], "auto",
-                         f"Lärd klassificerare - {antal} liknande filer")
-            return d
+        # Säkerhetsrundan 2026-10-16: den lärda klassificeraren får aldrig
+        # ensam flytta en fil som inga regler matchade - inte ens på Lös
+        # nivå. En inlärd profil är ett stöd för ett beslut, inte ett
+        # bevis; den visas som förslag i granskningsrutan i stället.
         d = Decision(extraction.path, extraction, scores, "ask",
                      "Ingen kategori matchade")
         if lm_pred is not None:
@@ -1185,7 +1282,10 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
     second = scores[1].score if len(scores) > 1 else 0.0
 
     def ask(reason: str) -> Decision:
-        return Decision(extraction.path, extraction, scores, "ask", reason)
+        d = Decision(extraction.path, extraction, scores, "ask", reason)
+        if lm_pred is not None:
+            d.learned_hint = (lm_pred[0], lm_pred[2])
+        return d
 
     # Ett bevisat avsändar-ID väger tyngre än antalet träffar. Ett
     # organisationsnummer med giltig kontrollsiffra i sidfoten, eller
@@ -1199,56 +1299,10 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
     proved = best.is_conclusive
     rival_proved = len(scores) > 1 and scores[1].is_conclusive
 
-    # 1. För lite läst text - underlaget går inte att lita på
-    need_chars = t["min_text_chars"]
-    if need_chars and len(extraction.text) < need_chars:
-        return ask(f"Bara {len(extraction.text)} tecken lästes ur filen "
-                   f"(kräver {need_chars})")
-
-    # 2. Poängen måste nå upp till tröskeln
-    if best.score < t["min_score"] and not proved:
-        return ask(f"För låg poäng: {best.name} fick {best.score:g}, "
-                   f"kräver {t['min_score']:g}")
-
-    # 3. Tillräckligt många olika stödord ska ha träffat
-    # Kategorin får kräva fler stödord än nivån gör. Praktiskt när en
-    # kategori har breda ord som lätt ger falska träffar: sätt 3 där, och
-    # låt övriga kategorier gå på nivåns vanliga krav.
-    egen = rules.get(best.name) or {}
-    need_kw = max(int(t["min_keywords"]), int(egen.get("min_keywords", 0) or 0))
-    if len(best.matched) < need_kw and not proved:
-        vems = (" (kategorins eget krav)"
-                if int(egen.get("min_keywords", 0) or 0) > int(t["min_keywords"])
-                else "")
-        return ask(f"Bara {len(best.matched)} stödord matchade {best.name}, "
-                   f"kräver {need_kw}{vems}")
-
-    # 4. Alla träffar i mottagarblocket - då är vi kunden, inte de
-    if t["reject_recipient_only"] and best.only_recipient:
-        return ask(f"{best.name} står bara som mottagare i dokumentet "
-                   f"({', '.join(best.matched[:3])}) - filen är till dem, "
-                   f"inte från dem")
-
-    # 5. Minst ett stödord på en plats som pekar ut avsändaren
-    if t["require_anchor"] and not best.anchored:
-        return ask(f"{best.name} nämns bara i löptexten - inget stödord i "
-                   f"brevhuvudet, filnamnet eller på en rad med org.nr")
-
-    # 5b. Ett ensamt svagt ord mitt i brödtexten är för tunt underlag även
-    # på lägre nivåer. "Vi monterade glas från Pilkington" gör inte
-    # dokumentet till en Pilkington-faktura. Ett org.nr eller en domän
-    # räcker däremot - sådana nämns inte i förbigående.
-    if (t["reject_recipient_only"] and len(best.matched) == 1
-            and not best.anchored and not best.has_strong):
-        word = best.matched[0]
-        return ask(f"\"{word}\" nämns bara i löptexten och är inget unikt "
-                   f"kännetecken - för tunt för att avgöra avsändare")
-
-    # 6. Minst ett starkt bevis - org.nr, VAT, bankgiro eller domän
-    if t["require_strong"] and not best.has_strong:
-        return ask(f"{best.name} matchade bara svaga ord "
-                   f"({', '.join(best.matched[:3])}) - kräver org.nr, "
-                   f"VAT, bankgiro eller domän")
+    # 1-6. Alla beviskrav på bästa kategorin (se _auto_blocker).
+    blocker = _auto_blocker(best, rules, t, len(extraction.text))
+    if blocker:
+        return ask(blocker)
 
     # 7. Tillräcklig marginal ned till tvåan, både absolut och relativt.
     # Har bara den ena kategorin ett bevisat avsändar-ID är saken redan
@@ -1264,38 +1318,48 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
             # Marginalen ignoreras då och bästa kategorin vinner.
             nära = False
         if nära:
-            # N14: båda kandidaterna är regelgodkända men nära - modellens
-            # tränade öga får avgöra om den är säker på en av de två.
+            # N14: båda kandidaterna ligger nära - modellens tränade öga
+            # får avgöra om den är säker på en av de två. Säkerhetsrundan
+            # 2026-10-16: vinnaren måste själv klara alla beviskrav
+            # (_auto_blocker) - tidigare kunde modellen lyfta en tvåa som
+            # t.ex. bara stod som mottagare rakt till auto-flytt.
             if (lm_pred is not None and lm_pred[1] >= _LEARNED_CONF_MARGIN
                     and lm_pred[0] in (best.name, scores[1].name)):
-                vinnare = lm_pred[0]
-                if vinnare != best.name:
-                    scores.sort(key=lambda s2: (s2.name != vinnare,
-                                                -s2.score, s2.name))
-                    best = scores[0]
-                    second = scores[1].score
-                d = Decision(extraction.path, extraction, scores, "auto",
-                             f"Lärd klassificerare bryter dödläget "
-                             f"({lm_pred[2]} liknande filer)")
-                return d
-            # Exakt oavgjort och modellen osäker: kategorin med fler
-            # tidigare sorterade filer vinner (enkel historikprior som
-            # är aktiv redan från första filen, till skillnad från N14).
-            if abs(best.score - second) < 0.001:
-                f1 = int((rules.get(best.name) or {}).get("files_sorted", 0) or 0)
-                f2 = int((rules.get(scores[1].name) or {}).get("files_sorted", 0) or 0)
-                if f1 != f2:
-                    vinnare = best.name if f1 > f2 else scores[1].name
+                kandidat = (best if lm_pred[0] == best.name else scores[1])
+                if _auto_blocker(kandidat, rules, t,
+                                 len(extraction.text)) is None:
+                    vinnare = lm_pred[0]
                     if vinnare != best.name:
                         scores.sort(key=lambda s2: (s2.name != vinnare,
                                                     -s2.score, s2.name))
                         best = scores[0]
                         second = scores[1].score
                     d = Decision(extraction.path, extraction, scores, "auto",
-                                 f"Historik bryter exakt dödläge: {vinnare} "
-                                 f"har {max(f1, f2)} tidigare filer mot "
-                                 f"{min(f1, f2)}")
+                                 f"Lärd klassificerare bryter dödläget "
+                                 f"({lm_pred[2]} liknande filer)")
                     return d
+            # Exakt oavgjort och modellen osäker: kategorin med fler
+            # tidigare sorterade filer vinner (enkel historikprior som
+            # är aktiv redan från första filen, till skillnad från N14).
+            # Även här gäller beviskraven för en ny vinnare (2026-10-16).
+            if abs(best.score - second) < 0.001:
+                f1 = int((rules.get(best.name) or {}).get("files_sorted", 0) or 0)
+                f2 = int((rules.get(scores[1].name) or {}).get("files_sorted", 0) or 0)
+                if f1 != f2:
+                    vinnare = best.name if f1 > f2 else scores[1].name
+                    kandidat = (best if vinnare == best.name else scores[1])
+                    if _auto_blocker(kandidat, rules, t,
+                                     len(extraction.text)) is None:
+                        if vinnare != best.name:
+                            scores.sort(key=lambda s2: (s2.name != vinnare,
+                                                        -s2.score, s2.name))
+                            best = scores[0]
+                            second = scores[1].score
+                        d = Decision(extraction.path, extraction, scores, "auto",
+                                     f"Historik bryter exakt dödläge: {vinnare} "
+                                     f"har {max(f1, f2)} tidigare filer mot "
+                                     f"{min(f1, f2)}")
+                        return d
             d = ask(f"{best.name} ({best.score:g}) och {scores[1].name} "
                     f"({second:g}) ligger för nära")
             d.learned_hint = (lm_pred[0], lm_pred[2]) if lm_pred else None
@@ -1673,6 +1737,15 @@ class SortEngine:
             pass
         with LogContext("tid", f"analys {path.name}"):
             ext = read_pdf(path, self.settings)
+            # Säkerhetsrundan 2026-10-16: fingeravtryck på exakt de byte
+            # som analyserades. apply() vägrar flytta filen om den hunnit
+            # ändras sedan dess (skanner/synk som fortfarande skriver) -
+            # beslutet gäller då inte längre den fil som ligger på disk.
+            try:
+                st = path.stat()
+                ext._fp = (st.st_size, sha256_file(path))
+            except Exception:
+                ext._fp = None
             reason = _ignore_reason(path, ext, self.settings)
             if reason:
                 return Decision(path, ext, [], "ignored",
@@ -1726,12 +1799,36 @@ class SortEngine:
                 pass
         return sub, when, källa
 
+    def _fil_ändrad(self, decision: Decision) -> bool:
+        """Har filen på disk andra byte än den som analyserades?
+
+        Fingeravtrycket sätts i analyze() (storlek + sha256). Saknas det
+        (beslut byggda för hand) finns inget att jämföra med - då gäller
+        som förut. En fil som ändrats får aldrig flyttas på ett beslut
+        som fattades om en annan fil (säkerhetsrundan 2026-10-16).
+        """
+        fp = getattr(decision.extraction, "_fp", None)
+        if not fp:
+            return False
+        try:
+            st = decision.path.stat()
+            if st.st_size != fp[0]:
+                return True
+            return sha256_file(decision.path) != fp[1]
+        except OSError:
+            return True
+
     def apply(self, decision: Decision, category: str, matched: List[str],
               decided_by: str = "auto", learned: Optional[List[str]] = None) -> Tuple[bool, str]:
         # Hela verkställandet serialiseras: parallella sorteringstrådar får
         # aldrig tävla om målnamn (REQ-D2 - filer skrivs aldrig över).
         s = self.settings
         with self.lock:
+            if not s.get("dry_run", False) and self._fil_ändrad(decision):
+                self.stats["left"] += 1
+                return False, ("Filen ändrades efter analysen - lämnas "
+                               "kvar för ny skanning i stället för att "
+                               "flyttas på ett inaktuellt beslut")
             cat = self.rules.get(category) or self.rules.ensure_category(category)
             folder = cat["folder"]
             mall = cat.get("subfolder", "")
@@ -1798,6 +1895,11 @@ class SortEngine:
             if not ok:
                 self.stats["error"] += 1
                 return False, msg
+            if not s.get("dry_run", False) and s.get("tag_pdf_metadata", True):
+                try:
+                    tag_pdf_metadata(Path(target), category)
+                except Exception:
+                    pass
             # Filen ligger inte kvar på sin gamla plats - släpp den ur cachen
             # så att minnet inte fylls av poster som aldrig kan träffa igen.
             TEXT_CACHE.forget(decision.path)
@@ -1842,6 +1944,11 @@ class SortEngine:
     def send_to_unmatched(self, decision: Decision) -> Tuple[bool, str]:
         """Flytta till _Osorterat om en sådan mapp är konfigurerad."""
         with self.lock:
+            if (not self.settings.get("dry_run", False)
+                    and self._fil_ändrad(decision)):
+                self.stats["left"] += 1
+                return False, ("Filen ändrades efter analysen - lämnas "
+                               "kvar för ny skanning")
             folder = (self.settings.get("unmatched_folder") or "").strip()
             if not folder:
                 self.stats["left"] += 1
@@ -2068,6 +2175,14 @@ try:
     qr_png_bytes = _sys_mod.qr_png_bytes
     swish_payload = _sys_mod.swish_payload
     auto_install_tesseract = _sys_mod.auto_install_tesseract
+    search_tesseract = _sys_mod.search_tesseract
+    check_for_update = _sys_mod.check_for_update
+    perform_update = _sys_mod.perform_update
+    update_python_packages = _sys_mod.update_python_packages
+    autostart_status = _sys_mod.autostart_status
+    tag_pdf_metadata = _sys_mod.tag_pdf_metadata
+    export_year_archive = _sys_mod.export_year_archive
+    lookup_company_name_online = _sys_mod.lookup_company_name_online
     svenska_saknas = _sys_mod.svenska_saknas
     classify_autostart = _sys_mod.classify_autostart
     get_autostart_conflicts = _sys_mod.get_autostart_conflicts
@@ -2102,6 +2217,32 @@ except Exception as _sys_err:                       # noqa: BLE001
 
     def create_desktop_shortcut() -> Tuple[bool, str]:
         return False, "pdfsorter_system.py saknas - kan inte skapa genväg"
+
+    def check_for_update(timeout: int = 15) -> dict:
+        return {"ok": False, "current": APP_VERSION, "remote": None,
+                "available": False, "error": "pdfsorter_system.py saknas"}
+
+    def perform_update(timeout: int = 180, root=None) -> Tuple[bool, str]:
+        return False, "pdfsorter_system.py saknas - kan inte uppdatera"
+
+    def update_python_packages(root=None, timeout: int = 1800) -> Tuple[bool, str]:
+        return False, "pdfsorter_system.py saknas - kan inte uppdatera paket"
+
+    def search_tesseract():
+        return None
+
+    def tag_pdf_metadata(path, category, sender="") -> bool:
+        return False
+
+    def export_year_archive(output_root, dest_dir, log=lambda m: None) -> dict:
+        return {"mapp": "", "filer": 0, "fel": 1}
+
+    def lookup_company_name_online(orgnr, timeout=6.0):
+        return None
+
+    def autostart_status() -> dict:
+        return {"platform": sys.platform, "supported": False,
+                "enabled": False, "klass": "missing", "entry": ""}
 
     def install_helpers() -> List[str]:
         return []
@@ -2457,7 +2598,8 @@ class ReviewDialog:
 
     def __init__(self, parent, decision: Decision, rules: Rules,
                  candidates: List[Candidate], index: int = 1, total: int = 1,
-                 theme=None, preview: bool = False):
+                 theme=None, preview: bool = False,
+                 suggested_sender: str = ""):
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk, self.ttk, self.messagebox = tk, ttk, messagebox
         self.theme = theme
@@ -2666,6 +2808,16 @@ class ReviewDialog:
         self.new_entry.bind("<KeyRelease>", lambda e: self.mode.set("new"))
         if self.guess_name:
             self.new_entry.insert(0, self.guess_name)
+        if suggested_sender and not (best and best.name in rules.names()):
+            self.mode.set("new")
+            self.new_entry.delete(0, "end")
+            self.new_entry.insert(0, suggested_sender)
+            ttk.Label(catbox,
+                      text=f"🔎 Uppslag via org.nr: {suggested_sender}"
+                           " - kontrollera namnet innan du sparar",
+                      style="CardMuted.TLabel").grid(
+                          row=2, column=0, columnspan=2, sticky="w",
+                          padx=8, pady=(0, 6))
 
         self.save_rule = tk.BooleanVar(value=True)
         ttk.Checkbutton(catbox, variable=self.save_rule,
@@ -3071,6 +3223,117 @@ class ConflictDialog:
 # --------------------------------------------------------------------------
 # Huvudfönstret
 # --------------------------------------------------------------------------
+
+# ==========================================================================
+# TVÅSPRÅKIGT GRÄNSSNITT (1.1.0): ui_language = "sv" | "en"
+# ==========================================================================
+# Gränssnittet byggs på svenska; vid "en" översätts alla widgettexter som
+# finns i tabellen efter bygget. Okända strängar står kvar på svenska -
+# aldrig tomma, aldrig krasch.
+
+_UI_EN = {
+    "Sortera": "Sort", "Matchningar": "Rules", "Inställningar": "Settings",
+    "Granska": "Review", "Historik": "History", "Hjälp": "Help",
+    "Sortera nu": "Sort now", "Sorterar…": "Sorting…",
+    "Starta bevakning": "Start watching", "Stoppa bevakning": "Stop watching",
+    "●  Bevakning av": "●  Watching off",
+    "TESTKÖRNING": "DRY RUN", "Spara": "Save", "Spara ändringar": "Save changes",
+    "Avbryt": "Cancel", "Stäng": "Close", "Öppna": "Open", "Öppna mappen": "Open folder",
+    "Ta bort": "Delete", "Ta bort markering": "Delete selected", "Byt namn": "Rename",
+    "Uppdatera": "Refresh", "Läs om": "Reload", "Rensa": "Clear", "Töm kön": "Empty queue",
+    "Bläddra…": "Browse…", "Lägg till…": "Add…", "Importera…": "Import…",
+    "Exportera…": "Export…", "Exportera rapport (MD)": "Export report (MD)",
+    "Exportera årsarkiv…": "Export year archive…",
+    "Granska alla…": "Review all…", "Ångra valda": "Undo selected",
+    "Sök efter uppdateringar…": "Check for updates…",
+    "Kontrollera uppdateringar": "Check updates",
+    "Installera Python-paket": "Install Python packages",
+    "Uppdatera Python-paket": "Update Python packages",
+    "Starta automatiskt med datorn": "Start automatically with the computer",
+    "Starta bevakningen direkt": "Start watching immediately",
+    "Starta minimerad i systemfältet": "Start minimized to tray",
+    "Visa ikon i systemfältet": "Show tray icon",
+    "Krysset minimerar i stället för att avsluta": "Close button minimizes to tray instead",
+    "Visa notis när filer sorterats": "Notify when files are sorted",
+    "Sök uppdateringar på GitHub vid start": "Check GitHub for updates at start",
+    "Installera uppdateringar automatiskt": "Install updates automatically",
+    "Schemalagd sortering": "Scheduled sorting",
+    "Skriv kategori som PDF-metadata vid sortering": "Write category as PDF metadata when sorting",
+    "Slå upp okända avsändare via nätet (org.nr)": "Look up unknown senders online (org. no.)",
+    "Tema:": "Theme:", "Ljust": "Light", "Mörkt": "Dark",
+    "   Kontrast:": "   Contrast:", "Normal": "Normal", "Hög": "High",
+    "Språk:": "Language:", "(gäller vid omstart)": "(applies after restart)",
+    "Skapa genväg på skrivbordet": "Create desktop shortcut",
+    "Spara ikonfil": "Save icon file", "Öppna inställningsmappen": "Open settings folder",
+    "Öppna log-mappen": "Open log folder", "Kopiera diagnostik för support": "Copy diagnostics for support",
+    "Fråga när appen är osäker": "Ask when the app is unsure",
+    "OCR för skannade PDF:er": "OCR for scanned PDFs",
+    "Bättre OCR (noggrannare, något långsammare)": "Better OCR (more accurate, slightly slower)",
+    "Lärande matchning (appen lär av dina beslut)": "Learning matching (the app learns from your choices)",
+    "Läs även undermappar i inmappen": "Include subfolders of the inbox",
+    "Lägg filer i undermappar efter datum": "Put files in subfolders by date",
+    "Skanna om allt när ett nytt stödord lärts in": "Rescan everything when a new keyword is learned",
+    "Poppa upp dialogen direkt under bevakning": "Pop up the dialog directly while watching",
+    "Aktiv": "Active", "Dagar:": "Days:", "Hoppa över": "Skip",
+    "Spara & flytta": "Save & move", "Lägg i _Osorterat": "Put in _Unsorted",
+    "Ignorera filen": "Ignore file", "Befintlig:": "Existing:", "Ny mapp:": "New folder:",
+    "Mappnamn:": "Folder name:", "Undermapp:": "Subfolder:",
+    "Sök stödord": "Search keywords", "Kontrollera": "Check", "Kontrollera igen": "Check again",
+    "Spara hjälpen som textfil…": "Save help as text file…",
+    "Stöd projektet 💖": "Support the project 💖",
+    "Inga filer väntar på granskning.": "No files are waiting for review.",
+    "Sluta ignorera markerad": "Stop ignoring selected",
+    "Skanna om alla": "Rescan all", "Filnamnsmönster": "Filename pattern",
+    "Ord i innehållet": "Words in content", "Åtgärd:": "Action:", "Flytta": "Move",
+    "Hämta Tesseract…": "Get Tesseract…", "Sök datorn": "Search computer",
+    "Installera Tesseract automatiskt": "Install Tesseract automatically",
+    "Hämta svenska": "Get Swedish", "+ Ny": "+ New", "Kopiera": "Copy",
+    "Visa inte detta igen": "Don't show this again",
+    "Kom ihåg under denna körning": "Remember for this run",
+    "Behåll båda (2)": "Keep both (2)", "Ersätt den gamla": "Replace the old one",
+    "Avbryt flytten": "Cancel the move",
+}
+
+
+def _translate_ui_tree(widget, mapping) -> int:
+    """Översätt widgettexter enligt mapping, rekursivt. Returnerar antal."""
+    antal = 0
+    try:
+        klass = widget.winfo_class()
+    except Exception:
+        return 0
+    try:
+        if klass == "TNotebook":
+            for flik in widget.tabs():
+                try:
+                    txt = widget.tab(flik, "text")
+                    if txt in mapping:
+                        widget.tab(flik, text=mapping[txt]); antal += 1
+                except Exception:
+                    pass
+        elif klass == "Menu":
+            slut = widget.index("end")
+            for i in range((slut + 1) if slut is not None else 0):
+                try:
+                    txt = widget.entrycget(i, "label")
+                    if txt in mapping:
+                        widget.entryconfigure(i, label=mapping[txt]); antal += 1
+                except Exception:
+                    pass
+        else:
+            txt = widget.cget("text")
+            if isinstance(txt, str) and txt in mapping:
+                widget.configure(text=mapping[txt]); antal += 1
+    except Exception:
+        pass
+    try:
+        for barn in widget.winfo_children():
+            antal += _translate_ui_tree(barn, mapping)
+    except Exception:
+        pass
+    return antal
+
+
 class App:
     def __init__(self, start_hidden: bool = False) -> None:
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
@@ -3188,6 +3451,15 @@ class App:
         self._refresh_history()
         self._refresh_queue()
 
+        # 1.1.0: engelskt gränssnitt om ui_language=en (byggs svenskt,
+        # översätts här). Schemakontrollen tickar var 30:e sekund.
+        if self.settings.get("ui_language", "sv") == "en":
+            try:
+                _translate_ui_tree(self.root, _UI_EN)
+            except Exception:
+                pass
+        self.root.after(30000, self._schedule_tick)
+
         # Självläkande autostart (bättre autostart): OS-posten och
         # inställningen synkas vid varje start - och resultatet loggas,
         # så att en tyst trasig autostart syns i sessionsloggen.
@@ -3197,6 +3469,12 @@ class App:
                     "ok" if ok else "warn")
         except Exception as exc:
             session_error("autostart", exc)
+
+        # Uppdatering från Git (2026-10-16): sök tyst vid start om
+        # inställningen är på - fråga alltid före installation om inte
+        # auto_update valts uttryckligen.
+        if self.settings.get("check_updates", True):
+            self.root.after(5000, lambda: self._check_updates_gui(manual=False))
 
         # Systemfältsikon. TrayIcon är None när systemmodulen saknas
         # (REQ-A2) - då ska appen starta ändå, utan ikon.
@@ -3738,6 +4016,8 @@ class App:
         self.var_close_tray = tk.BooleanVar(value=self.settings.get("close_to_tray", True))
         self.var_autowatch = tk.BooleanVar(value=self.settings.get("autowatch_on_start", False))
         self.var_notify = tk.BooleanVar(value=self.settings.get("notify", True))
+        self.var_checkupd = tk.BooleanVar(value=self.settings.get("check_updates", True))
+        self.var_autoupd = tk.BooleanVar(value=self.settings.get("auto_update", False))
 
         cb_auto = ttk.Checkbutton(sysbox, text="Starta automatiskt med datorn",
                                   style="Card.TCheckbutton",
@@ -3766,6 +4046,14 @@ class App:
                         style="Card.TCheckbutton",
                         variable=self.var_notify).grid(row=2, column=2, columnspan=2,
                                                        sticky="w", padx=8, pady=2)
+        ttk.Checkbutton(sysbox, text="Sök uppdateringar på GitHub vid start",
+                        style="Card.TCheckbutton",
+                        variable=self.var_checkupd).grid(row=3, column=0, columnspan=2,
+                                                         sticky="w", padx=8, pady=2)
+        ttk.Checkbutton(sysbox, text="Installera uppdateringar automatiskt",
+                        style="Card.TCheckbutton",
+                        variable=self.var_autoupd).grid(row=3, column=2, columnspan=2,
+                                                        sticky="w", padx=8, pady=2)
 
         # -- tema: ljust eller mörkt, växlas live --
         themrad = ttk.Frame(sysbox, style="CardInner.TFrame")
@@ -3802,6 +4090,32 @@ class App:
             ttk.Label(extra, text="Systemfältet kräver:  pip install pystray",
                       style="CardMuted.TLabel",
                       foreground=self.C["warn"]).pack(side="left", padx=12)
+        # 1.1.0: språk / schema / taggning / uppslag
+        self.var_lang = tk.StringVar(value=self.settings.get("ui_language", "sv"))
+        self.var_tagpdf = tk.BooleanVar(value=self.settings.get("tag_pdf_metadata", True))
+        self.var_orglookup = tk.BooleanVar(value=self.settings.get("orgnr_lookup", False))
+        self.var_sched = tk.BooleanVar(value=self.settings.get("schedule_enabled", False))
+        self.var_schedtime = tk.StringVar(value=self.settings.get("schedule_time", "07:00"))
+        rad5 = ttk.Frame(sysbox, style="CardInner.TFrame")
+        rad5.grid(row=5, column=0, columnspan=4, sticky="w", padx=8, pady=(6, 2))
+        ttk.Label(rad5, text="Språk:", style="Card.TLabel").pack(side="left")
+        ttk.Combobox(rad5, textvariable=self.var_lang, values=["sv", "en"],
+                     state="readonly", width=5).pack(side="left", padx=(4, 2))
+        ttk.Label(rad5, text="(gäller vid omstart)",
+                  style="CardMuted.TLabel").pack(side="left")
+        ttk.Checkbutton(rad5, text="Schemalagd sortering",
+                        style="Card.TCheckbutton",
+                        variable=self.var_sched).pack(side="left", padx=(16, 2))
+        ttk.Label(rad5, text="kl.", style="Card.TLabel").pack(side="left")
+        ttk.Entry(rad5, textvariable=self.var_schedtime, width=6).pack(side="left")
+        rad6 = ttk.Frame(sysbox, style="CardInner.TFrame")
+        rad6.grid(row=6, column=0, columnspan=4, sticky="w", padx=8, pady=(2, 6))
+        ttk.Checkbutton(rad6, text="Skriv kategori som PDF-metadata vid sortering",
+                        style="Card.TCheckbutton",
+                        variable=self.var_tagpdf).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(rad6, text="Slå upp okända avsändare via nätet (org.nr)",
+                        style="Card.TCheckbutton",
+                        variable=self.var_orglookup).pack(side="left")
         self._update_pills()
 
     def _update_stats(self, sorted_n: Optional[int] = None,
@@ -4232,7 +4546,17 @@ class App:
             "autowatch_on_start": bool(self.var_autowatch.get()),
             "notify": bool(self.var_notify.get()),
             "autostart": bool(self.var_autostart.get()),
+            "check_updates": bool(self.var_checkupd.get()),
+            "auto_update": bool(self.var_autoupd.get()),
         })
+        if hasattr(self, "var_lang"):
+            self.settings.update({
+                "ui_language": self.var_lang.get(),
+                "tag_pdf_metadata": bool(self.var_tagpdf.get()),
+                "orgnr_lookup": bool(self.var_orglookup.get()),
+                "schedule_enabled": bool(self.var_sched.get()),
+                "schedule_time": self.var_schedtime.get().strip() or "07:00",
+            })
         if hasattr(self, "var_date_on"):
             idx = self.date_combo.current()
             mallar = [t for t, _ in SUBFOLDER_TEMPLATES if t]
@@ -5421,11 +5745,14 @@ class App:
                         f"Dialog öppnas för {decision.path.name} "
                         f"({i + 1}/{len(self.queue)}): {decision.reason}; "
                         f"{len(cands)} stödordsförslag")
+            _hint = (self._lookup_sender_hint(decision)
+                     if self.settings.get("orgnr_lookup", False) else "")
             res = ReviewDialog(self.root, decision, self.rules, cands,
                                index=i + 1, total=len(self.queue),
                                theme=self.theme,
                                preview=bool(self.settings.get(
-                                   "preview_in_dialog", False))).show()
+                                   "preview_in_dialog", False)),
+                               suggested_sender=_hint).show()
             if res is None:                        # hoppa över
                 session_log("granska", f"Hoppade över {decision.path.name} "
                             "- filen ligger kvar i kön")
@@ -5672,6 +5999,8 @@ class App:
                    command=self._undo_selected).pack(side="right", padx=6)
         ttk.Button(top, text="Exportera rapport (MD)", style="CardLink.TButton",
                    command=self._export_report).pack(side="right", padx=6)
+        ttk.Button(top, text="Exportera årsarkiv…", style="CardLink.TButton",
+                   command=self._export_archive_gui).pack(side="right", padx=6)
         # Hur många dagar rapporten ska täcka. Standard 10.
         ttk.Label(top, text="Dagar:", style="CardMuted.TLabel").pack(
             side="right", padx=(0, 4))
@@ -6069,8 +6398,160 @@ class App:
                    command=self._open_log_dir).pack(side="left", padx=6)
         ttk.Button(bar, text="Stöd projektet 💖",
                    command=self._visa_stod).pack(side="left", padx=6)
+        ttk.Button(bar, text="Sök efter uppdateringar…",
+                   command=lambda: self._check_updates_gui(manual=True)).pack(side="left", padx=6)
         ttk.Label(bar, text=f"{APP_NAME} {APP_VERSION}",
                   style="Faint.TLabel").pack(side="right")
+
+    # -- uppdatering från Git (2026-10-16) ------------------------------
+    def _schedule_tick(self) -> None:
+        """1.1.0: schemalagd sortering - kör en sortering per dag vid
+        inställt klockslag medan appen är igång (även i systemfältet)."""
+        try:
+            if self.settings.get("schedule_enabled", False) and not self._busy:
+                tid = str(self.settings.get("schedule_time", "07:00"))[:5]
+                idag = time.strftime("%Y-%m-%d")
+                if (time.strftime("%H:%M") >= tid
+                        and self.settings.get("schedule_last_run", "") != idag):
+                    self.settings["schedule_last_run"] = idag
+                    save_settings(self.settings)
+                    self._log(f"⏰ Schemalagd sortering (kl. {tid}) startar", "info")
+                    self._sort_now()
+        except Exception:
+            pass
+        try:
+            self.root.after(30000, self._schedule_tick)
+        except Exception:
+            pass
+
+    def _export_archive_gui(self) -> None:
+        """1.1.0 (#7): exportera årsarkiv som öppen mapp + HTML-index."""
+        dest = self.filedialog.askdirectory(
+            title="Välj mapp att exportera arkivet till")
+        if not dest:
+            return
+        out = self.settings.get("output_dir", "")
+        if not out or not Path(out).is_dir():
+            self.messagebox.showwarning(
+                APP_NAME, "Utmappen finns inte - ställ in den först.")
+            return
+
+        def work() -> None:
+            res = export_year_archive(
+                Path(out), Path(dest),
+                log=lambda m: self._log_threadsafe(m, "info"))
+            def klar() -> None:
+                self.messagebox.showinfo(
+                    APP_NAME,
+                    f"{res['filer']} filer exporterade till:\n{res['mapp']}"
+                    "\n\nÖppna index.html där för att söka i arkivet.")
+            with self._ui_lock:
+                self._ui_calls.append(klar)
+
+        threading.Thread(target=work, daemon=True,
+                         name="arkiv-export").start()
+        self._log("📦 Årsarkivexport startad…", "info")
+
+    def _lookup_sender_hint(self, decision) -> str:
+        """1.1.0 (#9): slå upp firmanamn för dokumentets org.nr (bara när
+        inställningen är på och org.nr:t inte redan är ett stödord)."""
+        try:
+            text = decision.extraction.combined or decision.extraction.text or ""
+            funna = []
+            for m in re.finditer(r"\b(\d{6})-?(\d{4})\b", text):
+                siffror = m.group(1) + m.group(2)
+                if _luhn_ok(siffror):
+                    funna.append(siffror)
+            if not funna:
+                return ""
+            kända = {"".join(c for c in t if c.isdigit())
+                     for t in self.rules.all_keyword_texts()}
+            orgnr = next((o for o in funna if o not in kända), "")
+            if not orgnr:
+                return ""
+            låda: Dict[str, Any] = {}
+
+            def kör() -> None:
+                låda["namn"] = lookup_company_name_online(orgnr)
+
+            tråd = threading.Thread(target=kör, daemon=True)
+            tråd.start()
+            tråd.join(6.5)
+            namn = låda.get("namn")
+            if namn:
+                self._log(f"🔎 Org.nr {orgnr}: föreslagen avsändare "
+                          f"\"{namn}\" (uppslag via nätet)", "info")
+                return str(namn)
+        except Exception:
+            pass
+        return ""
+
+    def _check_updates_gui(self, manual: bool = False) -> None:
+        """Sök uppdatering i bakgrunden; fråga före installation."""
+        def work():
+            info = check_for_update()
+            self.root.after(0, lambda: self._update_prompt(info, manual))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_prompt(self, info: dict, manual: bool) -> None:
+        if not info.get("ok"):
+            if manual:
+                self.messagebox.showwarning(
+                    APP_NAME, "Kunde inte söka efter uppdateringar:\n"
+                    + str(info.get("error", "okänt fel")))
+            return
+        if not info.get("available"):
+            if manual:
+                self.messagebox.showinfo(
+                    APP_NAME, f"Du har den senaste versionen ({APP_VERSION}).")
+            return
+        if self.settings.get("auto_update", False) and not manual:
+            svar = True
+        else:
+            svar = self.messagebox.askyesno(
+                APP_NAME,
+                f"En ny version finns: {info['remote']} "
+                f"(du har {APP_VERSION}).\n\n"
+                "Uppdatera nu? Appen uppdateras i sin egen mapp, "
+                "dina inställningar, regler och historik rörs inte. "
+                "En säkerhetskopia tas först.")
+        if not svar:
+            return
+
+        def install():
+            ok, msg = perform_update()
+            if ok:
+                update_python_packages()
+            def done():
+                if ok:
+                    if self.messagebox.askyesno(
+                            APP_NAME, msg + "\n\nStarta om appen nu "
+                            "för att köra den nya versionen?"):
+                        self._restart_app()
+                else:
+                    self.messagebox.showwarning(APP_NAME, msg)
+            self.root.after(0, done)
+        threading.Thread(target=install, daemon=True).start()
+
+    def _restart_app(self) -> None:
+        """Starta om appen efter uppdatering (samma startväg som vanligt)."""
+        try:
+            import subprocess as _sp
+            rot = Path(__file__).resolve().parent
+            pyw = rot / "pdfsorter.pyw"
+            exe = sys.executable or "python3"
+            if sys.platform.startswith("win") and pyw.is_file():
+                exe_w = Path(exe).with_name("pythonw.exe")
+                _sp.Popen([str(exe_w if exe_w.exists() else exe), str(pyw)],
+                          cwd=str(rot))
+            else:
+                _sp.Popen([exe, str(rot / "pdfsorter.py")], cwd=str(rot))
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     # -- donationsvy (N15, ANVÄNDARORDER 2026-10-15) -------------------
     STOD_TEXT = {
@@ -6227,7 +6708,8 @@ class App:
         oversatt()
 
     # -- autoinstall av Python-tillägg vid start (2026-10-06) ---------
-    PIP_PAKET = ("pypdf", "Pillow", "pytesseract", "pystray")
+    PIP_PAKET = ("PyMuPDF", "pypdf", "pdfminer.six", "Pillow",
+                 "pytesseract", "pystray")
 
     def _pip_jobba(self, paket: tuple, status_etikett, progress, win,
                    uppgradera: bool = False):
@@ -6743,6 +7225,56 @@ class App:
 # DEL 6 - KOMMANDORAD
 # ==========================================================================
 
+def _self_check() -> int:
+    """Självtest (2026-10-16): fångar hela buggklassen "namn som används
+    men aldrig importerades" (json_dir/search_tesseract/shutil) plus
+    matchningsregressioner - utan att röra användardata."""
+    fel = 0
+
+    def rad(namn: str, ok: bool, detalj: str = "") -> None:
+        nonlocal fel
+        print(f"  {'OK  ' if ok else 'FEL '} {namn}{(' - ' + detalj) if detalj and not ok else ''}")
+        if not ok:
+            fel += 1
+
+    print(f"{APP_NAME} {APP_VERSION} - självtest")
+    versioner = _module_versions()
+    rad("alla fem moduler har samma version", len(set(versioner.values())) == 1,
+        str(versioner))
+    # Importytan mot systemmodulen: varje namn GUI/CLI anropar måste finnas.
+    for namn in ("search_tesseract", "auto_install_tesseract",
+                 "check_for_update", "perform_update",
+                 "update_python_packages", "autostart_status",
+                 "tag_pdf_metadata", "export_year_archive",
+                 "lookup_company_name_online",
+                 "sync_autostart", "set_autostart", "brand_window",
+                 "ensure_icon_file", "write_icon_file", "svenska_saknas"):
+        rad(f"namn finns: {namn}", callable(globals().get(namn)))
+    # Matchningsregressioner (samma fall som testsuiten):
+    regler = Rules()
+    regler.add_keywords("Pilkington", ["pilkington", "glas"], weight=1.0)
+    loptext = Extraction(path=Path("x.pdf"), text=(
+        "Kund AB\nStorgatan 1\n\nVi monterade glas från Pilkington i "
+        "förra veckan. Deras glas nämns här i text. Detta kommer från Kund AB."))
+    rad("bara löptext -> fråga", decide(regler, loptext, dict(DEFAULT_SETTINGS)).status == "ask")
+    huvud = Extraction(path=Path("x.pdf"), text=(
+        "Pilkington Sverige AB\nStorgatan 1\n\nFaktura\nVi hänvisar till "
+        "ert glas och er montering. Belopp att betala inom trettio dagar. Tack!"))
+    rad("avsändarhuvud -> auto", decide(regler, huvud, dict(DEFAULT_SETTINGS)).status == "auto")
+    org = next(f"556033908{d}" for d in "0123456789"
+               if _luhn_ok(f"556033908{d}"))
+    regler2 = Rules(); regler2.add_keywords("Pilkington", [f"{org[:6]}-{org[6:]}"])
+    dok = Extraction(path=Path("x.pdf"), text=(
+        f"Annan Firma\nRad två\n\nFaktura\nOrg.nr {org[:6]}-{org[6:]}\n" + "Text " * 20))
+    rad("bevisat org.nr -> auto", decide(regler2, dok, dict(DEFAULT_SETTINGS)).status == "auto")
+    if SYSTEM_MODULE:
+        rad("ikon 16px renderas", make_icon_image(16) is not None)
+        st = autostart_status()
+        rad("autostart-status svarar", isinstance(st, dict) and "klass" in st)
+    print("SJÄLVTEST:", "ALLT OK" if not fel else f"{fel} FEL")
+    return 1 if fel else 0
+
+
 def build_diagnostics() -> str:
     """ETT klistra-in-block för support (LÅNAT MÖNSTER L1).
 
@@ -6991,6 +7523,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Skapa en Markdown-rapport över matchningen och avsluta")
     p.add_argument("--report-days", type=int, default=10,
                    help="Hur många dagar rapporten ska täcka (standard 10)")
+    p.add_argument("--check", action="store_true",
+                   help="Kör självtest (importer, matchning, ikon) och avsluta")
+    p.add_argument("--check-update", action="store_true",
+                   help="Kontrollera om en nyare version finns på GitHub och avsluta")
+    p.add_argument("--update", action="store_true",
+                   help="Uppdatera appen från GitHub (appmappen) + Python-paketen och avsluta")
+    p.add_argument("--export-archive", metavar="MAPP",
+                   help="exportera årsarkiv (öppen mapp + index.html) till MAPP")
+    p.add_argument("--lookup-orgnr", metavar="ORGNR",
+                   help="slå upp firmanamn för ett organisationsnummer")
+    p.add_argument("--install-packages", action="store_true",
+                   help="Installera/uppdatera alla Python-tillägg från requirements.txt och avsluta")
     p.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     args = p.parse_args(argv)
 
@@ -7006,7 +7550,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Systemmodul: {'pdfsorter_system.py laddad' if SYSTEM_MODULE else 'SAKNAS - ikon, systemfält och autostart avstängda'}")
         print(f"Temamodul:   {'pdfsorter_theme.py laddad' if THEME_MODULE else 'SAKNAS - grått standardutseende'}")
         print(f"Systemfält: {'ja' if tray_available() else 'nej (pip install pystray)'}")
-        print(f"Autostart:  {'på' if autostart_enabled() else 'av'}")
+        _as = autostart_status()
+        print(f"Autostart:  {'på' if _as['enabled'] else 'av'}"
+              f" (klass: {_as['klass']}, {_as['platform']})")
         print(f"Konfiguration: {config_dir()}")
         print(f"Versioner:  {_module_versions()}")
         if VERSIONS_BLANDADE:
@@ -7033,6 +7579,50 @@ def main(argv: Optional[List[str]] = None) -> int:
         if senaste:
             print(f"Sessionslogg: {senaste}")
         return 0
+
+    if args.check:
+        return _self_check()
+
+    if args.check_update or args.update:
+        info = check_for_update()
+        if not info.get("ok"):
+            print(f"Kunde inte söka uppdatering: {info.get('error', '?')}")
+            return 1
+        print(f"Installerad version: {info['current']}  |  "
+              f"Senaste på GitHub: {info['remote']}")
+        if not info.get("available"):
+            print("Du har redan den senaste versionen.")
+            return 0
+        if not args.update:
+            print("En uppdatering finns! Kör med --update för att installera den.")
+            return 0
+        ok, msg = perform_update()
+        print(msg)
+        if not ok:
+            return 1
+        ok2, msg2 = update_python_packages()
+        print(msg2)
+        session_log("uppdatering", "Klar via --update (starta om appen)", "ok")
+        return 0 if ok2 else 1
+
+    if args.export_archive:
+        out = Path(load_settings().get("output_dir", "") or "")
+        if not out.is_dir():
+            print("Utmappen är inte inställd eller saknas.")
+            return 1
+        res = export_year_archive(out, Path(args.export_archive),
+                                  log=lambda m: print(m))
+        print(f"Export klart: {res['filer']} filer -> {res['mapp']} "
+              f"({res['fel']} fel)")
+        return 0 if res["fel"] == 0 else 1
+    if args.lookup_orgnr:
+        namn = lookup_company_name_online(args.lookup_orgnr)
+        print(f"{args.lookup_orgnr}: {namn or '(inget namn hittades)'}")
+        return 0 if namn else 1
+    if args.install_packages:
+        ok, msg = update_python_packages()
+        print(msg)
+        return 0 if ok else 1
 
     if args.install_autostart or args.remove_autostart:
         ok, msg = set_autostart(args.install_autostart)
