@@ -89,7 +89,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -6557,7 +6557,19 @@ class App:
             return
         kalla = ("GitHub Releases" if info.get("source") == "release"
                  else "GitHub (main-grenen)")
-        verifierad = bool(info.get("sha256_url"))
+        verifierad = bool(info.get("sha256_url") or info.get("sha256"))
+        if info.get("source") == "release" and not verifierad:
+            self._h("uppdatering",
+                    f"Releasen {info.get('remote')} saknar kontrollsumma - "
+                    "uppdateringen kan inte verifieras", "warn")
+            if manual:
+                self.messagebox.showwarning(
+                    APP_NAME,
+                    f"Releasen {info.get('remote')} saknar kontrollsumma "
+                    "(SHA256SUMS.txt eller SHA-256 i release-texten).\n\n"
+                    "Appen installerar inte ett paket som inte kan "
+                    "verifieras. Ladda ner den manuellt från releasesidan.")
+            return
         # Autouppdatering: installera tyst bara när paketet kan verifieras
         # mot release-postens kontrollsumma. Utan kontrollsumma frågar vi.
         tyst = (bool(self.settings.get("auto_update", False)) and not manual

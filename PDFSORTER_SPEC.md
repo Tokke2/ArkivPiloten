@@ -52,7 +52,7 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
-> **Leverans 1.4.0 (2026-10-20) — multi-OS-installation + verifierad
+> **Leverans 1.4.1 (2026-10-20) — multi-OS-installation + verifierad
 > autouppdatering från Releases.**
 > (a) install.sh för macOS/Linux (venv, genväg, valfri autostart,
 > --uninstall), riktig .app i ~/Applications på macOS, .bat-filen frågar
@@ -66,9 +66,11 @@
 > paketet ArkivPiloten.zip verifieras mot SHA256SUMS.txt innan uppackning,
 > zip-slip via Path.relative_to, compile()+versionskontroll, backup och
 > fullständig rollback om något går fel, updates/last_update.json.
-> auto_update är på som standard men installerar tyst ENDAST när
-> kontrollsumma finns. .github/workflows/release.yml publicerar/uppdaterar
-> releasen vid varje push till main och varje v*-tagg.
+> auto_update är på som standard men installerar ENDAST när
+> kontrollsumma finns. Saknar releasen bifogade filer används GitHubs
+> tagg-arkiv som paket, med SHA-256 ur release-texten.
+> .github/workflows/release.yml publicerar/uppdaterar releasen vid varje
+> push till main och varje v*-tagg.
 > (d) Tester: tests/ (pytest) för autostart per OS, datamapp, startfil,
 > genvägar, CLI-autostart och uppdateraren; CI på Linux/macOS/Windows.
 >

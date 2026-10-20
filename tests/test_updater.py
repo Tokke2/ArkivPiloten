@@ -56,6 +56,25 @@ def test_release_without_checksum_is_reported(monkeypatch):
     info = S.check_for_update()
     assert info["source"] == "release"
     assert info["sha256_url"] == ""
+    assert info["sha256"] == ""
+    # Utan kontrollsumma får release-paketet inte installeras.
+    ok, msg = S.perform_update(root=pathlib.Path("/tmp"))
+    assert ok is False
+    assert "kontrollsumma" in msg.lower()
+
+
+def test_checksum_in_release_notes_uses_tag_archive(monkeypatch):
+    """Release utan bifogade filer: tagg-arkivet + SHA-256 i texten."""
+    digest = "c" * 64
+    payload = _release_payload(with_sums=False)
+    payload["assets"] = []
+    payload["body"] = f"Paketet verifieras.\nSHA256 (ArkivPiloten-1.4.1.zip): {digest}\n"
+    monkeypatch.setattr(S, "_http_get", lambda *a, **k: json.dumps(payload).encode())
+    info = S.check_for_update()
+    assert info["source"] == "release"
+    assert info["sha256"] == digest
+    assert info["zip_url"] == (
+        f"https://codeload.github.com/{S.UPDATE_REPO}/zip/refs/tags/v9.9.9")
 
 
 def test_branch_is_the_fallback(monkeypatch):
@@ -136,6 +155,27 @@ def test_update_installs_verified_package(monkeypatch, tmp_path):
     assert (root / "updates" / "last_update.json").is_file()
     assert list((root / "backups").glob("update_*"))
     assert not (root / "pdfsorter.py.update-tmp").exists()
+
+
+def test_update_accepts_checksum_from_release_notes(monkeypatch, tmp_path):
+    """Release utan bifogad sums: SHA-256 ur release-texten används."""
+    root = _root(tmp_path)
+    zippath = tmp_path / "tag.zip"
+    digest = _make_zip(zippath)
+    monkeypatch.setattr(S, "_ladda_ner",
+                        lambda url, dest, timeout=900: zippath.replace(dest))
+    monkeypatch.setattr(S, "_http_get", lambda *a, **k: b"")
+    monkeypatch.setattr(S, "check_for_update", lambda timeout=15: {
+        "ok": True, "current": "1.0.0", "remote": "9.9.9", "available": True,
+        "source": "release", "tag": "v9.9.9", "sha256_url": "",
+        "sha256": digest,
+        "zip_url": "https://codeload.github.com/x/y/zip/refs/tags/v9.9.9",
+        "release_url": "", "notes": "",
+    })
+    ok, msg = S.perform_update(root=root)
+    assert ok, msg
+    assert 'APP_VERSION = "9.9.9"' in (
+        root / "pdfsorter.py").read_text(encoding="utf-8")
 
 
 def test_update_refuses_wrong_checksum(monkeypatch, tmp_path):

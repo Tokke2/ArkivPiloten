@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 def _mod_versions_line() -> str:
     """Versioner för alla fem modulerna (felsökning/support)."""
@@ -2997,13 +2997,25 @@ def _latest_release(timeout: float = 15.0) -> Optional[dict]:
                 zip_url = url
                 break
     sums_url = assets.get(UPDATE_SUMS_NAME)
+    notes = str(data.get("body") or "")
+    # Releases som saknar bifogade filer (t.ex. när API-uppladdningen
+    # inte är tillgänglig) kan ändå användas: då hämtas GitHubs
+    # tagg-arkiv och kontrollsumman läses ur release-texten.
+    m_sha = re.search(r"SHA-?256[^\n]{0,80}?([0-9a-fA-F]{64})", notes)
+    body_sha = m_sha.group(1).lower() if m_sha else ""
+    if not zip_url and tag:
+        zip_url = (f"https://codeload.github.com/{UPDATE_REPO}/zip/"
+                   f"refs/tags/{tag}")
+    if not sums_url and not body_sha and zip_url:
+        body_sha = ""
     return {
         "tag": tag,
         "version": version,
         "zip_url": zip_url or "",
         "sums_url": sums_url or "",
+        "sha256": body_sha,
         "release_url": str(data.get("html_url") or ""),
-        "notes": str(data.get("body") or "")[:4000],
+        "notes": notes[:4000],
     }
 
 
@@ -3025,6 +3037,7 @@ def check_for_update(timeout: int = 15) -> dict:
                 f"https://codeload.github.com/{UPDATE_REPO}/zip/refs/tags/"
                 f"{rel['tag']}"),
             "sha256_url": rel["sums_url"],
+            "sha256": rel.get("sha256", ""),
             "release_url": rel["release_url"],
             "notes": rel["notes"],
         }
@@ -3054,7 +3067,7 @@ def check_for_update(timeout: int = 15) -> dict:
                 "available": _version_tuple(remote) > _version_tuple(APP_VERSION),
                 "source": "branch", "tag": "",
                 "zip_url": UPDATE_ZIP_URL, "sha256_url": "",
-                "release_url": "", "notes": ""}
+                "sha256": "", "release_url": "", "notes": ""}
     except Exception as exc:
         return {"ok": False, "current": APP_VERSION, "remote": None,
                 "available": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -3251,9 +3264,9 @@ def perform_update(timeout: int = 180,
     staging = root / "updates" / "staging"
     zippath = tmp / "arkivpiloten-update.zip"
     try:
-        session_log("uppdatering", f"Laddar ner {url}")
-        _ladda_ner(url, zippath, timeout=timeout)
-        # -- kontrollsumma (finns för alla publicerade releaser) ----------
+        # -- kontrollsumma FÖRE nedladdning: ett release-paket som inte
+        #    kan verifieras ska aldrig hämtas eller installeras. -------
+        forvantad = info.get("sha256") or ""
         if info.get("sha256_url"):
             try:
                 sums = _http_get(info["sha256_url"], min(timeout, 30),
@@ -3262,12 +3275,22 @@ def perform_update(timeout: int = 180,
                 return False, ("Kunde inte hämta kontrollsumman - "
                                f"uppdateringen avbröts ({type(exc).__name__}).")
             namn = [Path(urlparse(url).path).name, UPDATE_ASSET_NAME]
-            forvantad = _sha_from_sums(sums, namn)
+            forvantad = _sha_from_sums(sums, namn) or ""
             if not forvantad:
                 return False, ("SHA256SUMS.txt saknar paketet - "
                                "uppdateringen avbröts.")
+        if not forvantad and info.get("source") == "release":
+            session_log("uppdatering",
+                        "Release saknar kontrollsumma - avbröt", "warn")
+            return False, ("Releasen saknar kontrollsumma (SHA256SUMS.txt "
+                           "eller SHA-256 i release-texten), så paketet kan "
+                           "inte verifieras. Uppdateringen avbröts - ladda "
+                           "ner manuellt från releasesidan i stället.")
+        session_log("uppdatering", f"Laddar ner {url}")
+        _ladda_ner(url, zippath, timeout=timeout)
+        if forvantad:
             faktisk = _sha256_file(zippath)
-            if faktisk != forvantad:
+            if faktisk != forvantad.lower():
                 return False, ("Kontrollsumman stämmer inte "
                                f"({faktisk[:12]}… != {forvantad[:12]}…) - "
                                "uppdateringen avbröts och inget ändrades.")
