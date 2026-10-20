@@ -52,6 +52,32 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Leverans 1.4.5 (2026-10-20) — bara riktiga bevis räknas, alla
+> skrivsätt av samma nummer matchar, och fel lärs bort.**
+> (a) Starka bevis: bara riktiga identifierare räknas. Årtal ("2025"),
+> datum ("2024-01", "24.10.2025"), belopp ("1.234") och versionsnummer
+> ("v1.4.4") klassades förut som projektkod eller domän och kunde
+> därmed kringgå poängtröskel, krav på antal stödord och textlängd i
+> _auto_blocker. Koder måste nu innehålla minst en bokstav och en
+> siffra, domäner kräver en riktig toppdomän av bokstäver, och ett
+> tiosiffrigt nummer med fel kontrollsiffra är inte längre ett starkt
+> bevis.
+> (b) Identifierare matchar oavsett skrivsätt: "556033-9086",
+> "556033 9086", "5560339086" och "556033–9086" träffar samma regel,
+> liksom VAT-nummer med eller utan mellanslag och SE-prefix. Mönstret
+> byggs ur numrets delar med valfria skiljetecken; vanliga ord matchas
+> exakt som förut.
+> (c) Negativ inlärning: när en automatisk gissning rättas i
+> granskningsdialogen registreras avvisandet på de stödord som ledde
+> fel. Ordet väger 20 % mindre per avvisande (golv noll, halveringstid
+> ett år), den lärda modellen får negativa bevis för den felaktiga
+> kategorin, och historiken sparar corrected_from. Modellens säkerhet
+> får dessutom en liten rankningsbonus (0,2) när den har minst fem
+> filer per kategori - men aldrig över ett bevisat avsändar-ID och
+> aldrig över beviskraven.
+> (d) Tester: tests/test_matching.py (17 st) för starka bevis,
+> identifierarformat, avvisanderäkning och negativ inlärning.
+>
 > **Leverans 1.4.4 (2026-10-20) — rullgardinen skriver-söker som en
 > riktig dropdown.** Kategori/mapp: "p" visar mapparna som BÖRJAR på p
 > (inte alla som innehåller p), "pil" smalnar av till PIL. Sökordet

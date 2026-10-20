@@ -90,7 +90,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.4.5"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -302,29 +302,33 @@ _STRONG_PATTERNS = (
     ("orgnr", re.compile(r"^\d{6}[-\u2013 ]?\d{4}$")),
     ("vat", re.compile(r"^[a-z]{2}\d{9,12}$")),
     ("giro", re.compile(r"^\d{3,4}-\d{4}$")),
-    ("domain", re.compile(r"^[\w-]+\.[\w.-]{2,}$")),
-    # Projekt- och objektkoder: IF26, AB-1200, K4711, 24:118.
+    # Domän: sista delen måste vara en riktig toppdomän av bokstäver.
+    # Tidigare räckte "\w", vilket gjorde "24.10.2025", "1.234" och
+    # "v1.4.4" till starka bevis - datum och versionsnummer är precis
+    # motsatsen till ett unikt kännetecken.
+    ("domain", re.compile(
+        r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$")),
+    # Projekt- och objektkoder: IF26, AB-1200, K4711.
     # Bokstäver OCH siffror i samma korta ord är ingen slump - ingen
-    # skriver "IF26" i förbigående. Sådana koder är hela poängen med
-    # att sortera på projekt, så de måste räknas som ett unikt
-    # kännetecken även när de bara står mitt i löptexten.
-    ("kod", re.compile(r"^(?=.{3,12}$)(?=.*\d)[a-z0-9]+(?:[-:/][a-z0-9]+)*$")),
+    # skriver "IF26" i förbigående. Ett rent årtal ("2025"), ett datum
+    # ("2024-01") eller ett belopp är däremot vardagsmat och får aldrig
+    # räknas som ett starkt bevis: det kringgår poängtröskel, antal
+    # stödord och textlängd i _auto_blocker.
+    ("kod", re.compile(
+        r"^(?=.{3,12}$)(?=.*\d)(?=.*[a-z])[a-z0-9]+(?:[-:/][a-z0-9]+)*$")),
 )
 
 
 def _strength_of(t: str) -> str:
     for kind, pat in _STRONG_PATTERNS:
         if pat.match(t):
-            siffror = t.replace("-", "").replace("–", "")
             # Org.nr ska ha giltig kontrollsiffra för att räknas. Ett
             # tiosiffrigt nummer med fel checksiffra är ett kundnummer,
-            # inte ett organisationsnummer - och inte heller en projektkod:
-            # det ska hamna hos referensnumren, inte räknas som starkt
-            # (REQ-C1 AC-1.2).
-            if kind == "orgnr" and not _luhn_ok(siffror):
-                continue
-            if kind == "kod" and re.fullmatch(r"\d{6}[-– ]?\d{4}", t) \
-                    and not _luhn_ok(siffror):
+            # inte ett organisationsnummer (REQ-C1 AC-1.2) - och det är
+            # ingen projektkod heller, eftersom koder måste innehålla
+            # minst en bokstav.
+            if kind == "orgnr" and not _luhn_ok(
+                    t.replace("-", "").replace("–", "")):
                 continue
             return kind
     return ""
@@ -351,6 +355,63 @@ def keyword_strength(text: str) -> str:
     return _strength_of(t) or (_strength_of(d) if d != t else "")
 
 
+#: Skiljetecken som får skilja delarna i en identifierare. Samma nummer
+#: skrivs "556033-9086", "556033 9086", "556033–9086" eller "5560339086"
+#: beroende på avsändare och OCR - regeln ska matcha alla skrivsätten.
+_ID_SEP_RE = re.compile(r"[-\u2013\u2014\u2212:/]+")
+
+#: Memo: text -> är stödordet en flexibel identifierare? (Dyr att räkna
+#: ut per dokument, svaret beror bara på texten.)
+_FLEX_CACHE: Dict[str, bool] = {}
+
+
+def _id_groups(text: str) -> List[str]:
+    """Dela en identifierare i sina delar, oberoende av skrivsätt.
+
+    "556033-9086", "556033 9086" och "556033–9086" ger alla
+    ["556033", "9086"]. Ett tiosiffrigt org.nr utan skiljetecken delas i
+    6+4 när kontrollsiffran stämmer, och ett VAT-nummer i SE + 6 + 4 + 2.
+    """
+    parts = [p for p in _ID_SEP_RE.split(normalize(text)) if p]
+    if len(parts) == 1:
+        p = parts[0]
+        if p.isdigit() and len(p) == 10 and _luhn_ok(p):
+            return [p[:6], p[6:]]
+        m = re.fullmatch(r"se(\d{12})", p)
+        if m:
+            d = m.group(1)
+            return ["se", d[:6], d[6:10], d[10:]]
+    return parts
+
+
+def _flexible_id_pattern(text: str) -> Optional[re.Pattern]:
+    """Mönster som matchar samma identifierare oavsett skiljetecken.
+
+    Returnerar None för vanliga ord och för ensamma delar - då gäller den
+    exakta ordgränsen som förut.
+    """
+    parts = _id_groups(text)
+    if not 2 <= len(parts) <= 6:
+        return None
+    if not all(re.fullmatch(r"[a-z0-9]+", p) for p in parts):
+        return None
+    core = r"[-\u2013\u2014\u2212:/ ]*".join(re.escape(p) for p in parts)
+    return re.compile(r"(?<![0-9a-z])" + core + r"(?![0-9a-z])")
+
+
+def _is_flexible(text: str) -> bool:
+    """Sant om stödordet är en stark identifierare med flera delar."""
+    key = str(text or "")
+    v = _FLEX_CACHE.get(key)
+    if v is None:
+        v = bool(keyword_strength(key)) and \
+            _flexible_id_pattern(key) is not None
+        if len(_FLEX_CACHE) > 4000:      # minnestak, som mönstercachen
+            _FLEX_CACHE.clear()
+        _FLEX_CACHE[key] = v
+    return v
+
+
 @dataclass
 class CategoryScore:
     name: str
@@ -361,6 +422,9 @@ class CategoryScore:
     #: Flersidig matchning: stödord som upprepas på flera sidor, med
     #: sidantal - "pilkington ×4 sidor". Starkt avsändarbevis.
     multipage: List[str] = field(default_factory=list)
+    #: Rankningsbonus från en säker lärd klassificerare. Påverkar bara
+    #: ordningen och marginalen - aldrig beviskraven i _auto_blocker.
+    bonus: float = 0.0
 
     def zone_of(self, word: str) -> str:
         return self.zones.get(word, "body")
@@ -445,14 +509,24 @@ def _kw_pattern(kw: Dict[str, Any]) -> re.Pattern:
     return re.compile(text)
 
 
-_PATTERN_CACHE: Dict[Tuple[str, bool], re.Pattern] = {}
+_PATTERN_CACHE: Dict[Tuple[str, bool, bool], re.Pattern] = {}
 
 
 def _cached_pattern(kw: Dict[str, Any]) -> re.Pattern:
-    key = (kw["text"], bool(kw.get("whole_word", True)))
+    """Sökmönstret för ett stödord (cache: text, helord, flexibel).
+
+    Starka identifierare (org.nr, VAT, giro, projektkod) får ett flexibelt
+    mönster: samma nummer matchar oavsett om det skrivs med bindestreck,
+    blanksteg, tankstreck eller helt utan skiljetecken. Vanliga ord
+    matchas exakt som förut.
+    """
+    text = kw["text"]
+    helord = bool(kw.get("whole_word", True))
+    flex = helord and _is_flexible(text)
+    key = (text, helord, flex)
     pat = _PATTERN_CACHE.get(key)
     if pat is None:
-        pat = _kw_pattern(kw)
+        pat = _flexible_id_pattern(text) if flex else _kw_pattern(kw)
         # Minnestak (ANVÄNDARORDER 2026-08-26): mönstercachen får inte
         # växa obundet; vid tak töms den och byggs upp igen billigt.
         if len(_PATTERN_CACHE) > 4000:
@@ -717,6 +791,11 @@ class TextZones:
         """
         if not kw.get("whole_word", True):
             return True
+        if _is_flexible(kw["text"]):
+            # Delarna kan stå med eller utan skiljetecken ("556033 9086",
+            # "5560339086") - då räcker inte mängduppslagningen, utan
+            # regexen får avgöra. Sådana stödord är få.
+            return True
         delar = _TOKEN_RE.findall(kw["text"])
         if not delar:
             return True
@@ -791,6 +870,39 @@ def _zones_for(text: str, filename: str, page_header: str,
     return z
 
 
+#: Hur mycket varje avvisande sänker ett stödords vikt, och hur snabbt
+#: gamla avvisanden glöms (halveringstid i dagar). Efter fem avvisanden
+#: väger ordet noll och kan inte längre flytta en fil.
+_REJECT_STEP = 0.2
+_REJECT_HALF_LIFE_DAYS = 365.0
+
+
+def _reject_factor(kw: Dict[str, Any],
+                   now: Optional[datetime] = None) -> float:
+    """Viktfaktor 0-1 utifrån hur ofta stödordet lett fel.
+
+    Avvisanden åldras: ett ord som rättades för ett år sedan väger hälften
+    så tungt som ett som rättades i går. På så vis ligger gamla misstag
+    inte kvar och stör när reglerna väl blivit bättre.
+    """
+    n = int(kw.get("rejected", 0) or 0)
+    if n <= 0:
+        return 1.0
+    age = 0.0
+    stamp = str(kw.get("rejected_at", "") or "")
+    if stamp:
+        try:
+            t = datetime.fromisoformat(stamp)
+            nu = now or datetime.now().astimezone()
+            if t.tzinfo is None:
+                t = t.astimezone()
+            age = max(0.0, (nu - t).total_seconds() / 86400.0)
+        except (ValueError, TypeError, OSError):
+            age = 0.0
+    eff = n * (0.5 ** (age / _REJECT_HALF_LIFE_DAYS)) if age else float(n)
+    return max(0.0, 1.0 - _REJECT_STEP * eff)
+
+
 def score_text(rules: Rules, text: str, filename: str = "",
                page_header: str = "", page_footer: str = "",
                token_pages: Optional[Dict[str, int]] = None,
@@ -825,10 +937,15 @@ def score_text(rules: Rules, text: str, filename: str = "",
             # Avfärda ordet med en mängduppslagning innan regexen körs.
             if not zones.kan_finnas(kw):
                 continue
+            # Negativ inlärning: ett ord som lett fel väger mindre, och
+            # efter tillräckligt många avvisanden ingenting alls.
+            vikt = float(kw["weight"]) * _reject_factor(kw)
+            if vikt <= 0:
+                continue
             hit, zone, factor = zones.locate(_cached_pattern(kw))
             if not hit:
                 continue
-            total += float(kw["weight"]) * factor
+            total += vikt * factor
             matched.append(kw["text"])
             where[kw["text"]] = zone
             # Namn och kropp överens (matchningsrundan 2026-10-05): ett
@@ -1132,6 +1249,11 @@ _LEARNED_MIN_FILES = 5
 _LEARNED_CAP_TOKENS = 2500
 #: Marginal (log-sannolikhet) som krävs för att modellen ska räknas säker.
 _LEARNED_CONF_MARGIN = 0.25
+#: Hur hårt ett ord som lett fel straffas i modellen. 0 = ingen påverkan.
+_LEARNED_NEG_BETA = 0.5
+#: Rankningsbonus för modellens val. Liten med flit: den får flytta
+#: ordningen och marginalen, aldrig beviskraven.
+_LEARNED_BONUS = 0.2
 
 _LEARNED: Optional["LearnedMatcher"] = None
 
@@ -1180,7 +1302,14 @@ class LearnedMatcher:
         self.cats = {k: v for k, v in cats.items() if isinstance(v, dict)}
         self._sig = sig
 
-    def train(self, category: str, tokens: List[str]) -> None:
+    def train(self, category: str, tokens: List[str],
+              rejected_for: Optional[str] = None) -> None:
+        """Träna på ett beslut.
+
+        `rejected_for` = kategorin som gissade fel. Då räknas filens ord
+        som NEGATIVA bevis för den kategorin, så att samma ord inte leder
+        fel igen. En användarkorrigering lär alltså både rätt och fel.
+        """
         if not category or not tokens:
             return
         c = self.cats.setdefault(category, {"n": 0, "tot": 0, "w": {}})
@@ -1192,6 +1321,15 @@ class LearnedMatcher:
         if len(w) > _LEARNED_CAP_TOKENS:         # minnestak
             c["w"] = dict(sorted(w.items(), key=lambda kv: -kv[1])
                           [:_LEARNED_CAP_TOKENS])
+        if rejected_for and rejected_for != category:
+            neg = self.cats.setdefault(rejected_for, {"n": 0, "tot": 0, "w": {}})
+            nw = neg.setdefault("neg", {})
+            for t in dict.fromkeys(tokens):
+                nw[t] = int(nw.get(t, 0)) + 1
+                neg["neg_tot"] = int(neg.get("neg_tot", 0)) + 1
+            if len(nw) > _LEARNED_CAP_TOKENS:
+                neg["neg"] = dict(sorted(nw.items(), key=lambda kv: -kv[1])
+                                  [:_LEARNED_CAP_TOKENS])
         self._dirty = True
 
     def flush(self) -> None:
@@ -1226,8 +1364,22 @@ class LearnedMatcher:
             tot = int(c.get("tot", 0)) or 1
             s = math.log(int(c["n"]) / total)              # prior
             w = c.get("w", {})
+            neg = c.get("neg", {}) or {}
+            neg_tot = int(c.get("neg_tot", 0) or 0)
             for t, k in tk.items():
                 s += k * math.log((w.get(t, 0) + 1) / (tot + vocab))
+                # Negativ inlärning: jämför hur vanligt ordet är i
+                # kategorins RÄTTA filer med hur vanligt det är i de filer
+                # där kategorin gissade fel. Är det vanligare bland
+                # misstagen straffas det - annars inte alls.
+                if neg_tot:
+                    nw = int(neg.get(t, 0) or 0)
+                    if nw:
+                        pos = (int(w.get(t, 0)) + 1) / (tot + vocab)
+                        negr = (nw + 1) / (neg_tot + vocab)
+                        if negr > pos:
+                            s -= (k * min(math.log(negr / pos), 2.0)
+                                  * _LEARNED_NEG_BETA)
             res.append((s / ntk, namn))
         res.sort(key=lambda x: (-x[0], x[1]))
         topp = res[0]
@@ -1339,6 +1491,28 @@ def _auto_blocker(score: CategoryScore, rules: Rules,
     return None
 
 
+def _apply_learned_ranking(scores: List[CategoryScore],
+                           lm_pred: Tuple[str, float, int]) -> None:
+    """Låt en säker lärd modell flytta rankningen - aldrig bevisen.
+
+    Bonusen räknas in när kategorier jämförs (ordning och marginal) men
+    inte när _auto_blocker prövar beviskraven: den läser fortfarande den
+    regelbaserade poängen. Ett bevisat avsändar-ID får aldrig petas ned,
+    och modellen kan inte uppfinna en kategori som reglerna inte alls
+    matchade - den måste redan finnas bland träffarna.
+    """
+    namn, conf, _antal = lm_pred
+    if conf < _LEARNED_CONF_MARGIN:
+        return
+    target = next((s for s in scores if s.name == namn), None)
+    if target is None:
+        return
+    if scores[0].name != namn and scores[0].is_conclusive:
+        return
+    target.bonus = _LEARNED_BONUS
+    scores.sort(key=lambda s: (-(s.score + s.bonus), s.name))
+
+
 def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> Decision:
     """Avgör om filen kan sorteras automatiskt eller behöver frågas om.
 
@@ -1364,6 +1538,9 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
         except Exception:
             lm_pred = None
 
+    if lm_pred is not None and scores:
+        _apply_learned_ranking(scores, lm_pred)
+
     if not scores:
         # Säkerhetsrundan 2026-10-16: den lärda klassificeraren får aldrig
         # ensam flytta en fil som inga regler matchade - inte ens på Lös
@@ -1376,7 +1553,13 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
         return d
 
     best = scores[0]
-    second = scores[1].score if len(scores) > 1 else 0.0
+    # Jämförelserna nedan använder den effektiva poängen (regelpoäng +
+    # eventuell modellbonus). Beviskraven i _auto_blocker läser däremot
+    # den regelbaserade poängen, så bonusen kan aldrig sänka en tröskel.
+    def _eff(s: CategoryScore) -> float:
+        return s.score + s.bonus
+
+    second = _eff(scores[1]) if len(scores) > 1 else 0.0
 
     def ask(reason: str) -> Decision:
         d = Decision(extraction.path, extraction, scores, "ask", reason)
@@ -1406,9 +1589,9 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
     # avgjord - en konkurrent som nämns i löptexten gör inte dokumentet
     # tvetydigt, hur många gånger den än nämns.
     if len(scores) > 1 and not (proved and not rival_proved):
-        nära = (best.score - second < t["ambiguity_margin"]
+        nära = (_eff(best) - second < t["ambiguity_margin"]
                 or (t["score_ratio"] > 1.0 and second > 0
-                    and best.score < second * t["score_ratio"]))
+                    and _eff(best) < second * t["score_ratio"]))
         if nära and scores[1].only_recipient:
             # 2026-10-15: en tvåa som BARA står som mottagare gör inte
             # dokumentet tvetydigt - vi är kunden hos dem, inte tvärtom.
@@ -1430,7 +1613,7 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
                         scores.sort(key=lambda s2: (s2.name != vinnare,
                                                     -s2.score, s2.name))
                         best = scores[0]
-                        second = scores[1].score
+                        second = _eff(scores[1])
                     d = Decision(extraction.path, extraction, scores, "auto",
                                  f"Lärd klassificerare bryter dödläget "
                                  f"({lm_pred[2]} liknande filer)")
@@ -1439,7 +1622,7 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
             # tidigare sorterade filer vinner (enkel historikprior som
             # är aktiv redan från första filen, till skillnad från N14).
             # Även här gäller beviskraven för en ny vinnare (2026-10-16).
-            if abs(best.score - second) < 0.001:
+            if abs(_eff(best) - second) < 0.001:
                 f1 = int((rules.get(best.name) or {}).get("files_sorted", 0) or 0)
                 f2 = int((rules.get(scores[1].name) or {}).get("files_sorted", 0) or 0)
                 if f1 != f2:
@@ -1451,19 +1634,19 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
                             scores.sort(key=lambda s2: (s2.name != vinnare,
                                                         -s2.score, s2.name))
                             best = scores[0]
-                            second = scores[1].score
+                            second = _eff(scores[1])
                         d = Decision(extraction.path, extraction, scores, "auto",
                                      f"Historik bryter exakt dödläge: {vinnare} "
                                      f"har {max(f1, f2)} tidigare filer mot "
                                      f"{min(f1, f2)}")
                         return d
-            d = ask(f"{best.name} ({best.score:g}) och {scores[1].name} "
+            d = ask(f"{best.name} ({_eff(best):g}) och {scores[1].name} "
                     f"({second:g}) ligger för nära")
             d.learned_hint = (lm_pred[0], lm_pred[2]) if lm_pred else None
             return d
         ratio = t["score_ratio"]
-        if ratio > 1.0 and second > 0 and best.score < second * ratio:
-            d = ask(f"{best.name} ({best.score:g}) är inte {ratio:g} gånger "
+        if ratio > 1.0 and second > 0 and _eff(best) < second * ratio:
+            d = ask(f"{best.name} ({_eff(best):g}) är inte {ratio:g} gånger "
                     f"starkare än {scores[1].name} ({second:g})")
             d.learned_hint = (lm_pred[0], lm_pred[2]) if lm_pred else None
             return d
@@ -2003,8 +2186,19 @@ class SortEngine:
 
             if not s.get("dry_run", False):
                 self.rules.register_hit(category, matched)
-                self._rules_save()
                 best = decision.best
+                # Negativ inlärning (2026-10-20): rättade användaren en
+                # automatisk gissning ska den felaktiga kategorin lära sig
+                # av misstaget - dess stödord väger mindre nästa gång och
+                # den lärda modellen får negativa bevis. Utan detta blev
+                # bara det rätta valet starkare och samma ord kunde leda
+                # fel om och om igen.
+                wrong = ""
+                if (decided_by == "user" and best is not None
+                        and best.name != category):
+                    wrong = best.name
+                    self.rules.register_reject(wrong, best.matched)
+                self._rules_save()
                 # N14: varje beslut blir träningsdata (AC-14.4) - även
                 # användarens korrigeringar, eftersom kategorin här är
                 # det slutgiltiga valet.
@@ -2012,7 +2206,8 @@ class SortEngine:
                                     or decision.extraction.combined)
                 if s.get("learned_matching", True):
                     try:
-                        _learned().train(category, toks)
+                        _learned().train(category, toks,
+                                         rejected_for=wrong or None)
                     except Exception:
                         pass
                 append_history({
@@ -2029,6 +2224,7 @@ class SortEngine:
                     "matched": matched,
                     "used_ocr": decision.extraction.used_ocr,
                     "decided_by": decided_by,
+                    "corrected_from": wrong or None,
                     "learned": learned or [],
                     "date": when.isoformat() if when else None,
                     "date_source": källa,

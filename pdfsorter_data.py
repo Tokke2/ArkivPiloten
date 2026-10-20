@@ -51,7 +51,7 @@ except ImportError:                                  # pragma: no cover
 SCHEMA_VERSION = 1
 
 #: Programmets version. Höjs vid varje leverans.
-VERSION = "1.4.4"
+VERSION = "1.4.5"
 
 
 # ==========================================================================
@@ -686,14 +686,21 @@ class Rules:
                 if not text or text in seen:
                     continue
                 seen.add(text)
-                keywords.append({
+                post = {
                     "text": text,
                     "weight": float(kw.get("weight", 1.0) or 1.0),
                     "whole_word": bool(kw.get("whole_word", True)),
                     "hits": int(kw.get("hits", 0) or 0),
                     "added": kw.get("added", now_iso()),
                     "source": kw.get("source", "user"),
-                })
+                }
+                # Negativ inlärning: ett stödord som lett fel sparas med
+                # antal avvisanden och när det senast hände. Fälten skrivs
+                # bara när de används, så gamla rules.json är oförändrade.
+                if int(kw.get("rejected", 0) or 0):
+                    post["rejected"] = int(kw.get("rejected", 0) or 0)
+                    post["rejected_at"] = str(kw.get("rejected_at", "") or "")
+                keywords.append(post)
             name = str(cat["name"]).strip()
             self.categories.append({
                 "name": name,
@@ -847,6 +854,23 @@ class Rules:
         for kw in cat["keywords"]:
             if kw["text"] in hits:
                 kw["hits"] = int(kw.get("hits", 0)) + 1
+
+    def register_reject(self, name: str, matched: List[str]) -> None:
+        """Ett stödord ledde fel: filen hamnade hos `name` men rättades.
+
+        Räknaren gör att ordet väger mindre nästa gång (se _reject_factor
+        i pdfsorter.py). Ett ord som aldrig mer används rätt tystnar helt,
+        men en enstaka felsortering sänker det bara mjukt.
+        """
+        cat = self.get(name)
+        if not cat:
+            return
+        stamp = now_iso()
+        hits = {normalize(w) for w in matched}
+        for kw in cat["keywords"]:
+            if kw["text"] in hits:
+                kw["rejected"] = int(kw.get("rejected", 0)) + 1
+                kw["rejected_at"] = stamp
 
 
 MAX_HISTORY = 2000

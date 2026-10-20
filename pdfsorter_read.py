@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 #: Programmets version. Höjs vid varje leverans.
-VERSION = "1.4.4"
+VERSION = "1.4.5"
 
 __all__ = [
     # extraktion
