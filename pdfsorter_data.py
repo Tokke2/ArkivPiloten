@@ -51,7 +51,7 @@ except ImportError:                                  # pragma: no cover
 SCHEMA_VERSION = 1
 
 #: Programmets version. Höjs vid varje leverans.
-VERSION = "1.4.5"
+VERSION = "1.4.6"
 
 
 # ==========================================================================
@@ -593,6 +593,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "start_minimized": False,    # göm fönstret direkt, ligg i systemfältet
     "tray_enabled": True,        # visa ikon i systemfältet
     "close_to_tray": True,       # krysset minimerar i stället för att avsluta
+    "minimize_to_tray": False,   # minimering göms i systemfältet (annars kvar
+                                 # i aktivitetsfältet - krysset styr sitt eget)
     "autowatch_on_start": False, # slå på bevakning direkt vid start
     "notify": True,              # popup-notis när filer sorterats
     "rescan_after_learn": True,  # skanna om allt när ett nytt stödord lärts in

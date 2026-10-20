@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.5"
+APP_VERSION = "1.4.6"
 
 def _mod_versions_line() -> str:
     """Versioner för alla fem modulerna (felsökning/support)."""
@@ -1989,6 +1989,10 @@ HELP_CONTENT: List[Tuple[str, str]] = [
              "klickar på krysset. Högerklicka på ikonen för snabbmenyn: visa "
              "fönstret, sortera nu, slå på bevakning, öppna granskningskön "
              "eller avsluta."),
+    ("body", "Att minimera fönstret är en egen sak: det stannar i "
+             "aktivitetsfältet som vanliga program. Vill du hellre att även "
+             "minimering ska gömma fönstret vid klockan, kryssa i "
+             "\"Minimera till systemfältet\" under Inställningar."),
     ("body", "Ikonen visar ett dokument som delas upp i tre färgade mappar — "
              "precis vad appen gör. En grön prick betyder att bevakningen är "
              "igång, så du ser det även när fönstret är gömt."),

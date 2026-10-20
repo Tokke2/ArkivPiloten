@@ -90,7 +90,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.5"
+APP_VERSION = "1.4.6"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -3897,6 +3897,8 @@ _UI_EN = {
     "Starta minimerad i systemfältet": "Start minimized to tray",
     "Visa ikon i systemfältet": "Show tray icon",
     "Krysset minimerar i stället för att avsluta": "Close button minimizes to tray instead",
+    "Minimera till systemfältet (annars aktivitetsfältet)":
+        "Minimize to tray (otherwise taskbar)",
     "Visa notis när filer sorterats": "Notify when files are sorted",
     "Sök uppdateringar på GitHub vid start": "Check GitHub for updates at start",
     "Installera uppdateringar automatiskt": "Install updates automatically",
@@ -3977,6 +3979,27 @@ def _translate_ui_tree(widget, mapping) -> int:
     return antal
 
 
+def _minimize_action(state: str, settings: Dict[str, Any],
+                     has_tray: bool) -> str:
+    """Vad ska hända när fönstret minimeras?
+
+    "none"    - inte en minimering (t.ex. withdraw, eller <Unmap> av annat
+                skäl som att byta virtuellt skrivbord)
+    "tray"    - göm fönstret i systemfältet
+    "taskbar" - låt det ligga kvar minimerat i aktivitetsfältet
+
+    Minimering och krysset är två olika saker: close_to_tray styr bara
+    krysset (som det står i inställningen), medan minimize_to_tray styr
+    vad som händer när fönstret minimeras. Standard är att minimera
+    normalt - ingen ska bli av med fönstret av misstag.
+    """
+    if str(state or "") != "iconic":
+        return "none"
+    if not has_tray or not settings.get("minimize_to_tray", False):
+        return "taskbar"
+    return "tray"
+
+
 class App:
     def __init__(self, start_hidden: bool = False) -> None:
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
@@ -4033,6 +4056,7 @@ class App:
         self.visible = True
         self._quitting = False
         self._rescanning = False
+        self._hiding_for_minimize = False
         self._icon_ref = None                    # håll kvar PhotoImage
 
         self.root = tk.Tk()
@@ -4685,6 +4709,8 @@ class App:
         self.var_startmin = tk.BooleanVar(value=self.settings.get("start_minimized", False))
         self.var_tray = tk.BooleanVar(value=self.settings.get("tray_enabled", True))
         self.var_close_tray = tk.BooleanVar(value=self.settings.get("close_to_tray", True))
+        self.var_min_tray = tk.BooleanVar(
+            value=self.settings.get("minimize_to_tray", False))
         self.var_autowatch = tk.BooleanVar(value=self.settings.get("autowatch_on_start", False))
         self.var_notify = tk.BooleanVar(value=self.settings.get("notify", True))
         self.var_checkupd = tk.BooleanVar(value=self.settings.get("check_updates", True))
@@ -4726,9 +4752,21 @@ class App:
                         variable=self.var_autoupd).grid(row=3, column=2, columnspan=2,
                                                         sticky="w", padx=8, pady=2)
 
+        # Minimering är en egen sak, skild från krysset. Standard är att
+        # fönstret stannar i aktivitetsfältet - ingen ska tappa fönstret.
+        minrad = ttk.Frame(sysbox, style="CardInner.TFrame")
+        minrad.grid(row=4, column=0, columnspan=4, sticky="w",
+                    padx=8, pady=(4, 2))
+        cb_mintray = ttk.Checkbutton(
+            minrad, text="Minimera till systemfältet (annars aktivitetsfältet)",
+            style="Card.TCheckbutton", variable=self.var_min_tray)
+        cb_mintray.pack(side="left")
+        if not tray_available():
+            cb_mintray.state(["disabled"])
+
         # -- tema: ljust eller mörkt, växlas live --
         themrad = ttk.Frame(sysbox, style="CardInner.TFrame")
-        themrad.grid(row=3, column=0, columnspan=4, sticky="w",
+        themrad.grid(row=5, column=0, columnspan=4, sticky="w",
                      padx=8, pady=(8, 2))
         self.var_theme = tk.StringVar(value=self.settings.get("theme", "ljus"))
         ttk.Label(themrad, text="Tema:", style="Card.TLabel").pack(side="left")
@@ -4750,7 +4788,7 @@ class App:
                 side="left", padx=(8, 0))
 
         extra = ttk.Frame(sysbox, style="CardInner.TFrame")
-        extra.grid(row=4, column=0, columnspan=4, sticky="w",
+        extra.grid(row=6, column=0, columnspan=4, sticky="w",
                    padx=8, pady=(8, T.INNER))
         ttk.Button(extra, text="Skapa genväg på skrivbordet",
                    command=self._make_shortcut).pack(side="left")
@@ -4768,7 +4806,7 @@ class App:
         self.var_sched = tk.BooleanVar(value=self.settings.get("schedule_enabled", False))
         self.var_schedtime = tk.StringVar(value=self.settings.get("schedule_time", "07:00"))
         rad5 = ttk.Frame(sysbox, style="CardInner.TFrame")
-        rad5.grid(row=5, column=0, columnspan=4, sticky="w", padx=8, pady=(6, 2))
+        rad5.grid(row=7, column=0, columnspan=4, sticky="w", padx=8, pady=(6, 2))
         ttk.Label(rad5, text="Språk:", style="Card.TLabel").pack(side="left")
         ttk.Combobox(rad5, textvariable=self.var_lang, values=["sv", "en"],
                      state="readonly", width=5).pack(side="left", padx=(4, 2))
@@ -4780,7 +4818,7 @@ class App:
         ttk.Label(rad5, text="kl.", style="Card.TLabel").pack(side="left")
         ttk.Entry(rad5, textvariable=self.var_schedtime, width=6).pack(side="left")
         rad6 = ttk.Frame(sysbox, style="CardInner.TFrame")
-        rad6.grid(row=6, column=0, columnspan=4, sticky="w", padx=8, pady=(2, 6))
+        rad6.grid(row=8, column=0, columnspan=4, sticky="w", padx=8, pady=(2, 6))
         ttk.Checkbutton(rad6, text="Skriv kategori som PDF-metadata vid sortering",
                         style="Card.TCheckbutton",
                         variable=self.var_tagpdf).pack(side="left", padx=(0, 12))
@@ -5213,6 +5251,7 @@ class App:
             "reject_recipient_only": bool(self.var_rejrec.get()),
             "tray_enabled": bool(self.var_tray.get()),
             "close_to_tray": bool(self.var_close_tray.get()),
+            "minimize_to_tray": bool(self.var_min_tray.get()),
             "start_minimized": bool(self.var_startmin.get()),
             "autowatch_on_start": bool(self.var_autowatch.get()),
             "notify": bool(self.var_notify.get()),
@@ -6997,6 +7036,8 @@ class App:
                 self.var_theme.set(self.settings.get("theme", "ljus"))
             self.var_tray.set(self.settings.get("tray_enabled", True))
             self.var_close_tray.set(self.settings.get("close_to_tray", True))
+            self.var_min_tray.set(
+                self.settings.get("minimize_to_tray", False))
             self.var_startmin.set(self.settings.get("start_minimized", False))
             self.var_autowatch.set(self.settings.get("autowatch_on_start", False))
             self.var_notify.set(self.settings.get("notify", True))
@@ -7810,6 +7851,7 @@ class App:
         except Exception as exc:
             self._fel(exc, "show_window")
         self.visible = True
+        self._hiding_for_minimize = False
         self._sync_tray()
         # Beta av kön som samlats medan fönstret var gömt
         if self.queue and self.settings.get("ask_when_unsure", True):
@@ -7843,16 +7885,24 @@ class App:
         self.nb.select(self.tab_review)
 
     def _on_unmap(self, event=None) -> None:
-        """Minimering ska hamna i systemfältet i stället för aktivitetsfältet."""
-        if (event is not None and event.widget is not self.root):
+        """Minimering: aktivitetsfältet som standard, systemfältet om valt."""
+        if event is not None and event.widget is not self.root:
             return
-        if self.tray and self.settings.get("close_to_tray", True) \
-                and self.root.state() == "iconic":
-            self._h("fönster", "Användaren minimerade - flyttas till systemfältet")
+        try:
+            state = self.root.state()
+        except Exception:
+            return
+        action = _minimize_action(state, self.settings, bool(self.tray))
+        if action == "tray":
+            if getattr(self, "_hiding_for_minimize", False):
+                return
+            self._hiding_for_minimize = True
+            self._h("fönster", "Användaren minimerade - flyttas till "
+                    "systemfältet (minimize_to_tray är påslaget)")
             self.root.after(10, lambda: self.hide_window("minimering"))
-        elif self.root.state() == "iconic":
+        elif action == "taskbar":
             self._h("fönster", "Användaren minimerade - blir kvar i "
-                    "aktivitetsfältet (close_to_tray av eller inget systemfält)")
+                    "aktivitetsfältet")
 
     def _sync_tray(self) -> None:
         if self.tray:

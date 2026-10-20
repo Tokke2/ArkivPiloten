@@ -52,6 +52,18 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Leverans 1.4.6 (2026-10-20) — minimering och krysset är skilda saker.**
+> Minimera-knappen göms inte längre automatiskt i systemfältet: fönstret
+> stannar i aktivitetsfältet som vanliga program, och krysset fortsätter
+> att gå till systemfältet enligt close_to_tray. Vill man att även
+> minimering ska gå till systemfältet finns inställningen
+> minimize_to_tray (av som standard) med egen kryssruta under Start och
+> systemfält. _on_unmap kontrollerar att fönstret verkligen är minimerat
+> (state iconic) så att byte av virtuellt skrivbord eller en withdraw
+> inte misstolkas, och en vakt flagga hindrar dubbla hide-anrop.
+> Inställningspanelen fick dessutom en ledig rad: temaväljaren låg
+> tidigare ovanpå två kryssrutor i samma grid-rad.
+>
 > **Leverans 1.4.5 (2026-10-20) — bara riktiga bevis räknas, alla
 > skrivsätt av samma nummer matchar, och fel lärs bort.**
 > (a) Starka bevis: bara riktiga identifierare räknas. Årtal ("2025"),
