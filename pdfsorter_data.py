@@ -51,7 +51,7 @@ except ImportError:                                  # pragma: no cover
 SCHEMA_VERSION = 1
 
 #: Programmets version. Höjs vid varje leverans.
-VERSION = "1.4.3"
+VERSION = "1.4.4"
 
 
 # ==========================================================================

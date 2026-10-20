@@ -52,6 +52,17 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Leverans 1.4.4 (2026-10-20) — rullgardinen skriver-söker som en
+> riktig dropdown.** Kategori/mapp: "p" visar mapparna som BÖRJAR på p
+> (inte alla som innehåller p), "pil" smalnar av till PIL. Sökordet
+> byggs upp tecken för tecken även när rullgardinen redan är öppen
+> (p+i+l), i stället för att varje tangent söktes för sig - samma
+> teckenbuffert gäller alla comboboxar och listor i appen. Tecknen
+> hamnar rätt även när fältet är förvalt: första tangenten ersätter
+> namnet i stället för att hamna efter det. En hjälprad under fältet
+> visar antal träffar och vad Enter gör. Mushjulet byter fortfarande
+> aldrig kategori.
+>
 > **Leverans 1.4.3 (2026-10-20) — multi-OS-installation + verifierad
 > autouppdatering från Releases.**
 > (a) install.sh för macOS/Linux (venv, genväg, valfri autostart,
