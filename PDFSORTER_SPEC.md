@@ -52,7 +52,7 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
-> **Leverans 1.4.2 (2026-10-20) — multi-OS-installation + verifierad
+> **Leverans 1.4.3 (2026-10-20) — multi-OS-installation + verifierad
 > autouppdatering från Releases.**
 > (a) install.sh för macOS/Linux (venv, genväg, valfri autostart,
 > --uninstall), riktig .app i ~/Applications på macOS, .bat-filen frågar
@@ -72,7 +72,12 @@
 > .github/workflows/release.yml publicerar/uppdaterar releasen vid varje
 > push till main och varje v*-tagg.
 > (d) Tester: tests/ (pytest) för autostart per OS, datamapp, startfil,
-> genvägar, CLI-autostart och uppdateraren; CI på Linux/macOS/Windows.
+> genvägar, CLI-autostart, uppdateraren och kategorisökningen; CI på
+> Linux/macOS/Windows.
+> (e) Granskningsdialogen: Kategori/mapp är en sökbar rullgardin
+> (filtrerar medan man skriver, början-på-namnet först, accentokänsligt,
+> Enter väljer entydig träff) och mushjulet över fältet byter aldrig
+> kategori - det rullar fönstret.
 >
 > **Leverans 1.3.1 (2026-10-16) — kvalitetsrunda.** pyflakes-granskning
 > hittade samma buggklass som json_dir-fyndet: `search_tesseract`

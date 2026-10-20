@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 
 def _mod_versions_line() -> str:
     """Versioner för alla fem modulerna (felsökning/support)."""

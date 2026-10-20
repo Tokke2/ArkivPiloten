@@ -30,4 +30,7 @@ def test_all_modules_report_same_version():
     assert version == pdfsorter_data.VERSION
     assert version == pdfsorter_read.VERSION
     assert version == pdfsorter_theme.VERSION
-    assert version == S.APP_VERSION
+    # pdfsorter_system.APP_VERSION sätts av configure() vid start (och av
+    # testfixturerna), så den jämförs mot källfilen i stället.
+    kallfil = (ROOT / "pdfsorter_system.py").read_text(encoding="utf-8")
+    assert f'APP_VERSION = "{version}"' in kallfil

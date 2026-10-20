@@ -77,6 +77,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -89,7 +90,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -2789,7 +2790,8 @@ class ReviewDialog:
                    command=self._add_own).grid(row=1, column=0, sticky="w", padx=10, pady=(0, 8))
 
         # -- kategori ------------------------------------------------------
-        catbox = ttk.LabelFrame(self._all, text="  Kategori / mapp  ")
+        catbox = ttk.LabelFrame(
+            self._all, text="  Kategori / mapp (skriv för att söka)  ")
         catbox.grid(row=row_box + 1, column=0, sticky="ew", padx=14, pady=(12, 0))
         catbox.columnconfigure(1, weight=1)
 
@@ -2801,21 +2803,31 @@ class ReviewDialog:
         self.mode = tk.StringVar(value=start_mode)
         ttk.Radiobutton(catbox, text="Befintlig:", value="existing", variable=self.mode,
                         command=self._sync).grid(row=0, column=0, sticky="w", padx=8, pady=6)
-        self.combo = ttk.Combobox(catbox, values=rules.names(), state="normal")
+        self._all_categories = list(rules.names())
+        self.combo = ttk.Combobox(catbox, values=self._all_categories,
+                                  state="normal")
         if best and best.name in rules.names():
             self.combo.set(best.name)
         elif rules.names():
             self.combo.current(0)
         self.combo.bind("<<ComboboxSelected>>", self._combo_chosen)
-        # Sökbar med typeahead: skriv "d" -> hoppar direkt till första
-        # kategorin som börjar på D; upp/ner bläddrar utan att röra andra
-        # fält; hjulet rullar bara fönstret (se _dialog_wheel).
-        # Egen typahead (växlar även till "ny mapp" vid okänt namn);
-        # klassbindningen hoppar över pga _egen_ta. Upp/ner lokalt.
+        # Sökbar rullgardin: skriv några tecken -> listan filtreras och
+        # visar bara matchande kategorier (början på namnet först).
+        # Enter väljer första/unika träffen, Escape återställer listan.
+        # Egen sökning i stället för klassbindningens "hoppa till första
+        # prefix" (klassbindningen hoppar över pga _egen_ta).
         self.combo._egen_ta = True
-        self.combo.bind("<KeyRelease>", self._combo_typeahead)
+        self.combo.bind("<KeyRelease>", self._combo_search)
+        self.combo.bind("<Return>", self._combo_pick)
+        self.combo.bind("<Escape>", self._combo_reset)
+        self.combo.bind("<FocusOut>", self._combo_reset_values)
         self.combo.bind("<Down>", self._combo_navigate)
         self.combo.bind("<Up>", self._combo_navigate)
+        # Mushjulet får ALDRIG byta kategori. Bindningen ligger på
+        # widgeten (körs före TCombobox-klassens egen hjulbindning) och
+        # returnerar "break"; i stället rullas dialogens yttre yta.
+        for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.combo.bind(_seq, self._combo_wheel)
         self.combo.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=6)
 
         ttk.Radiobutton(catbox, text="Ny mapp:", value="new", variable=self.mode,
@@ -2835,6 +2847,8 @@ class ReviewDialog:
                       style="CardMuted.TLabel").grid(
                           row=2, column=0, columnspan=2, sticky="w",
                           padx=8, pady=(0, 6))
+        # "Ny mapp"-fältet ska vara låst när "Befintlig" är förvalt.
+        self._sync()
 
         self.save_rule = tk.BooleanVar(value=True)
         ttk.Checkbutton(catbox, variable=self.save_rule,
@@ -3000,31 +3014,132 @@ class ReviewDialog:
 
     def _combo_chosen(self, event=None) -> None:
         self.mode.set("existing")
+        self._sync()
         self.new_entry.delete(0, "end")
+        # Efter valet ska nästa öppning visa hela listan igen.
+        self.combo["values"] = self._all_categories
 
-    def _combo_typeahead(self, event=None) -> None:
-        if event is not None and event.keysym in (
-                "Up", "Down", "Return", "Escape", "Tab",
-                "BackSpace", "Delete", "Left", "Right"):
-            return
-        val = self.combo.get()
-        names = self.rules.names()
-        jump, exact = _typeahead_match(val, names)
-        if jump:
-            if not exact and jump != val:
-                self.combo.set(jump)
+    def _combo_search(self, event=None) -> None:
+        """Filtrera listan medan användaren skriver."""
+        if event is not None:
+            if getattr(event, "keysym", "") in (
+                    "Up", "Down", "Return", "Escape", "Tab",
+                    "Left", "Right", "Home", "End", "Prior", "Next",
+                    "Shift_L", "Shift_R", "Control_L", "Control_R",
+                    "Alt_L", "Alt_R"):
+                return
+            # Ctrl-kombon (Ctrl+A, Ctrl+C ...) ska inte filtrera; klistra
+            # in (Ctrl+V) ska däremot uppdatera listan.
+            if getattr(event, "state", 0) & 0x4 and \
+                    getattr(event, "keysym", "") not in ("v", "V"):
+                return
+        text = self.combo.get().strip()
+        if not text:
+            self.combo["values"] = self._all_categories
             self.mode.set("existing")
+            self._sync()
             self.new_entry.delete(0, "end")
+            return
+        träffar = _filter_categories(text, self._all_categories)
+        # Tom lista = inga träffar (visar ärligt att sökordet inte finns).
+        self.combo["values"] = träffar
+        if träffar:
+            self.mode.set("existing")
+            self._sync()
+            self.new_entry.delete(0, "end")
+            self._post_dropdown()
         else:
-            # Skrivet namn finns inte -> blir nytt mappnamn.
+            # Skrivet namn finns inte bland kategorierna -> ny mapp.
+            if self._popdown_open():
+                try:
+                    self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+                except Exception:
+                    pass
             self.mode.set("new")
+            self._sync()
             self.new_entry.delete(0, "end")
-            self.new_entry.insert(0, val)
+            self.new_entry.insert(0, text)
+
+    def _popdown_open(self) -> bool:
+        try:
+            popdown = self.combo.tk.call(
+                "ttk::combobox::PopdownWindow", self.combo)
+            return bool(int(self.combo.tk.call("winfo", "ismapped", popdown)))
+        except Exception:
+            return False
+
+    def _post_dropdown(self) -> None:
+        """Visa/uppdatera den filtrerade listan (best effort)."""
+        try:
+            if self._popdown_open():
+                # Redan öppen: uppdatera raderna med de nya träffarna.
+                try:
+                    self.combo.tk.call(
+                        "ttk::combobox::ConfigureListbox", self.combo)
+                except Exception:
+                    pass
+            else:
+                self.combo.tk.call("ttk::combobox::Post", self.combo)
+        except Exception:
+            pass
+
+    def _combo_reset_values(self, event=None) -> None:
+        self.combo["values"] = self._all_categories
+
+    def _combo_reset(self, event=None) -> str:
+        """Escape: stäng listan/återställ den - stänger inte dialogen."""
+        if self._popdown_open():
+            try:
+                self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+            except Exception:
+                pass
+        self._combo_reset_values()
+        return "break"
+
+    def _combo_pick(self, event=None) -> str:
+        """Enter: välj den entydiga träffen i stället för att gissa."""
+        text = self.combo.get().strip()
+        namn = _resolve_category_name(text, self._all_categories)
+        if namn:
+            self.combo.set(namn)
+            self.mode.set("existing")
+            self._sync()
+            self.new_entry.delete(0, "end")
+            self._combo_reset_values()
+        elif _filter_categories(text, self._all_categories):
+            # Flera träffar: låt användaren välja i listan i stället för
+            # att Enter skapar en mapp med en ofullständig söksträng.
+            self._post_dropdown()
+        elif text:
+            self.mode.set("new")
+            self._sync()
+            self.new_entry.delete(0, "end")
+            self.new_entry.insert(0, text)
+            self._combo_reset_values()
+        return "break"
+
+    def _combo_wheel(self, event) -> str:
+        """Mushjulet rullar fönstret - det får aldrig byta kategori."""
+        try:
+            delta = int(getattr(event, "delta", 0) or 0)
+            # Använd tecknet, inte storleken: macOS rapporterar ibland ±1
+            # per hack medan Windows rapporterar ±120.
+            if delta:
+                steg = -1 if delta > 0 else 1
+            else:
+                steg = 1 if getattr(event, "num", 4) == 5 else -1
+            self._outer.yview_scroll(steg, "units")
+        except Exception:
+            pass
+        return "break"
 
     def _combo_navigate(self, event) -> str:
         """Upp/ner bläddrar bland befintliga kategorier - endast i detta
-        fält, andra textfält rörs inte."""
-        names = self.rules.names()
+        fält, andra textfält rörs inte. Är listan öppen sköter Tk
+        markeringen i stället (native beteende)."""
+        if self._popdown_open():
+            return ""
+        names = self._all_categories
         if not names:
             return "break"
         cur = self.combo.get()
@@ -3035,7 +3150,9 @@ class ReviewDialog:
             idx = (idx - 1) % len(names)
         self.combo.set(names[idx])
         self.mode.set("existing")
+        self._sync()
         self.new_entry.delete(0, "end")
+        self._combo_reset_values()
         return "break"
 
     def _chosen(self) -> List[str]:
@@ -3044,10 +3161,20 @@ class ReviewDialog:
     def _category(self) -> str:
         if self.mode.get() == "new":
             return self.new_entry.get().strip()
-        return self.combo.get().strip()
+        # Skrivet sökord kan vara en ofullständig träff: använd den bara
+        # när den pekar ut exakt en kategori, aldrig som nytt mappnamn.
+        return _resolve_category_name(self.combo.get(), self._all_categories)
 
     def _ok(self) -> None:
         cat = self._category()
+        if not cat and self.mode.get() == "existing" and self.combo.get().strip():
+            self.messagebox.showwarning(
+                APP_NAME,
+                f"Flera kategorier matchar \"{self.combo.get().strip()}\".\n\n"
+                "Välj en av dem i listan (eller använd \"Ny mapp\" om du "
+                "vill skapa en ny).", parent=self.win)
+            self._post_dropdown()
+            return
         if not cat:
             self.messagebox.showwarning(APP_NAME, "Välj en befintlig kategori eller skriv ett namn på en ny mapp.",
                                         parent=self.win)
@@ -3107,6 +3234,56 @@ class ReviewDialog:
 # --------------------------------------------------------------------------
 # Dubblettfrågan (REQ-N4) - Ersätt eller Behåll båda (2)
 # --------------------------------------------------------------------------
+def _search_key(text: str) -> str:
+    """Söknyckel: gemener, utan diakriter (å/ä/ö = a/a/o), enkla mellanslag.
+
+    Används bara av sökfältet - matchningsmotorn har sin egen normalize.
+    """
+    t = unicodedata.normalize("NFKD", str(text or "").casefold())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _filter_categories(text: str, names) -> List[str]:
+    """Filtrera kategorilistan medan användaren skriver (sökbar rullgardin).
+
+    Skiftläges- och accentokänsligt: namn som BÖRJAR med sökordet kommer
+    först, därefter namn som innehåller det. Tom sökning ger hela listan,
+    i ursprunglig ordning.
+    """
+    q = _search_key(text)
+    if not q:
+        return list(names)
+    start = [n for n in names if _search_key(n).startswith(q)]
+    rest = [n for n in names if q in _search_key(n) and n not in start]
+    return start + rest
+
+
+def _resolve_category_name(text: str, names) -> str:
+    """Översätt det skrivna fältet till en befintlig kategori.
+
+    Exakt namn vinner, därefter en unik begynnelse- eller delsträng.
+    Returnerar "" när inget eller flera namn matchar - då ska dialogen
+    be användaren välja ur listan i stället för att gissa.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    if text in names:
+        return text
+    q = _search_key(text)
+    exact = [n for n in names if _search_key(n) == q]
+    if len(exact) == 1:
+        return exact[0]
+    start = [n for n in names if _search_key(n).startswith(q)]
+    if len(start) == 1:
+        return start[0]
+    alla = [n for n in names if q in _search_key(n)]
+    if len(alla) == 1:
+        return alla[0]
+    return ""
+
+
 def _typeahead_match(val: str, names) -> Tuple[Optional[str], bool]:
     """Sökbar rullgardin med typeahead (ANVÄNDARORDER 2026-08-26).
 
