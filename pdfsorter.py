@@ -89,7 +89,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.4.0"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -224,6 +224,7 @@ try:
         _write_json,
         append_history,
         config_dir,
+        config_dir_mode,
         InstanceLock,
         consume_show_request,
         history_path,
@@ -2154,11 +2155,15 @@ try:
     set_app_user_model_id = _sys_mod.set_app_user_model_id
     autostart_supported = _sys_mod.autostart_supported
     autostart_enabled = _sys_mod.autostart_enabled
+    autostart_session_available = _sys_mod.autostart_session_available
     set_autostart = _sys_mod.set_autostart
     sync_autostart = _sys_mod.sync_autostart
+    effective_autostart = _sys_mod.effective_autostart
     create_desktop_shortcut = _sys_mod.create_desktop_shortcut
     install_helpers = _sys_mod.install_helpers
     tray_available = _sys_mod.tray_available
+    tray_backend_name = _sys_mod.tray_backend_name
+    tray_hidden_start_safe = _sys_mod.tray_hidden_start_safe
     TrayIcon = _sys_mod.TrayIcon
     HELP_CONTENT = _sys_mod.HELP_CONTENT
     help_as_text = _sys_mod.help_as_text
@@ -2209,11 +2214,17 @@ except Exception as _sys_err:                       # noqa: BLE001
     def autostart_enabled() -> bool:
         return False
 
+    def autostart_session_available() -> bool:
+        return True
+
     def set_autostart(enabled: bool) -> Tuple[bool, str]:
         return False, "pdfsorter_system.py saknas - autostart går inte att ställa in"
 
     def sync_autostart(want: bool) -> Tuple[bool, str]:
         return False, "pdfsorter_system.py saknas - autostart går inte att ställa in"
+
+    def effective_autostart(_settings: dict) -> Tuple[bool, bool]:
+        return False, False
 
     def create_desktop_shortcut() -> Tuple[bool, str]:
         return False, "pdfsorter_system.py saknas - kan inte skapa genväg"
@@ -2249,6 +2260,12 @@ except Exception as _sys_err:                       # noqa: BLE001
 
     def tray_available() -> bool:
         return False
+
+    def tray_backend_name() -> str:
+        return ""
+
+    def tray_hidden_start_safe() -> Tuple[bool, str]:
+        return False, "pdfsorter_system.py saknas"
 
     TrayIcon = None                                  # type: ignore[assignment]
 
@@ -3463,8 +3480,22 @@ class App:
         # Självläkande autostart (bättre autostart): OS-posten och
         # inställningen synkas vid varje start - och resultatet loggas,
         # så att en tyst trasig autostart syns i sessionsloggen.
+        #
+        # Startskedet får aldrig RADERA en fungerande autostart: om
+        # OS-posten finns men settings säger av (t.ex. efter att ha
+        # installerats via install.sh, en annan användares profil eller
+        # en återställd settings.json) ärver vi OS-posten i stället.
+        # Borttagning kräver ett uttryckligt val i gränssnittet.
         try:
-            ok, msg = sync_autostart(bool(self.settings.get("autostart", False)))
+            vill, ärvd = effective_autostart(self.settings)
+            if ärvd:
+                self.settings["autostart"] = True
+                save_settings(self.settings)
+                self._h("autostart",
+                        "Autostarten fanns i operativsystemet - "
+                        "inställningen uppdaterades i stället för att "
+                        "posten togs bort", "warn")
+            ok, msg = sync_autostart(vill)
             self._h("autostart", f"Startsynk: {msg}",
                     "ok" if ok else "warn")
         except Exception as exc:
@@ -3509,15 +3540,29 @@ class App:
         # det som inte är pip (Tesseract/svenska). Aldrig blockerande.
         self.root.after(900, self._autoinstallera_tillagg)
 
-        # Starta minimerad
-        if (start_hidden or self.settings.get("start_minimized", False)) and self.tray:
-            varför = "--tray" if start_hidden else "inställningen 'starta minimerad'"
-            self._h("fönster", f"Fönstret visas INTE vid start ({varför}) - "
-                    "göms i systemfältet efter 150 ms")
-            self.root.after(150, lambda: self.hide_window(f"start: {varför}"))
-        elif start_hidden or self.settings.get("start_minimized", False):
-            self._h("fönster", "Minimerad start begärd men systemfält saknas - "
-                    "fönstret visas ändå")
+        # Starta minimerad - men bara om ikonen garanterat går att se.
+        # På Linux/GNOME utan AppIndicator blev appen tidigare helt osynlig
+        # (inget fönster, ingen ikon) när autostarten körde --tray.
+        vill_dold = bool(start_hidden
+                         or self.settings.get("start_minimized", False))
+        if vill_dold:
+            varför = ("--tray" if start_hidden
+                      else "inställningen 'starta minimerad'")
+            if not self.tray:
+                self._h("fönster", "Minimerad start begärd men systemfält "
+                        "saknas - fönstret visas ändå", "warn")
+            else:
+                säkert, orsak = tray_hidden_start_safe()
+                if säkert:
+                    self._h("fönster", f"Fönstret visas INTE vid start "
+                            f"({varför}) - göms i systemfältet efter 150 ms")
+                    self.root.after(150,
+                                    lambda: self.hide_window(f"start: {varför}"))
+                else:
+                    self._h("fönster", f"Dold start avbröts ({orsak}) - "
+                            "fönstret visas i stället", "warn")
+                    self._log(f"Dold start avbröts: {orsak}. Fönstret visas "
+                              "så att appen alltid går att nå.", "warn")
 
     # -- trådsäker UI-uppdatering -----------------------------------------
     def _post(self, fn: Callable[[], None]) -> None:
@@ -6487,7 +6532,7 @@ class App:
         return ""
 
     def _check_updates_gui(self, manual: bool = False) -> None:
-        """Sök uppdatering i bakgrunden; fråga före installation."""
+        """Sök uppdatering i bakgrunden (GitHub Releases först)."""
         def work():
             info = check_for_update()
             self.root.after(0, lambda: self._update_prompt(info, manual))
@@ -6495,27 +6540,47 @@ class App:
 
     def _update_prompt(self, info: dict, manual: bool) -> None:
         if not info.get("ok"):
+            self._h("uppdatering", "Kunde inte söka uppdatering: "
+                    + str(info.get("error", "okänt fel")), "warn")
             if manual:
                 self.messagebox.showwarning(
                     APP_NAME, "Kunde inte söka efter uppdateringar:\n"
                     + str(info.get("error", "okänt fel")))
             return
         if not info.get("available"):
+            self._h("uppdatering",
+                    f"Ingen nyare version (kör {APP_VERSION}, "
+                    f"GitHub: {info.get('remote')})")
             if manual:
                 self.messagebox.showinfo(
                     APP_NAME, f"Du har den senaste versionen ({APP_VERSION}).")
             return
-        if self.settings.get("auto_update", False) and not manual:
+        kalla = ("GitHub Releases" if info.get("source") == "release"
+                 else "GitHub (main-grenen)")
+        verifierad = bool(info.get("sha256_url"))
+        # Autouppdatering: installera tyst bara när paketet kan verifieras
+        # mot release-postens kontrollsumma. Utan kontrollsumma frågar vi.
+        tyst = (bool(self.settings.get("auto_update", False)) and not manual
+                and verifierad)
+        if tyst:
             svar = True
+            self._h("uppdatering",
+                    f"Autouppdatering: {info['remote']} hittad på {kalla} - "
+                    "verifierar SHA-256 och installerar", "ok")
         else:
             svar = self.messagebox.askyesno(
                 APP_NAME,
                 f"En ny version finns: {info['remote']} "
                 f"(du har {APP_VERSION}).\n\n"
-                "Uppdatera nu? Appen uppdateras i sin egen mapp, "
-                "dina inställningar, regler och historik rörs inte. "
+                f"Källa: {kalla}."
+                + ("\nPaketet verifieras med SHA-256 före installation."
+                   if verifierad else
+                   "\nVarning: releasen saknar kontrollsumma.")
+                + "\n\nAppen uppdateras i sin egen mapp, dina "
+                "inställningar, regler och historik rörs inte. "
                 "En säkerhetskopia tas först.")
         if not svar:
+            self._h("uppdatering", "Uppdateringen avböjd av användaren")
             return
 
         def install():
@@ -6523,6 +6588,7 @@ class App:
             if ok:
                 update_python_packages()
             def done():
+                self._h("uppdatering", msg, "ok" if ok else "warn")
                 if ok:
                     if self.messagebox.askyesno(
                             APP_NAME, msg + "\n\nStarta om appen nu "
@@ -7291,7 +7357,7 @@ def build_diagnostics() -> str:
     rader.append(f"Python:      {sys.version.split()[0]}  "
                  f"Plattform: {sys.platform}")
     rader.append(f"Moduler:     {_module_versions()}")
-    rader.append(f"Konfiguration: {config_dir()}")
+    rader.append(f"Konfiguration: {config_dir()} ({config_dir_mode()})")
     try:
         s = load_settings()
         rader.append("Inställningar:")
@@ -7319,7 +7385,9 @@ def build_diagnostics() -> str:
         pass
     try:
         rader.append(f"Autostart:   {'på' if autostart_enabled() else 'av'}, "
-                     f"klass: {classify_autostart()}")
+                     f"klass: {classify_autostart()}, "
+                     f"källa: {autostart_status().get('source') or '-'}, "
+                     f"session: {'ja' if autostart_session_available() else 'nej'}")
         for namn, varde in get_autostart_conflicts():
             rader.append(f"  KONFLIKT:  {namn} -> {varde[:100]}")
     except Exception:
@@ -7474,7 +7542,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"Arbetskatalog: {Path.cwd()}",
     ])
     install_excepthooks()
-    loggfil = session_path()
     if compact_history_if_large():
         session_log("start", "Historikjournalen kompakterades vid start "
                     "(>200 rader) - snabbare start", "ok")
@@ -7552,8 +7619,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Systemfält: {'ja' if tray_available() else 'nej (pip install pystray)'}")
         _as = autostart_status()
         print(f"Autostart:  {'på' if _as['enabled'] else 'av'}"
-              f" (klass: {_as['klass']}, {_as['platform']})")
-        print(f"Konfiguration: {config_dir()}")
+              f" (klass: {_as['klass']}, källa: {_as.get('source') or '-'}, "
+              f"session: {'ja' if _as.get('session', True) else 'nej'}, "
+              f"{_as['platform']})")
+        print(f"Konfiguration: {config_dir()} ({config_dir_mode()})")
         print(f"Versioner:  {_module_versions()}")
         if VERSIONS_BLANDADE:
             print("VARNING: blandade modulversioner - kopiera ALLA fem "
@@ -7588,8 +7657,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not info.get("ok"):
             print(f"Kunde inte söka uppdatering: {info.get('error', '?')}")
             return 1
+        kalla = ("GitHub Releases" if info.get("source") == "release"
+                 else "GitHub main-grenen")
         print(f"Installerad version: {info['current']}  |  "
-              f"Senaste på GitHub: {info['remote']}")
+              f"Senaste på GitHub: {info['remote']}  ({kalla})")
+        if info.get("release_url"):
+            print(f"Release: {info['release_url']}")
+        if info.get("source") == "release":
+            print("Kontrollsumma: "
+                  + ("ja (verifieras före installation)"
+                     if info.get("sha256_url") else "SAKNAS - frågar i GUI"))
         if not info.get("available"):
             print("Du har redan den senaste versionen.")
             return 0
@@ -7625,12 +7702,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0 if ok else 1
 
     if args.install_autostart or args.remove_autostart:
-        ok, msg = set_autostart(args.install_autostart)
-        session_log("autostart", ("Påslagen: " if args.install_autostart
-                                   else "Avstängd: ") + msg,
-                    "ok" if ok else "err")
-        print(("Autostart påslagen: " if args.install_autostart
-               else "Autostart avstängd: ") + msg)
+        vill = bool(args.install_autostart)
+        ok, msg = set_autostart(vill)
+        # Inställningen måste sparas också: annars tar GUI:ts självläkande
+        # synk (settings.autostart=False) bort posten vid nästa start -
+        # --install-autostart blev i praktiken en engångsstart.
+        if ok:
+            try:
+                s = load_settings()
+                s["autostart"] = vill
+                save_settings(s)
+                msg += " (inställningen sparad)"
+            except Exception as exc:
+                session_error("autostart", exc)
+                print(("Autostart påslagen: " if vill
+                       else "Autostart avstängd: ") + msg)
+                print("VARNING: inställningen kunde inte sparas, så appens "
+                      "synk kan ändra autostarten vid nästa start.\n"
+                      f"Fel: {type(exc).__name__}: {exc}")
+                return 1
+        session_log("autostart", ("Påslagen: " if vill else "Avstängd: ")
+                    + msg, "ok" if ok else "err")
+        print(("Autostart påslagen: " if vill else "Autostart avstängd: ")
+              + msg)
         return 0 if ok else 1
 
     if args.make_shortcut:

@@ -50,13 +50,14 @@ __all__ = [
     # autostart och genvägar
     "autostart_supported", "autostart_enabled", "set_autostart",
     "sync_autostart", "autostart_up_to_date", "autostart_status",
-    "icon_file_path",
+    "effective_autostart",
+    "autostart_session_available", "icon_file_path",
     # uppdatering från Git + Python-paket (2026-10-16)
     "check_for_update", "perform_update", "update_python_packages",
-    "UPDATE_REPO", "UPDATE_BRANCH",
+    "UPDATE_REPO", "UPDATE_BRANCH", "UPDATE_RELEASES_LATEST",
     "create_desktop_shortcut", "install_helpers",
     # systemfält
-    "tray_available", "TrayIcon",
+    "tray_available", "tray_backend_name", "tray_hidden_start_safe", "TrayIcon",
     # autostart v2.0 + loggverktyg (L3/L5/L7, 2026-09-10)
     "classify_autostart", "get_autostart_conflicts", "LogContext",
     "migrate_legacy_logs", "set_process_dpi_aware",
@@ -74,7 +75,7 @@ __all__ = [
 ]
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.4.0"
 
 def _mod_versions_line() -> str:
     """Versioner för alla fem modulerna (felsökning/support)."""
@@ -94,13 +95,31 @@ def _mod_versions_line() -> str:
 
 
 def _default_config_dir() -> Path:
-    # Samma regel som datamodulen (2026-10-16): PDFSORTER_HOME vinner,
-    # annars ALLTID APPMAPPEN - inget sparas utanför den, så att
-    # fristående körningar (--diag m.fl.) och appen alltid enas.
+    """Samma regel som datamodulen: PDFSORTER_HOME vinner, annars appmappen.
+
+    Är appmappen skrivskyddad (t.ex. /Applications, /opt eller en
+    paketerad .app) används användarens data-mapp i stället - annars
+    kunde appen inte spara regler eller loggar alls på en vanlig
+    systeminstallation. Portabel användning är fortfarande förstahandsval.
+    """
     env = os.environ.get("PDFSORTER_HOME")
     if env:
         return Path(env).expanduser()
-    return Path(__file__).resolve().parent
+    app = Path(__file__).resolve().parent
+    try:
+        t = app / ".pdfsorter_write_test"
+        t.write_text("ok", encoding="utf-8")
+        t.unlink()
+        return app
+    except OSError:
+        pass
+    if sys.platform.startswith("win"):
+        bas = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(bas) / "ArkivPiloten"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "ArkivPiloten"
+    bas = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(bas) / "pdfsorter"
 
 
 #: Sätts av huvudfilen via configure(). Innan dess används en rimlig
@@ -727,34 +746,152 @@ def brand_window(root: Any, size: int = 64) -> Any:
 # --------------------------------------------------------------------------
 # Autostart med operativsystemet
 # --------------------------------------------------------------------------
-def _launch_target() -> Tuple[str, str]:
-    """Returnerar (kommando, arbetskatalog) som startar appen minimerad.
+#: Klassificeringar av OS-posten (autostart v3.0, multi-OS):
+#:   missing        -> posten finns inte alls
+#:   correct        -> rätt kommando, rätt argument
+#:   startup_folder -> Windows: posten finns bara som genväg i Startup-mappen
+#:                     (registret nekade). Räknas som fungerande.
+#:   duplicate      -> Windows: både registervärde och Startup-genväg finns.
+#:                     Två kopior startar vid inloggning - synken städar.
+#:   stale_console  -> Windows: pekar på python.exe (KONSOL-BLINK vid
+#:                     inloggning) i stället för pythonw.exe
+#:   stale_path     -> pekar på en gammal sökväg (flyttad mapp/ny python)
+#:   stale_args     -> rätt program men gamla argument (t.ex. --tray saknas)
+#:   different      -> något annat skiljer (okänt ursprung)
+AUTOSTART_OK = frozenset({"correct", "startup_folder"})
+AUTOSTART_LABEL = "com.arkivpiloten.autostart"
+_WIN_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
-    Pekar alltid på huvudprogrammet pdfsorter.py, aldrig på den här filen.
+
+def _frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _launch_argv() -> Tuple[List[str], str]:
+    """Returnerar (argv, arbetskatalog) som startar appen minimerad.
+
+    En lista i stället för en färdig kommandosträng: Windows, macOS och
+    Linux citerar argument olika, och .desktop/plist ska få argumenten
+    var för sig. Då slipper vi escape-fel i sökvägar med mellanslag,
+    citattecken eller procenttecken.
     """
-    script = _main_script
+    if _frozen_app():                       # paketerad med PyInstaller
+        exe = str(Path(sys.executable).resolve())
+        return [exe, "--tray"], str(Path(exe).parent)
+    script = Path(_main_script).resolve()
     workdir = str(script.parent)
-    if getattr(sys, "frozen", False):          # paketerad med PyInstaller
-        return f'"{sys.executable}" --tray', workdir
-    exe = sys.executable or "python3"
+    exe = sys.executable or ("python.exe" if sys.platform.startswith("win")
+                             else "python3")
     if sys.platform.startswith("win"):
         # pythonw.exe kör helt utan konsolfönster
         exe_w = Path(exe).with_name("pythonw.exe")
         if exe_w.exists():
             exe = str(exe_w)
-    return f'"{exe}" "{script}" --tray', workdir
+    return [str(exe), str(script), "--tray"], workdir
+
+
+def _launch_target() -> Tuple[str, str]:
+    """Kommandosträng + arbetskatalog (Windows-registret/status)."""
+    argv, workdir = _launch_argv()
+    if sys.platform.startswith("win"):
+        cmd = subprocess.list2cmdline(argv)
+    else:
+        import shlex
+        cmd = shlex.join(argv)
+    return cmd, workdir
 
 
 def autostart_supported() -> bool:
-    return sys.platform.startswith("win") or sys.platform == "darwin" or \
-        sys.platform.startswith("linux")
+    return (sys.platform.startswith("win") or sys.platform == "darwin"
+            or sys.platform.startswith("linux"))
 
 
-def _win_run_key():
+def autostart_session_available() -> bool:
+    """Finns en grafisk inloggningssession just nu?
+
+    På Linux kan autostarten skrivas även från SSH (den aktiveras vid
+    nästa inloggning), men statusraden ska inte påstå att den är igång
+    i en session som saknar skrivbord.
+    """
+    if sys.platform.startswith("linux"):
+        return bool(os.environ.get("DISPLAY")
+                    or os.environ.get("WAYLAND_DISPLAY"))
+    return True
+
+
+def _win_run_key(access: Optional[int] = None):
+    """Öppna HKCU\\...\\Run med minsta möjliga rättighet.
+
+    Tidigare användes KEY_ALL_ACCESS även för läsning. Grupprinciper och
+    antivirus nekar ofta den bredare rättigheten, vilket fick appen att
+    tro att autostarten saknades trots att den fanns.
+    """
     import winreg
-    return winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                          r"Software\Microsoft\Windows\CurrentVersion\Run",
-                          0, winreg.KEY_ALL_ACCESS)
+    if access is None:
+        access = getattr(winreg, "KEY_ALL_ACCESS", 0x20019)
+    try:
+        return winreg.OpenKey(winreg.HKEY_CURRENT_USER, _WIN_RUN_KEY, 0, access)
+    except FileNotFoundError:
+        if access & getattr(winreg, "KEY_SET_VALUE", 0x0002):
+            return winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _WIN_RUN_KEY,
+                                      0, access)
+        raise
+
+
+def _win_registry_read() -> Tuple[Optional[str], bool]:
+    """(värde, kunde_läsas). Skiljer "finns inte" från "nekad åtkomst"."""
+    try:
+        import winreg
+        with _win_run_key(getattr(winreg, "KEY_READ", 0x20019)) as key:
+            try:
+                return str(winreg.QueryValueEx(key, APP_NAME)[0]), True
+            except FileNotFoundError:
+                return None, True
+    except FileNotFoundError:
+        return None, True
+    except Exception:
+        return None, False
+
+
+def _win_registry_write(value: Optional[str]) -> Tuple[bool, str]:
+    """Sätt/ta bort Run-värdet. value=None betyder ta bort."""
+    try:
+        import winreg
+        with _win_run_key(getattr(winreg, "KEY_SET_VALUE", 0x0002)) as key:
+            if value is None:
+                try:
+                    winreg.DeleteValue(key, APP_NAME)
+                except FileNotFoundError:
+                    pass
+            else:
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, value)
+        return True, ""
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _win_startup_lnk() -> Path:
+    """Windows reservväg: genväg i Startup-mappen (om registret nekar)."""
+    appdata = os.environ.get("APPDATA") or str(
+        Path.home() / "AppData" / "Roaming")
+    return (Path(appdata) / "Microsoft" / "Windows" / "Start Menu"
+            / "Programs" / "Startup" / f"{APP_NAME}.lnk")
+
+
+def _win_remove_startup_lnk() -> Tuple[bool, str]:
+    lnk = _win_startup_lnk()
+    if not lnk.exists():
+        return True, ""
+    try:
+        lnk.unlink()
+        return True, ""
+    except OSError as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _mac_plist_file() -> Path:
+    return (Path.home() / "Library" / "LaunchAgents"
+            / f"{AUTOSTART_LABEL}.plist")
 
 
 def _linux_autostart_file() -> Path:
@@ -769,74 +906,109 @@ def _linux_legacy_autostart_file() -> Path:
     return Path(base) / "autostart" / "pdfsorter.desktop"
 
 
-def _win_startup_lnk() -> Path:
-    """Windows reservväg: genväg i Startup-mappen (om registret nekar)."""
-    appdata = os.environ.get("APPDATA") or str(
-        Path.home() / "AppData" / "Roaming")
-    return (Path(appdata) / "Microsoft" / "Windows" / "Start Menu"
-            / "Programs" / "Startup" / f"{APP_NAME}.lnk")
+def _desktop_escape(value: str) -> str:
+    """Escapa en sträng enligt Desktop Entry Specification (utan citattecken)."""
+    text = str(value)
+    text = text.replace("\\", "\\\\").replace('"', '\\"')
+    text = text.replace("`", "\\`").replace("$", "\\$")
+    text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    return text
 
 
-def _win_make_lnk(target: Path) -> Tuple[bool, str]:
-    """Skapa en .lnk-genväg till appen (delas av skrivbord + Startup)."""
-    script = _main_script
-    try:
-        icon = ensure_icon_file()
-        exe = sys.executable or "python.exe"
-        exe_w = Path(exe).with_name("pythonw.exe")
-        if exe_w.exists():
-            exe = str(exe_w)
-        ps = (
-            f"$s=(New-Object -COM WScript.Shell).CreateShortcut("
-            f"'{_ps_quote(target)}');"
-            f"$s.TargetPath='{_ps_quote(exe)}';"
-            f"$s.Arguments='\"{_ps_quote(script)}\" --tray';"
-            f"$s.WorkingDirectory='{_ps_quote(script.parent)}';"
-            + (f"$s.IconLocation='{_ps_quote(icon)}';" if icon else "") +
-            "$s.Save()")
-        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                       check=True, capture_output=True, timeout=30,
-                       **_win_dold())
-        return True, str(target)
-    except Exception as exc:
-        return False, f"{type(exc).__name__}: {exc}"
+def _desktop_quote(value: str, field_codes: bool = False) -> str:
+    """Citera ett värde. field_codes=True för Exec (där % är fältkod)."""
+    text = _desktop_escape(value)
+    if field_codes:
+        # Procenttecknet är alltid en fältkod i Exec; literaltecknet
+        # skrivs som %%. Utan detta blev en sökväg som /tmp/100% en
+        # ogiltig post som GNOME/KDE vägrade starta (2026-10-20).
+        text = text.replace("%", "%%")
+    return f'"{text}"'
 
 
-def autostart_status() -> dict:
-    """Samlad autostart-status för alla OS (statusrader/diagnostik)."""
-    entry = ""
-    try:
-        if sys.platform.startswith("win"):
-            entry = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
-                     f"\{APP_NAME} (reserv: {_win_startup_lnk()})")
-        elif sys.platform == "darwin":
-            entry = str(_mac_plist_file())
-        else:
-            entry = str(_linux_autostart_file())
-    except Exception:
-        pass
-    return {"platform": sys.platform,
-            "supported": autostart_supported(),
-            "enabled": autostart_enabled(),
-            "klass": classify_autostart(),
-            "entry": entry}
+def _desktop_exec(argv: List[str]) -> str:
+    return " ".join(_desktop_quote(a, field_codes=True) for a in argv)
 
 
-def _mac_plist_file() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / "com.arkivpiloten.autostart.plist"
+def _desktop_env_line() -> str:
+    """PDFSORTER_HOME måste följa med in i autostarten.
+
+    Utan Environment= startar autostarten med appmappens data i stället
+    för den valda datamappen - användaren får då två separata regler.
+    """
+    home = os.environ.get("PDFSORTER_HOME", "").strip()
+    if not home:
+        return ""
+    verdi = str(Path(home).expanduser())
+    return "Environment=PDFSORTER_HOME=" + _desktop_quote(verdi) + "\n"
+
+
+def _desktop_path(value: str) -> str:
+    return str(value).replace("\r", " ").replace("\n", " ")
+
+
+def _linux_desktop_entry(tray: bool = True, menu: bool = False) -> str:
+    """Bygg en giltig .desktop-post för autostart eller appmeny."""
+    argv, workdir = _launch_argv()
+    if not tray:
+        argv = [a for a in argv if a != "--tray"]
+    icon = ensure_icon_file()
+    rader = [
+        "[Desktop Entry]",
+        "Type=Application",
+        "Version=1.0",
+        f"Name={APP_NAME}",
+        "Comment=Sorterar PDF-filer till undermappar",
+        f"Exec={_desktop_exec(argv)}",
+        f"Path={_desktop_path(workdir)}",
+        "Terminal=false",
+        "StartupNotify=false",
+    ]
+    if icon:
+        rader.append(f"Icon={icon}")
+    if menu:
+        rader += ["Categories=Office;Utility;", "Keywords=PDF;arkiv;sortering;"]
+    rader.append(_desktop_env_line().rstrip("\n"))
+    if tray:
+        rader += ["X-GNOME-Autostart-enabled=true", "X-GNOME-Autostart-Delay=3"]
+    return "\n".join(r for r in rader if r != "") + "\n"
+
+
+def _desktop_value(text: str, key: str) -> Optional[str]:
+    """Läs ett nyckel=värde ur en .desktop-fil (utan interpolation)."""
+    for rad in text.splitlines():
+        if rad.startswith(key + "="):
+            return rad.split("=", 1)[1]
+    return None
+
+
+def _autostart_source() -> str:
+    if sys.platform.startswith("win"):
+        value, _ = _win_registry_read()
+        if value is not None:
+            return "registry"
+        return "startup_folder" if _win_startup_lnk().exists() else ""
+    if sys.platform == "darwin":
+        return "launchagent"
+    if sys.platform.startswith("linux"):
+        if _linux_autostart_file().exists():
+            return "xdg"
+        if _linux_legacy_autostart_file().exists():
+            return "xdg_legacy"
+    return ""
 
 
 def autostart_enabled() -> bool:
     """Är autostart påslagen just nu?"""
     try:
         if sys.platform.startswith("win"):
-            import winreg
-            with _win_run_key() as key:
-                try:
-                    winreg.QueryValueEx(key, APP_NAME)
-                    return True
-                except FileNotFoundError:
-                    return _win_startup_lnk().exists()
+            value, _läsbar = _win_registry_read()
+            if value is not None:
+                return True
+            # Reservvägen måste räknas även när registret är otillgängligt
+            # (policy/antivirus) - annars visade GUI:t "av" trots att
+            # genvägen i Startup-mappen startade appen varje inloggning.
+            return _win_startup_lnk().exists()
         if sys.platform == "darwin":
             return _mac_plist_file().exists()
         return (_linux_autostart_file().exists()
@@ -849,18 +1021,14 @@ def _autostart_current() -> Optional[str]:
     """Råinnehållet i OS-posten (registervärde / .desktop / plist)."""
     try:
         if sys.platform.startswith("win"):
-            import winreg
-            with _win_run_key() as key:
-                try:
-                    return str(winreg.QueryValueEx(key, APP_NAME)[0])
-                except FileNotFoundError:
-                    return None
+            value, _läsbar = _win_registry_read()
+            if value is not None:
+                return value
+            lnk = _win_startup_lnk()
+            return f"startup-folder: {lnk}" if lnk.exists() else None
         if sys.platform == "darwin":
             p = _mac_plist_file()
             return p.read_text(encoding="utf-8") if p.exists() else None
-        if sys.platform.startswith("win"):
-            lnk = _win_startup_lnk()
-            return f"startup-folder: {lnk}" if lnk.exists() else None
         p = _linux_autostart_file()
         if not p.exists():
             p = _linux_legacy_autostart_file()
@@ -876,60 +1044,147 @@ def autostart_up_to_date() -> bool:
     fel - autostarten "fungerar" men startar ingenting. Det är den tysta
     varianten av trasig autostart som synken ska laga.
     """
-    return classify_autostart() == "correct"
+    return classify_autostart() in AUTOSTART_OK
 
 
-#: Klassificeringar av OS-posten (autostart v2.0, LÅNAT MÖNSTER L3):
-#:   missing       -> posten finns inte alls
-#:   correct       -> rätt kommando, rätt argument
-#:   stale_console -> Windows: pekar på python.exe (KONSOL-BLINK vid
-#:                    inloggning) i stället för pythonw.exe
-#:   stale_path    -> pekar på en gammal sökväg (flyttad mapp/ny python)
-#:   stale_args    -> rätt program men gamla argument (t.ex. --tray saknas)
-#:   different     -> något annat skiljer (okänt ursprung)
 def classify_autostart() -> str:
     """Klassificera OS-posten exakt - så att synken kan laga RÄTT sak."""
-    cur = _autostart_current()
-    if cur is None:
-        return "missing"
-    if cur.startswith("startup-folder:"):
-        return "correct"      # reservvägen: genvägen finns = påslagen
-    if (sys.platform.startswith("linux")
-            and not _linux_autostart_file().exists()):
-        return "stale_path"   # bara gamla pdfsorter.desktop -> skriv om
-    cmd, _workdir = _launch_target()
+    try:
+        if sys.platform.startswith("win"):
+            value, _läsbar = _win_registry_read()
+            lnk_exists = _win_startup_lnk().exists()
+            if value is None and not lnk_exists:
+                return "missing"
+            if value is None:
+                return "startup_folder"
+            if lnk_exists:
+                return "duplicate"
+            cmd, _workdir = _launch_target()
+            n_cur, n_cmd = value.casefold().replace("\\", "/"), \
+                cmd.casefold().replace("\\", "/")
+            if n_cmd in n_cur:
+                return "correct"
+            mål = (str(sys.executable) if _frozen_app()
+                   else str(_main_script)).casefold().replace("\\", "/")
+            if mål not in n_cur:
+                return "stale_path"
+            if "pythonw.exe" not in n_cur and "python.exe" in n_cur:
+                return "stale_console"
+            if "--tray" in n_cmd and "--tray" not in n_cur:
+                return "stale_args"
+            return "different"
 
-    def norm(s: str) -> str:
-        return s.casefold().replace("\\", "/")
+        if sys.platform == "darwin":
+            p = _mac_plist_file()
+            if not p.exists():
+                return "missing"
+            try:
+                import plistlib
+                data = plistlib.loads(p.read_bytes())
+                args = data.get("ProgramArguments")
+                if not isinstance(args, list):
+                    return "different"
+                args = [str(a) for a in args]
+                expected, workdir = _launch_argv()
+                if args == expected:
+                    if str(data.get("WorkingDirectory", workdir)) != workdir:
+                        return "different"
+                    home = os.environ.get("PDFSORTER_HOME", "").strip()
+                    if home:
+                        env = data.get("EnvironmentVariables") or {}
+                        if str(env.get("PDFSORTER_HOME", "")) != str(
+                                Path(home).expanduser()):
+                            return "different"
+                    return "correct"
+                if not any(str(_main_script) == a for a in args):
+                    if not _frozen_app():
+                        return "stale_path"
+                if "--tray" not in args:
+                    return "stale_args"
+                return "different"
+            except Exception:
+                return "different"
 
-    if sys.platform.startswith("win"):
-        n_cur, n_cmd = norm(cur), norm(cmd)
-        if n_cmd in n_cur:
-            return "correct"
-        script_ok = norm(str(_main_script)) in n_cur
-        if not script_ok:
+        if not sys.platform.startswith("linux"):
+            return "missing"
+        desktop = _linux_autostart_file()
+        legacy = _linux_legacy_autostart_file()
+        if not desktop.exists():
+            return "stale_path" if legacy.exists() else "missing"
+        if legacy.exists():
+            return "duplicate"
+        try:
+            text = desktop.read_text(encoding="utf-8")
+        except OSError:
+            return "different"
+        argv, workdir = _launch_argv()
+        exec_rad = _desktop_value(text, "Exec")
+        if exec_rad is None:
+            return "different"
+        if exec_rad.strip() != _desktop_exec(argv):
+            if "--tray" not in exec_rad:
+                return "stale_args"
+            if str(_main_script) not in exec_rad:
+                return "stale_path"
+            return "different"
+        path_rad = _desktop_value(text, "Path")
+        if path_rad is not None and path_rad.strip() != _desktop_path(workdir):
             return "stale_path"
-        if "pythonw.exe" not in n_cur and "python.exe" in n_cur:
-            return "stale_console"
-        if "--tray" in n_cmd and "--tray" not in n_cur:
-            return "stale_args"
+        home = os.environ.get("PDFSORTER_HOME", "").strip()
+        if home:
+            env_rad = _desktop_value(text, "Environment") or ""
+            if str(Path(home).expanduser()) not in env_rad:
+                return "different"
+        return "correct"
+    except Exception:
         return "different"
 
-    if sys.platform == "darwin":
-        # Plist:en innehåller argumenten i varsin <string>, aldrig hela
-        # kommandoraden som en sträng - jämför beståndsdelarna i stället.
-        if str(_main_script) in cur and "--tray" in cur:
-            return "correct"
-        if str(_main_script) not in cur:
-            return "stale_path"
-        return "stale_args"
-    if str(_main_script) in cur:
-        return "correct" if cmd in cur else "stale_args"
-    return "stale_path"
+
+def autostart_status() -> dict:
+    """Samlad autostart-status för alla OS (statusrader/diagnostik)."""
+    entry = ""
+    try:
+        if sys.platform.startswith("win"):
+            entry = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+                     f"\\{APP_NAME} (reserv: {_win_startup_lnk()})")
+        elif sys.platform == "darwin":
+            entry = str(_mac_plist_file())
+        else:
+            entry = str(_linux_autostart_file())
+    except Exception:
+        pass
+    return {"platform": sys.platform,
+            "supported": autostart_supported(),
+            "session": autostart_session_available(),
+            "enabled": autostart_enabled(),
+            "klass": classify_autostart(),
+            "source": _autostart_source(),
+            "entry": entry}
+
+
+def effective_autostart(settings: dict) -> Tuple[bool, bool]:
+    """Vill appen ha autostart - och ärvs posten i så fall från OS:et?
+
+    Returnerar (vill, ärvd). Regeln: en fungerande OS-post får aldrig
+    tas bort bara för att settings.json säger av. Det kan hända när
+    autostarten slagits på av install.sh, av en annan användare eller
+    när settings återställts - och då är det bättre att ÄRVA posten än
+    att tyst radera användarens val. Borttagning ska alltid vara ett
+    uttryckligt val (kryssrutan eller --remove-autostart).
+    """
+    vill = bool((settings or {}).get("autostart", False))
+    if vill:
+        return True, False
+    try:
+        if autostart_enabled():
+            return True, True
+    except Exception:
+        pass
+    return False, False
 
 
 def get_autostart_conflicts() -> List[Tuple[str, str]]:
-    """Andra autostartposter som nämner appen (L3, bara Windows).
+    """Andra autostartposter som nämner appen (bara Windows).
 
     Läs-only: andras poster rörs ALDRIG. Gamla dubletter från flyttade
     installationer syns här, så att användaren kan städa manuellt.
@@ -939,7 +1194,7 @@ def get_autostart_conflicts() -> List[Tuple[str, str]]:
     try:
         import winreg
         ut: List[Tuple[str, str]] = []
-        with _win_run_key() as key:
+        with _win_run_key(getattr(winreg, "KEY_READ", 0x20019)) as key:
             i = 0
             while True:
                 try:
@@ -949,7 +1204,8 @@ def get_autostart_conflicts() -> List[Tuple[str, str]]:
                 i += 1
                 if name == APP_NAME:
                     continue
-                if "pdfsorter" in str(data).casefold():
+                if "pdfsorter" in str(data).casefold() or "arkivpiloten" in str(
+                        data).casefold():
                     ut.append((name, str(data)))
         return ut
     except Exception:
@@ -1003,13 +1259,9 @@ def _backup_autostart_entry() -> Optional[Path]:
 
 
 def _verify_autostart() -> bool:
-    """Verify-after-write (L3): läs tillbaka posten och jämför normaliserat.
-
-    Registry-skrivningar kan i sällsynta fall tyst misslyckas (grupprincip,
-    antivirus); utan tillbakaläsning skulle vi tro att autostarten fungerar.
-    """
+    """Verify-after-write (L3): läs tillbaka posten och jämför normaliserat."""
     try:
-        return classify_autostart() == "correct"
+        return classify_autostart() in AUTOSTART_OK
     except Exception:
         return False
 
@@ -1057,6 +1309,33 @@ def _win_dold() -> Dict[str, Any]:
     return {"startupinfo": si, "creationflags": 0x08000000}
 
 
+def _win_make_lnk(target: Path) -> Tuple[bool, str]:
+    """Skapa en .lnk-genväg till appen (delas av skrivbord + Startup)."""
+    try:
+        icon = ensure_icon_file()
+        argv, workdir = _launch_argv()
+        exe = argv[0]
+        args = subprocess.list2cmdline(argv[1:])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        ps = (
+            f"$s=(New-Object -COM WScript.Shell).CreateShortcut("
+            f"'{_ps_quote(target)}');"
+            f"$s.TargetPath='{_ps_quote(exe)}';"
+            f"$s.Arguments='{_ps_quote(args)}';"
+            f"$s.WorkingDirectory='{_ps_quote(workdir)}';"
+            f"$s.Description='{_ps_quote(APP_NAME)}';"
+            + (f"$s.IconLocation='{_ps_quote(icon)}';" if icon else "") +
+            "$s.Save()")
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       check=True, capture_output=True, timeout=30,
+                       **_win_dold())
+        if not target.is_file():
+            return False, f"PowerShell skapade ingen genväg: {target}"
+        return True, str(target)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def _retry_io(fn, tries: int = 2):
     """Transienta skrivfel (syncad disk, antivirus) prövas igen -
     autostart-skrivningar får varken krascha eller hänga."""
@@ -1067,6 +1346,78 @@ def _retry_io(fn, tries: int = 2):
             if i == tries - 1:
                 raise
             time.sleep(0.1)
+
+
+# -- macOS: launchctl ------------------------------------------------------
+def _launchctl(*args: str, timeout: float = 10.0) -> Tuple[bool, str]:
+    try:
+        r = subprocess.run(["launchctl", *args], capture_output=True,
+                           text=True, timeout=timeout)
+    except FileNotFoundError:
+        return False, "launchctl saknas"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    if r.returncode == 0:
+        return True, (r.stdout or "").strip()
+    fel = (r.stderr or r.stdout or "").strip()
+    return False, fel or f"slutkod {r.returncode}"
+
+
+def _launchctl_domain() -> str:
+    return f"gui/{getattr(os, 'getuid', lambda: 0)()}"
+
+
+def _mac_job_loaded() -> bool:
+    ok, _ = _launchctl("print", f"{_launchctl_domain()}/{AUTOSTART_LABEL}")
+    return ok
+
+
+def _mac_bootstrap(plist: Path) -> Tuple[bool, str]:
+    """Ladda om LaunchAgenten nu, så att den inte väntar till nästa inloggning."""
+    if _mac_job_loaded():
+        _launchctl("bootout", f"{_launchctl_domain()}/{AUTOSTART_LABEL}")
+    ok, msg = _launchctl("bootstrap", _launchctl_domain(), str(plist))
+    if not ok:
+        # macOS 10.9 och äldre saknar bootstrap/bootout.
+        ok, msg = _launchctl("load", "-w", str(plist))
+    if ok:
+        ok2, msg2 = _launchctl("print",
+                               f"{_launchctl_domain()}/{AUTOSTART_LABEL}")
+        return (True, "") if ok2 else (False, msg2 or "okänd status")
+    return False, msg
+
+
+def _mac_bootout(plist: Path) -> Tuple[bool, str]:
+    ok, msg = _launchctl("bootout",
+                         f"{_launchctl_domain()}/{AUTOSTART_LABEL}")
+    if not ok:
+        ok, msg = _launchctl("unload", "-w", str(plist))
+    return ok, msg
+
+
+def _mac_plist_bytes() -> bytes:
+    """Bygg plist med plistlib i stället för strängmall.
+
+    XML måste escapas: en sökväg med & eller < gav tidigare en trasig
+    plist som launchd vägrade läsa - men appen påstod "(verifierad)".
+    """
+    import plistlib
+    argv, workdir = _launch_argv()
+    data: Dict[str, Any] = {
+        "Label": AUTOSTART_LABEL,
+        "ProgramArguments": argv,
+        "RunAtLoad": True,
+        "WorkingDirectory": workdir,
+        "StandardOutPath": str(config_dir() / "logs" / "autostart.log"),
+        "StandardErrorPath": str(config_dir() / "logs" / "autostart.log"),
+        "ProcessType": "Interactive",
+        "LimitLoadToSessionType": "Aqua",
+    }
+    home = os.environ.get("PDFSORTER_HOME", "").strip()
+    if home:
+        data["EnvironmentVariables"] = {
+            "PDFSORTER_HOME": str(Path(home).expanduser())}
+    return plistlib.dumps(data)
 
 
 def set_autostart(enabled: bool) -> Tuple[bool, str]:
@@ -1080,39 +1431,36 @@ def set_autostart(enabled: bool) -> Tuple[bool, str]:
 
     def _do():
         if sys.platform.startswith("win"):
-            try:
-                import winreg
-                with _win_run_key() as key:
-                    if enabled:
-                        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
-                        # Namnbytet 2026-10-06: städa gamla värdet så att
-                        # autostarten inte ligger dubbelt.
-                        for gammalt in ("PDF Sorter",):
-                            try:
-                                winreg.DeleteValue(key, gammalt)
-                            except OSError:
-                                pass
-                    else:
-                        try:
-                            winreg.DeleteValue(key, APP_NAME)
-                        except FileNotFoundError:
-                            pass
-                if not enabled:
-                    _win_startup_lnk().unlink(missing_ok=True)
-                return True, "Registret uppdaterat"
-            except Exception:
-                # Reservväg (2026-10-16): nekar registret (policy/AV)
-                # används Startup-mappen i stället - autostart ska
-                # fungera på alla Windows-maskiner, inte bara de snälla.
-                if enabled:
-                    ok, msg = _win_make_lnk(_win_startup_lnk())
-                    return ok, f"Startup-mappen (registerreserv): {msg}"
-                _win_startup_lnk().unlink(missing_ok=True)
-                return True, "Startup-genväg borttagen"
+            if enabled:
+                ok, err = _win_registry_write(cmd)
+                if ok:
+                    # Dubbelpost: registret räcker. Städa en gammal
+                    # Startup-genväg från reservvägen, annars startar
+                    # appen två gånger vid varje inloggning.
+                    lnk_ok, lnk_err = _win_remove_startup_lnk()
+                    if not lnk_ok:
+                        return False, (f"Registret uppdaterat men kunde inte "
+                                       f"ta bort Startup-genvägen: {lnk_err}")
+                    return True, "Registret uppdaterat"
+                ok, msg = _win_make_lnk(_win_startup_lnk())
+                if ok:
+                    return True, f"Startup-mappen (registerreserv): {msg}"
+                return False, (f"Kunde inte slå på autostart "
+                               f"(register: {err}; genväg: {msg})")
+            ok_reg, err_reg = _win_registry_write(None)
+            ok_lnk, err_lnk = _win_remove_startup_lnk()
+            if autostart_enabled():
+                detalj = "; ".join(x for x in (err_reg, err_lnk) if x)
+                return False, ("Kunde inte stänga av autostart - posten "
+                               f"finns kvar ({detalj or 'okänt fel'})")
+            # Autostart är av - även om en läsning/skrivning nekades på
+            # vägen. Det som räknas är att ingen post startar appen.
+            return True, "Borttagen"
 
         if sys.platform == "darwin":
             plist = _mac_plist_file()
             if not enabled:
+                _mac_bootout(plist)
                 plist.unlink(missing_ok=True)
                 return True, "Borttagen"
             plist.parent.mkdir(parents=True, exist_ok=True)
@@ -1120,24 +1468,12 @@ def set_autostart(enabled: bool) -> Tuple[bool, str]:
                 (config_dir() / "logs").mkdir(parents=True, exist_ok=True)
             except OSError:
                 pass
-            script = _main_script
-            exe = sys.executable or "python3"
-            args = ([sys.executable, "--tray"] if getattr(sys, "frozen", False)
-                    else [exe, str(script), "--tray"])
-            items = "".join(f"        <string>{a}</string>\n" for a in args)
-            _atomic_text(plist,
-                '<?xml version="1.0" encoding="UTF-8"?>\n'
-                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-                '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-                '<plist version="1.0">\n<dict>\n'
-                '    <key>Label</key>\n    <string>com.arkivpiloten.autostart</string>\n'
-                f'    <key>ProgramArguments</key>\n    <array>\n{items}    </array>\n'
-                '    <key>RunAtLoad</key>\n    <true/>\n'
-                f'    <key>WorkingDirectory</key>\n    <string>{workdir}</string>\n'
-                f'    <key>StandardOutPath</key>\n    <string>{config_dir() / "logs" / "autostart.log"}</string>\n'
-                f'    <key>StandardErrorPath</key>\n    <string>{config_dir() / "logs" / "autostart.log"}</string>\n'
-                '</dict>\n</plist>\n')
-            return True, str(plist)
+            _atomic_text(plist, _mac_plist_bytes().decode("utf-8"))
+            laddad, lmsg = _mac_bootstrap(plist)
+            if laddad:
+                return True, f"{plist} (laddad och verifierad)"
+            return True, (f"{plist} (installerad - aktiveras vid nästa "
+                          f"inloggning: {lmsg})")
 
         # Linux: XDG autostart (fungerar i GNOME/KDE/Xfce m.fl.)
         desktop = _linux_autostart_file()
@@ -1146,18 +1482,7 @@ def set_autostart(enabled: bool) -> Tuple[bool, str]:
             desktop.unlink(missing_ok=True)
             legacy.unlink(missing_ok=True)
             return True, "Borttagen"
-        icon = ensure_icon_file()
-        _atomic_text(desktop,
-            "[Desktop Entry]\n"
-            "Type=Application\n"
-            f"Name={APP_NAME}\n"
-            "Comment=Sorterar PDF-filer till undermappar\n"
-            f"Exec={cmd}\n"
-            f"Path={workdir}\n"
-            + (f"Icon={icon}\n" if icon else "") +
-            "Terminal=false\n"
-            "X-GNOME-Autostart-enabled=true\n"
-            "X-GNOME-Autostart-Delay=3\n")
+        _atomic_text(desktop, _linux_desktop_entry(tray=True))
         legacy.unlink(missing_ok=True)   # gamla namnet får inte dubbelstarta
         return True, str(desktop)
 
@@ -1166,9 +1491,14 @@ def set_autostart(enabled: bool) -> Tuple[bool, str]:
         if ok and enabled:
             # Verify-after-write: bekräfta att skrivningen verkligen bet.
             if _verify_autostart():
-                msg += " (verifierad)"
+                if "aktiveras" not in msg:
+                    msg += " (posten verifierad)"
             else:
-                msg += " (VARNING: kunde inte verifieras)"
+                # Säg aldrig "klart" när posten inte kan läsas tillbaka:
+                # användaren ska få veta att autostarten inte är pålitlig.
+                session_log("autostart",
+                            f"Kunde inte verifiera autostarten: {msg}", "err")
+                return False, f"{msg} (KUNDE INTE VERIFIERAS)"
         session_log("autostart",
                     f"{'Påslagen' if enabled else 'Avstängd'}: {msg}",
                     "ok" if ok else "err")
@@ -1191,9 +1521,9 @@ def sync_autostart(want: bool) -> Tuple[bool, str]:
         klass = classify_autostart()
     except Exception:
         return False, "kunde inte läsas"
-    if want and klass != "correct":
+    if want and klass not in AUTOSTART_OK:
         # Alla avvikelser lagas: saknas, fel sökväg, konsol-python
-        # (stale_console) eller gamla argument -> skriv om posten.
+        # (stale_console), dubbelpost eller gamla argument.
         session_log("autostart", f"Synk lagar posten (klass: {klass})")
         ok, msg = set_autostart(True)
         return ok, f"{klass} -> {msg}"
@@ -1202,33 +1532,104 @@ def sync_autostart(want: bool) -> Tuple[bool, str]:
     return True, "synk"
 
 
+def tray_backend_name() -> str:
+    """Namnet på den pystray-backend som valdes (t.ex. pystray._xorg)."""
+    try:
+        import pystray
+        return str(getattr(pystray.Icon, "__module__", "") or "")
+    except Exception:
+        return ""
+
+
+def tray_hidden_start_safe() -> Tuple[bool, str]:
+    """Kan appen starta dold i systemfältet och ändå gå att nå?
+
+    På Linux är pystrays X11-backend osynlig i GNOME utan
+    AppIndicator-tillägget. Att då starta med --tray gav en app som
+    varken hade fönster eller ikon - särskilt illa vid autostart.
+    """
+    if not tray_available():
+        return False, "pystray/Pillow saknas"
+    if sys.platform.startswith("linux"):
+        if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            return False, "ingen grafisk session (DISPLAY/WAYLAND_DISPLAY saknas)"
+        backend = tray_backend_name()
+        if "appindicator" not in backend:
+            desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
+            if "gnome" in desktop:
+                return False, ("GNOME visar inte X11-systemfält "
+                               f"(backend: {backend or 'okänd'}) - "
+                               "installera AppIndicator-tillägget")
+    return True, ""
+
+
 def create_desktop_shortcut() -> Tuple[bool, str]:
-    """Lägg en genväg på skrivbordet. Bara Windows och Linux."""
-    script = _main_script
+    """Lägg en genväg på skrivbordet - Windows, macOS och Linux.
+
+    Windows: .lnk via PowerShell. Linux: .desktop i appmenyn
+    (~/.local/share/applications) och, när en skrivbordsmapp finns, även
+    på skrivbordet - med trust-flaggan satt så att GNOME/Nautilus inte
+    kallar den "otrovärdig". macOS: ett .command-skal (dubbelklick); en
+    riktig .app med Dock-ikon skapas av install.sh.
+    """
     desktop = Path.home() / "Desktop"
     if not desktop.is_dir():
         desktop = Path.home() / "Skrivbord"
-    if not desktop.is_dir():
-        return False, "Hittade ingen skrivbordsmapp"
     try:
         if sys.platform.startswith("win"):
+            if not desktop.is_dir():
+                return False, "Hittade ingen skrivbordsmapp"
             return _win_make_lnk(desktop / f"{APP_NAME}.lnk")
 
         if sys.platform.startswith("linux"):
-            icon = ensure_icon_file()
-            exe = sys.executable or "python3"
-            target = desktop / "arkivpiloten.desktop"
-            _atomic_text(target,
-                "[Desktop Entry]\nType=Application\n"
-                f"Name={APP_NAME}\n"
-                f'Exec="{exe}" "{script}"\n'
-                f"Path={script.parent}\n"
-                + (f"Icon={icon}\n" if icon else "") +
-                "Terminal=false\n")
-            target.chmod(0o755)
-            return True, str(target)
+            skrivna = []
+            # Appmenyn först: den fungerar även på GNOME/Ubuntu där
+            # skrivbordsikoner inte visas alls.
+            data_home = os.environ.get("XDG_DATA_HOME") or str(
+                Path.home() / ".local" / "share")
+            menu = Path(data_home) / "applications" / "arkivpiloten.desktop"
+            try:
+                _atomic_text(menu, _linux_desktop_entry(tray=False, menu=True))
+                menu.chmod(0o644)
+                skrivna.append(str(menu))
+            except OSError as exc:
+                skrivna.append(f"(appmenyn kunde inte skrivas: {exc})")
+            if desktop.is_dir():
+                target = desktop / "arkivpiloten.desktop"
+                _atomic_text(target, _linux_desktop_entry(tray=False, menu=True))
+                target.chmod(0o755)
+                skrivna.append(str(target))
+                # GNOME/Nautilus kräver trust-flaggan för att starta en
+                # .desktop-fil från skrivbordet med dubbelklick.
+                if shutil.which("gio"):
+                    try:
+                        subprocess.run(["gio", "set", str(target),
+                                        "metadata::trusted", "true"],
+                                       capture_output=True, timeout=5)
+                    except Exception:
+                        pass
+            if not any(str(x).startswith("/") for x in skrivna):
+                return False, "\n".join(skrivna) or "Kunde inte skriva genvägen"
+            return True, "\n".join(skrivna)
 
-        return False, "Stöds inte på macOS - dra filen till Dock i stället"
+        if sys.platform == "darwin":
+            if not desktop.is_dir():
+                return False, "Hittade ingen skrivbordsmapp"
+            import shlex
+            argv, workdir = _launch_argv()
+            argv = [a for a in argv if a != "--tray"]
+            target = desktop / "Starta ArkivPiloten.command"
+            text = ("#!/bin/sh\n"
+                    f"cd {shlex.quote(workdir)}\n"
+                    "exec " + " ".join(shlex.quote(a) for a in argv)
+                    + ' "$@"\n')
+            _atomic_text(target, text)
+            target.chmod(0o755)
+            return True, (f"{target}\n\nDubbelklick öppnar Terminal och "
+                          "startar appen. Kör install.sh för en riktig "
+                          "ArkivPiloten.app med Dock-ikon.")
+
+        return False, "Stöds inte på den här plattformen"
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
 
@@ -1248,8 +1649,11 @@ def tray_available() -> bool:
 class TrayIcon:
     """Ikon i systemfältet med snabbmeny.
 
-    Körs i en egen tråd. All interaktion med gränssnittet skickas tillbaka
-    till Tkinters tråd via App._post, eftersom Tk inte är trådsäkert.
+    Windows/Linux: pystray-loop i en egen tråd. macOS: pystray kräver att
+    NSApplication-loopens ägare är huvudtråden, så där används
+    run_detached() och Tk:s mainloop får driva händelserna. All
+    gränssnittsinteraktion skickas tillbaka till Tk-tråden via App._post,
+    eftersom Tk inte är trådsäkert.
     """
 
     def __init__(self, app: Any):
@@ -1259,6 +1663,7 @@ class TrayIcon:
         self.app = app
         self.icon = None
         self._thread: Optional[threading.Thread] = None
+        self._detached = False
 
     # -- meny -------------------------------------------------------------
     def _build_menu(self):
@@ -1295,6 +1700,15 @@ class TrayIcon:
             if image is None:
                 return False
             self.icon = pystray.Icon("pdfsorter", image, APP_NAME, self._build_menu())
+            if sys.platform == "darwin":
+                # pystray/_base.py: "run() must be called from the main
+                # thread". Att starta NSApplication i en bakgrundstråd
+                # gjorde att menykonen aldrig dök upp, medan appen trodde
+                # att den fanns och gömde fönstret (osynlig app vid
+                # autostart). run_detached() låter Tk äga huvudloopen.
+                self.icon.run_detached()
+                self._detached = True
+                return True
             self._thread = threading.Thread(target=self._run, daemon=True,
                                             name="pdfsorter-tray")
             self._thread.start()
@@ -1341,6 +1755,15 @@ class TrayIcon:
         if not self.icon:
             return
         icon, self.icon = self.icon, None
+        if sys.platform == "darwin" and self._detached:
+            # icon.stop() stoppar NSApplication - dvs även Tk:s mainloop.
+            # Dölj bara statusobjektet; appen avslutas ändå via quit_app.
+            self._detached = False
+            try:
+                icon.visible = False
+            except Exception:
+                pass
+            return
 
         def _stoppa():
             try:
@@ -1681,7 +2104,7 @@ def help_as_text() -> str:
 LAUNCHER_PYW = r"""# -*- coding: utf-8 -*-
 # Startar ArkivPiloten utan konsolfönster - dubbelklicka mig.
 #
-# Robust startfil (v1.1.0):
+# Robust startfil (v1.4.0):
 #   * Flyttbar: hittar pdfsorter.py bredvid sig själv i stället för en
 #     hårdkodad sökväg - hela mappen kan flyttas utan att startfilen dör.
 #   * Rätt ikon i aktivitetsfältet: AppUserModelID sätts före första
@@ -1703,7 +2126,9 @@ _APP_ID = "ArkivPiloten.App.1"
 
 def _config_dir():
     # Portabel (2026-10-05): appmappen först (fungerar på USB/varsom),
-    # PDFSORTER_HOME styr om satt, OS-plats som fallback.
+    # PDFSORTER_HOME styr om satt. Är appmappen skrivskyddad (t.ex.
+    # /Applications eller /opt) används användarens data-mapp, annars
+    # kunde startaren inte ens skriva sin kraschlogg.
     env = os.environ.get("PDFSORTER_HOME")
     if env:
         return Path(env).expanduser()
@@ -2500,13 +2925,21 @@ UPDATE_BRANCH = "main"
 UPDATE_RAW_BASE = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}"
 UPDATE_ZIP_URL = f"https://codeload.github.com/{UPDATE_REPO}/zip/refs/heads/{UPDATE_BRANCH}"
 
+#: GitHub Releases är den primära uppdateringskanalen (1.4.0). Varje
+#: publicerad release har ett färdigt paket + SHA256SUMS.txt, vilket gör
+#: att appen kan verifiera innehållet innan något skrivs. Grenen ovan
+#: finns kvar som reserv om API:t eller releasen inte kan läsas.
+UPDATE_RELEASES_LATEST = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_ASSET_NAME = "ArkivPiloten.zip"
+UPDATE_SUMS_NAME = "SHA256SUMS.txt"
+
 #: Bara dessa filer får ersättas av en uppdatering - allt i appmappen.
 #: Användardata (json/, logs/, cache/, backups/, updates/) rörs ALDRIG,
 #: och inte heller användarens egna filer i mappen.
 UPDATE_FILES = (
     "pdfsorter.py", "pdfsorter.pyw", "pdfsorter_data.py",
     "pdfsorter_read.py", "pdfsorter_system.py", "pdfsorter_theme.py",
-    "requirements.txt", "ArkivPiloten.png", "ArkivPiloten.ico",
+    "requirements.txt", "install.sh", "ArkivPiloten.png", "ArkivPiloten.ico",
     "ArkivPiloten - Installera senaste Python och starta.bat",
     "README.md", "PDFSORTER_SPEC.md", "Stöd ArkivPiloten.html",
     "swish_qr.png", "desktop.ini",
@@ -2527,15 +2960,76 @@ def _version_tuple(s: str) -> Tuple[int, ...]:
     return tuple(ut or [0])
 
 
-def check_for_update(timeout: int = 15) -> dict:
-    """Finns en nyare version på GitHub? Jämför APP_VERSION mot den
-    pdfsorter.py som ligger på UPDATE_BRANCH - inget laddas ner och
-    inget ändras. Returnerar dict med ok/current/remote/available."""
+def _http_get(url: str, timeout: float = 15.0, accept: str = "*/*",
+              limit: int = 4_000_000) -> bytes:
+    """Hämta en liten resurs (JSON/text) med appens User-Agent."""
     import urllib.request
+    req = urllib.request.Request(
+        url, headers={"User-Agent": APP_NAME, "Accept": accept})
+    with urllib.request.urlopen(req, timeout=timeout) as svar:
+        return svar.read(limit)
+
+
+def _latest_release(timeout: float = 15.0) -> Optional[dict]:
+    """Läs senaste publicerade GitHub-releasen (aldrig draft/förhandsvisning)."""
     try:
-        # I första hand GitHubs API (raw-innehåll via Accept-header) -
-        # samma slutpunkt som resten av GitHub-integrationen; den
-        # rena raw-domänen som reserv om API:t skulle svara fel.
+        raw = _http_get(UPDATE_RELEASES_LATEST, timeout,
+                        "application/vnd.github+json")
+        data = json.loads(raw.decode("utf-8", "ignore"))
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("draft") or data.get("prerelease"):
+        return None
+    tag = str(data.get("tag_name") or "").strip()
+    version = tag[1:] if tag[:1] in ("v", "V") else tag
+    if not re.match(r"^[0-9][0-9A-Za-z.\-]*$", version):
+        return None
+    assets: Dict[str, str] = {}
+    for a in data.get("assets") or []:
+        if (isinstance(a, dict) and a.get("name")
+                and a.get("browser_download_url")):
+            assets[str(a["name"])] = str(a["browser_download_url"])
+    zip_url = assets.get(UPDATE_ASSET_NAME)
+    if not zip_url:
+        # Tillåt versionsnamngivna paket (ArkivPiloten-1.4.0.zip).
+        for namn, url in sorted(assets.items()):
+            if namn.lower().startswith("arkivpiloten") and namn.lower().endswith(".zip"):
+                zip_url = url
+                break
+    sums_url = assets.get(UPDATE_SUMS_NAME)
+    return {
+        "tag": tag,
+        "version": version,
+        "zip_url": zip_url or "",
+        "sums_url": sums_url or "",
+        "release_url": str(data.get("html_url") or ""),
+        "notes": str(data.get("body") or "")[:4000],
+    }
+
+
+def check_for_update(timeout: int = 15) -> dict:
+    """Finns en nyare version? Läser GitHub Releases först och faller
+    tillbaka på UPDATE_BRANCH om API:t inte svarar. Inget laddas ner och
+    inget ändras här - bara versionsjämförelse."""
+    rel = _latest_release(timeout)
+    if rel:
+        return {
+            "ok": True,
+            "current": APP_VERSION,
+            "remote": rel["version"],
+            "available": (_version_tuple(rel["version"])
+                          > _version_tuple(APP_VERSION)),
+            "source": "release",
+            "tag": rel["tag"],
+            "zip_url": rel["zip_url"] or (
+                f"https://codeload.github.com/{UPDATE_REPO}/zip/refs/tags/"
+                f"{rel['tag']}"),
+            "sha256_url": rel["sums_url"],
+            "release_url": rel["release_url"],
+            "notes": rel["notes"],
+        }
+    try:
+        # Reserv: läs versionsnumret direkt ur pdfsorter.py på grenen.
         text = None
         for url, accept in (
                 (f"https://api.github.com/repos/{UPDATE_REPO}/contents/"
@@ -2543,10 +3037,8 @@ def check_for_update(timeout: int = 15) -> dict:
                  "application/vnd.github.raw+json"),
                 (f"{UPDATE_RAW_BASE}/pdfsorter.py", "*/*")):
             try:
-                req = urllib.request.Request(
-                    url, headers={"User-Agent": APP_NAME, "Accept": accept})
-                with urllib.request.urlopen(req, timeout=timeout) as svar:
-                    text = svar.read(2_000_000).decode("utf-8", "ignore")
+                text = _http_get(url, timeout, accept, 2_000_000).decode(
+                    "utf-8", "ignore")
                 break
             except Exception:
                 continue
@@ -2559,10 +3051,85 @@ def check_for_update(timeout: int = 15) -> dict:
                     "error": "kunde inte läsa versionsnumret på GitHub"}
         remote = m.group(1)
         return {"ok": True, "current": APP_VERSION, "remote": remote,
-                "available": _version_tuple(remote) > _version_tuple(APP_VERSION)}
+                "available": _version_tuple(remote) > _version_tuple(APP_VERSION),
+                "source": "branch", "tag": "",
+                "zip_url": UPDATE_ZIP_URL, "sha256_url": "",
+                "release_url": "", "notes": ""}
     except Exception as exc:
         return {"ok": False, "current": APP_VERSION, "remote": None,
                 "available": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _sha256_file(path: Path, chunk: int = 1 << 20) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            bit = fh.read(chunk)
+            if not bit:
+                break
+            h.update(bit)
+    return h.hexdigest()
+
+
+def _sha_from_sums(text: str, names) -> Optional[str]:
+    """Plocka ut rätt rad ur ett SHA256SUMS.txt (sha256sum-format)."""
+    wanted = {str(n).strip().lstrip("*") for n in names if n}
+    for rad in text.splitlines():
+        delar = rad.replace("*", " ").split()
+        if len(delar) >= 2 and re.fullmatch(r"[0-9a-fA-F]{64}", delar[0]):
+            if delar[-1].split("/")[-1] in wanted:
+                return delar[0].lower()
+    return None
+
+
+def _safe_extract(zippath: Path, dest: Path) -> Tuple[bool, str]:
+    """Packa upp en zip utan att något hamnar utanför dest (zip-slip)."""
+    import zipfile as _zip
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    dest_res = dest.resolve()
+    total = 0
+    try:
+        with _zip.ZipFile(zippath) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                total += int(info.file_size or 0)
+                if total > 300 * 1024 * 1024:
+                    return False, ("uppdateringspaketet är orimligt stort "
+                                   "- avbryter")
+                target = (dest / info.filename).resolve()
+                try:
+                    target.relative_to(dest_res)
+                    if target == dest_res:
+                        return False, "zip-filen innehåller en ogiltig sökväg"
+                except ValueError:
+                    return False, ("zip-filen försöker skriva utanför "
+                                   "appmappen - avbryter")
+            zf.extractall(dest)
+    except Exception as exc:
+        return False, (f"kunde inte packa upp uppdateringen: "
+                       f"{type(exc).__name__}: {exc}")
+    return True, ""
+
+
+def _restore_files(backup: Path, root: Path, installerade: List[str],
+                   fanns_innan) -> List[str]:
+    """Lägg tillbaka filerna från säkerhetskopian efter ett avbrott."""
+    import shutil as _sh
+    misslyckade = []
+    for namn in installerade:
+        mal = root / namn
+        kalla = backup / namn
+        try:
+            if namn in fanns_innan and kalla.is_file():
+                _sh.copy2(kalla, mal)
+            elif namn not in fanns_innan and mal.is_file():
+                mal.unlink()
+        except OSError:
+            misslyckade.append(namn)
+    return misslyckade
 
 
 def _install_from_folder(staged: Path, root: Path,
@@ -2572,7 +3139,8 @@ def _install_from_folder(staged: Path, root: Path,
     Säkerhet: alla .py valideras med compile() FÖRE något rörs, staged
     version måste vara den väntade, nuvarande filer säkerhetskopieras
     till backups/update_<tid>/ och varje fil ersätts atomiskt. Går
-    något fel mitt i finns kopiorna kvar att återställa från.
+    något fel mitt i återställs ALLA filer från kopian (rollback), och
+    efteråt kontrolleras att den nya versionen verkligen ligger på plats.
     """
     import shutil as _sh
     staged = Path(staged); root = Path(root)
@@ -2615,6 +3183,7 @@ def _install_from_folder(staged: Path, root: Path,
     stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
     backup = root / "backups" / f"update_{stamp}"
     installerade: List[str] = []
+    fanns_innan = set()
     try:
         backup.mkdir(parents=True, exist_ok=True)
         for namn in UPDATE_FILES:
@@ -2624,20 +3193,35 @@ def _install_from_folder(staged: Path, root: Path,
             mal = root / namn
             if mal.is_file():
                 _sh.copy2(mal, backup / namn)
+                fanns_innan.add(namn)
             tmp = root / (namn + ".update-tmp")
             with open(kalla, "rb") as fi, open(tmp, "wb") as fo:
                 _sh.copyfileobj(fi, fo)
             os.replace(tmp, mal)
             installerade.append(namn)
+        # Kontrollera att den nya versionen verkligen ligger på plats.
+        ny = (root / "pdfsorter.py").read_text(encoding="utf-8")
+        m3 = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', ny)
+        if staged_version and (not m3 or m3.group(1) != staged_version):
+            raise OSError(f"pdfsorter.py visar {m3.group(1) if m3 else '?'} "
+                          f"efter uppdateringen")
         info = {"time": now_iso(), "from": APP_VERSION, "to": staged_version,
                 "files": installerade, "backup": str(backup)}
         upd = root / "updates"
         upd.mkdir(parents=True, exist_ok=True)
         (upd / "last_update.json").write_text(
             json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
-    except OSError as exc:
-        return False, (f"installationen avbröts ({exc}) - säkerhetskopia "
-                       f"finns i {backup}")
+    except Exception as exc:
+        kvar = _restore_files(backup, root, installerade, fanns_innan)
+        for tmp in root.glob("*.update-tmp"):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        extra = (" Alla filer återställdes." if not kvar
+                 else f" KUNDE INTE ÅTERSTÄLLA: {', '.join(kvar)}.")
+        return False, (f"installationen avbröts ({type(exc).__name__}: {exc})."
+                       f"{extra} Säkerhetskopia: {backup}")
     session_log("uppdatering",
                 f"{APP_VERSION} -> {staged_version}: "
                 f"{len(installerade)} filer, backup {backup}", "ok")
@@ -2648,32 +3232,50 @@ def _install_from_folder(staged: Path, root: Path,
 
 def perform_update(timeout: int = 180,
                    root: Optional[Path] = None) -> Tuple[bool, str]:
-    """Hämta senaste versionen från GitHub och installera den i
-    appmappen. Allt mellanlager (zip, staging) bor i appmappens egna
-    undermappar temp/ och updates/ - inget utanför appmappen."""
+    """Hämta senaste versionen från GitHub Releases och installera den.
+
+    Paketet verifieras mot release-postens SHA256SUMS.txt innan något
+    packas upp. Allt mellanlager (zip, staging) bor i appmappens egna
+    undermappar temp/ och updates/ - inget utanför appmappen.
+    """
     import shutil as _sh
-    import zipfile as _zip
+    from urllib.parse import urlparse
     root = Path(root) if root else _main_script.parent
     info = check_for_update(timeout=min(timeout, 30))
     if not info["ok"]:
         return False, f"Kunde inte söka uppdatering: {info.get('error', '?')}"
     if not info["available"]:
         return True, f"Du har redan den senaste versionen ({APP_VERSION})."
+    url = info.get("zip_url") or UPDATE_ZIP_URL
     tmp = root / "temp"; tmp.mkdir(parents=True, exist_ok=True)
     staging = root / "updates" / "staging"
     zippath = tmp / "arkivpiloten-update.zip"
     try:
-        session_log("uppdatering", f"Laddar ner {UPDATE_ZIP_URL}")
-        _ladda_ner(UPDATE_ZIP_URL, zippath, timeout=timeout)
+        session_log("uppdatering", f"Laddar ner {url}")
+        _ladda_ner(url, zippath, timeout=timeout)
+        # -- kontrollsumma (finns för alla publicerade releaser) ----------
+        if info.get("sha256_url"):
+            try:
+                sums = _http_get(info["sha256_url"], min(timeout, 30),
+                                 limit=1_000_000).decode("utf-8", "ignore")
+            except Exception as exc:
+                return False, ("Kunde inte hämta kontrollsumman - "
+                               f"uppdateringen avbröts ({type(exc).__name__}).")
+            namn = [Path(urlparse(url).path).name, UPDATE_ASSET_NAME]
+            forvantad = _sha_from_sums(sums, namn)
+            if not forvantad:
+                return False, ("SHA256SUMS.txt saknar paketet - "
+                               "uppdateringen avbröts.")
+            faktisk = _sha256_file(zippath)
+            if faktisk != forvantad:
+                return False, ("Kontrollsumman stämmer inte "
+                               f"({faktisk[:12]}… != {forvantad[:12]}…) - "
+                               "uppdateringen avbröts och inget ändrades.")
         if staging.exists():
             _sh.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True, exist_ok=True)
-        with _zip.ZipFile(zippath) as zf:
-            for member in zf.namelist():
-                mal = (staging / member).resolve()
-                if not str(mal).startswith(str(staging.resolve())):
-                    return False, "zip-filen försöker skriva utanför appmappen - avbryter"
-            zf.extractall(staging)
+        ok, fel = _safe_extract(zippath, staging)
+        if not ok:
+            return False, fel
         ok, msg = _install_from_folder(staging, root, expected=info["remote"])
         return ok, msg
     except Exception as exc:
@@ -2688,8 +3290,6 @@ def perform_update(timeout: int = 180,
             pass
 
 
-
-
 # ==========================================================================
 # 1.1.0-FUNKTIONER: PDF-taggning, årsarkiv-export (ej zippad), org.nr-uppslag
 # ==========================================================================
@@ -2699,10 +3299,13 @@ def tag_pdf_metadata(path: Path, category: str, sender: str = "") -> bool:
     arkivet blir sökbart även i Utforskaren/Acrobat. Tyst False vid fel -
     taggning får aldrig stoppa en sortering."""
     try:
-        import fitz  # PyMuPDF
+        # Importera pymupdf FÖRST: import av det gamla namnet "fitz" skriver
+        # en DeprecationWarning på stdout i PyMuPDF 1.28+, vilket gjorde
+        # --json till ogiltig JSON (varningen hamnade före JSON-blocket).
+        import pymupdf as fitz  # type: ignore
     except Exception:
         try:
-            import pymupdf as fitz  # type: ignore
+            import fitz  # type: ignore
         except Exception:
             return False
     try:
@@ -2722,7 +3325,10 @@ def tag_pdf_metadata(path: Path, category: str, sender: str = "") -> bool:
     except Exception:
         # saveIncr kan nekas (krypterad/udda fil): skriv om till tempfil.
         try:
-            import fitz  # PyMuPDF
+            try:
+                import pymupdf as fitz  # type: ignore
+            except Exception:
+                import fitz  # type: ignore
             doc = fitz.open(str(path))
             meta = dict(doc.metadata or {})
             meta["keywords"] = "; ".join(["ArkivPiloten", category] +
@@ -2889,6 +3495,9 @@ def _self_test() -> int:
     print(f"  Loggmapp:       {config_dir() / 'logs'}")
     print(f"  Hjälptext:      {len(HELP_CONTENT)} block, "
           f"{len(help_as_text())} tecken")
+    print(f"  Uppdatering:    GitHub Releases ({UPDATE_REPO}) - "
+          f"paketverifiering {'ja' if callable(_safe_extract) else 'nej'}, "
+          f"rollback {'ja' if callable(_restore_files) else 'nej'}")
     return 0
 
 

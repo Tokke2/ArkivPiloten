@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 #: Programmets version. Höjs vid varje leverans.
-VERSION = "1.1.0"
+VERSION = "1.4.0"
 
 __all__ = [
     # extraktion
@@ -746,7 +746,7 @@ def _preprocess(img, quality: str = "high", do_deskew: bool = True):
     en resolutionsnivå som ger läsbar text. Allt görs med PIL, så inget nytt
     paket krävs (OpenCV skulle ge ännu bättre resultat om det finns).
     """
-    from PIL import Image, ImageOps
+    from PIL import Image
     # Normalisera till gråskala
     if img.mode == "RGBA":
         img = img.convert("RGB")

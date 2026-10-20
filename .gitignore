@@ -1,0 +1,30 @@
+# Appens egna data- och arbetsmappar (skapas när programmet körs).
+# De kan innehålla företagsnamn, regler och loggar - ska aldrig i Git.
+json/
+logs/
+cache/
+backups/
+updates/
+temp/
+icons/
+dist/
+release-notes.md
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+*.egg-info/
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+desktop.ini.bak
+
+# Redigerare
+.vscode/
+.idea/

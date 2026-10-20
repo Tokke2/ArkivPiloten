@@ -10,8 +10,9 @@ rem    pytesseract) - med retry och importkontroll efterat.
 rem 3) Ser till att Tesseract OCR (systemprogram) finns med spraken
 rem    svenska + engelska for skannade PDF:er (winget, basta forsok).
 rem 4) Kor appens egen statuskontroll sa att anvandaren ser vad som hittats.
-rem 5) Startar appen utan konsol-fonster.
+rem 5) Fragar om autostart (valfritt, standard nej).
 rem Fungerar fran valfri mapp/USB - allt utgar fran denna fils plats.
+rem 6) Startar appen utan konsol-fonster.
 rem Misslyckas ett tillagg startar appen anda och visar i Hjalp-menyn
 rem (Komplettera installationen) vad som saknas.
 rem ======================================================================
@@ -107,7 +108,14 @@ echo [4/5] Kor ArkivPilotens statuskontroll ...
 
 set "PYW=%PYEXE:python.exe=pythonw.exe%"
 if not exist "%PYW%" set "PYW=%PYEXE%"
-echo [5/5] Startar ArkivPiloten ...
+echo [5/6] Autostart (valfritt) ...
+choice /C JN /N /T 15 /D N /M "Starta ArkivPiloten automatiskt vid inloggning? [J/N] "
+if errorlevel 2 (
+    echo       Autostart lämnas avstängt - kryssa i det i appens Inställningar när du vill.
+) else (
+    "%PYEXE%" "%~dp0pdfsorter.py" --install-autostart
+)
+echo [6/6] Startar ArkivPiloten ...
 echo Startar: %PYW% pdfsorter.pyw >> "%LOG%"
 start "" "%PYW%" "%~dp0pdfsorter.pyw"
 exit /b 0

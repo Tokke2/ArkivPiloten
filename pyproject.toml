@@ -1,0 +1,18 @@
+# Verktygsinställningar för utveckling. Appen körs fortfarande utan
+# installation: python pdfsorter.py (eller pythonw pdfsorter.pyw).
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    "error::DeprecationWarning:pdfsorter*",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 110
+exclude = [".venv", "build", "dist", "tools"]
+
+[tool.ruff.lint]
+# Börja smalt (syntax- och pyflakes-fel) så att CI är grön från dag ett;
+# utöka regel för regel när den befintliga koden städats.
+select = ["E9", "F"]

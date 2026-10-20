@@ -4,8 +4,8 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.1.0 — your PDFs, sorted into the right folders. Automatically.**
-**PDF Sorter 1.1.0 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
+**PDF Sorter 1.4.0 — your PDFs, sorted into the right folders. Automatically.**
+**PDF Sorter 1.4.0 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
@@ -38,7 +38,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 
 ## Features
 
-- 📥 **Watched folders + automatic sorting** into `<category>/<year>`, using the document's own date for the year folder
+- 📥 **Watched folders + automatic sorting** into `<category>/<year>` (optionally using the document's own date: `date_enabled`)
 - 🎯 **Zone-weighted matching** — letterhead, footer and sender zones weigh more than body text, plus multi-page matching; a proven organisation number always suffices on its own
 - 🧠 **Self-learning classifier** — suggests and breaks deadlocks between rule-approved candidates after roughly 5 decisions per category; it never moves a file on its own
 - 🔐 **Safer matching (1.2.0+)** — body-text-only mentions never auto-move a file on Normal and above: auto-sorting requires sender-zone, strong-ID or multi-page evidence, at least 12 characters of read text, and the exact analysed bytes are fingerprinted (SHA-256) and re-verified before any move
@@ -47,8 +47,8 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 - ↩️ **Never destructive** — files are never overwritten (name clashes become `invoice (2).pdf`), and every move can be undone
 - 🧰 **Tray icon, autostart, single instance**, dark / light / high-contrast themes, HiDPI-aware
 - 🪵 **Session logging** in `logs/` and a one-click diagnostics bundle (*Copy diagnostics*) for support
-- 🎒 **Everything stays in the app folder (1.3.0)** — settings, rules, history, logs, cache, icons, backups, updates and temp files all live in subfolders of the app folder (`json/`, `logs/`, `cache/`, `icons/`, `backups/`, `updates/`, `temp/`); nothing is written to `%APPDATA%` or your home directory (override only via `PDFSORTER_HOME`)
-- 🔄 **Auto-update from GitHub (1.3.0)** — checks for new versions, updates only the app's own files with backup + compile validation, then updates the Python packages; your data is never touched (Help tab → *Search for updates*, or `--update`)
+- 🎒 **Portable by default** — settings, rules, history, logs, cache, icons, backups, updates and temp files live in subfolders of the app folder (`json/`, `logs/`, …). If the app folder is read-only (e.g. `/Applications` or `/opt`), data moves to the standard per-user folder instead; override with `PDFSORTER_HOME`
+- 🔄 **Auto-update from GitHub Releases (1.4.0)** — verifies the package against the release's `SHA256SUMS.txt`, updates only the app's own files with backup, compile check and rollback, then updates the Python packages; your data is never touched. On by default (Help → *Search for updates*, or `--update`)
 - 🚀 **Autostart on Windows/macOS/Linux (1.3.0)** — registry with Startup-folder fallback (Windows), LaunchAgent (macOS), XDG (Linux); self-healing sync at every start, verified after writing
 - ❤️ **Donation view in the app** (Help → Support the project) with SV/EN toggle and a verified Swish QR code
 
@@ -66,6 +66,18 @@ pythonw pdfsorter.pyw
 ```
 
 Or start the GUI directly with `python pdfsorter.py` (no arguments opens the graphical interface).
+
+## Quick start (macOS & Linux)
+
+```bash
+./install.sh              # venv + requirements.txt, asks about autostart
+./install.sh --autostart  # ...or turn autostart on/off non-interactively
+./install.sh --uninstall  # remove autostart + shortcuts, keep your data
+```
+
+`install.sh` installs everything in a local `.venv` (no sudo), checks Tkinter and Tesseract with per-distro hints, creates a desktop/app-menu shortcut, and builds a real `~/Applications/ArkivPiloten.app` on macOS. Autostart uses a LaunchAgent on macOS and XDG `autostart/*.desktop` on Linux (KDE, GNOME, XFCE, …) — both are verified after writing and repaired on the next start if they break.
+
+> Tray on Linux needs a StatusNotifier host. GNOME requires the *AppIndicator* extension; without it the app still opens its window instead of hiding it.
 
 > **Good to know:** every Python dependency is optional — the app starts anyway and tells you in the status bar what is missing. For the best reading quality install the full stack, and note that OCR also requires the **Tesseract** system program:
 >
@@ -99,6 +111,11 @@ Run `python pdfsorter.py --help` for all options (`--copy`, `--exclude`, `--json
 ```text
 ArkivPiloten/
 ├── ArkivPiloten - Installera senaste Python och starta.bat   the only launcher you need (Windows)
+├── install.sh              installer for macOS & Linux (venv, shortcut, autostart)
+├── tests/                  pytest suite (autostart per OS, updater, config dir)
+├── tools/build_release.py  builds ArkivPiloten.zip + SHA256SUMS.txt
+├── .github/workflows/      CI (tests/lint) + automatic release publishing
+├── pyproject.toml          pytest/ruff settings
 ├── pdfsorter.py            main program (GUI, engine, matching)
 ├── pdfsorter.pyw           console-free launcher
 ├── pdfsorter_data.py       rules, history, locking, atomic writes
@@ -114,6 +131,19 @@ ArkivPiloten/
 
 The five Python files must stay in the same folder. If `pdfsorter_system.py` or `pdfsorter_theme.py` is missing the app still starts (without tray/autostart, or with Tkinter's default grey look) — `pdfsorter_data.py` and `pdfsorter_read.py` are required.
 
+## Releases & auto-update (maintainers)
+
+The app updates from the **latest GitHub Release**, never from a branch. Each release must therefore contain `ArkivPiloten.zip` and `SHA256SUMS.txt`:
+
+```bash
+python tools/build_release.py --bump patch   # bumps all five modules + README
+git commit -am "Release 1.4.1" && git push
+```
+
+`.github/workflows/release.yml` builds the package and publishes/refreshes the release automatically for every push to `main` and every `v*` tag. If the version is unchanged the release assets are replaced, but already-installed apps only see the update once `APP_VERSION` is bumped.
+
+**Branch policy:** no merge commits. Work on a branch and publish with a fast-forward push or a tag/release — never `gh pr merge`.
+
 ## Privacy & safety
 
 - 🔒 **Everything happens locally.** Sorting makes no network calls and there is no tracking. (Only the Windows installer — Python/pip downloads — and the donation buttons open external sites.)
@@ -128,6 +158,10 @@ python pdfsorter.py --status
 python pdfsorter_data.py
 python pdfsorter_read.py --check
 python pdfsorter_system.py --check
+
+# utvecklartester (Linux/macOS, inga riktiga autostartsposter rörs)
+pip install -r requirements-dev.txt
+python -m pytest
 ```
 
 Found a bug? Run `python pdfsorter.py --diagnostik` (or *Copy diagnostics* in the app) and include the output when you report it — it contains versions, settings and engine status, no document content.
@@ -190,7 +224,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 
 ## Funktioner
 
-- 📥 **Bevakade mappar + automatisk sortering** i `<kategori>/<år>`, där dokumentets eget datum styr årsmappen
+- 📥 **Bevakade mappar + automatisk sortering** i `<kategori>/<år>` (dokumentets eget datum kan styra årsmappen: `date_enabled`)
 - 🎯 **Zonviktad matchning** — brevhuvud, sidfot och avsändarzon väger tyngre än brödtext, plus flersidig matchning; ett bevisat organisationsnummer räcker alltid ensamt
 - 🧠 **Självlärande klassificerare** — föreslår och bryter dödlägen mellan regelgodkända kandidater efter ungefär 5 beslut per kategori; den flyttar aldrig en fil på egen hand
 - 🔐 **Säkrare matchning (1.2.0+)** — bara löptextträffar flyttar aldrig en fil automatiskt på Normal och uppåt: det krävs avsändarzon, starkt ID eller flersidigt bevis, minst 12 lästa tecken, och exakt analyserade byte fingeravtrycks (SHA-256) och kontrolleras igen före varje flytt
@@ -199,8 +233,8 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 - ↩️ **Aldrig destruktiv** — filer skrivs aldrig över (namnkrockar blir `faktura (2).pdf`), och varje flytt går att ångra
 - 🧰 **Tray-ikon, autostart, enkelinstans**, mörkt/ljust/högkontrast-tema, HiDPI-medveten
 - 🪵 **Sessionsloggning** i `logs/` och ett diagnostikpaket med ett klick (*Kopiera diagnostik*) för support
-- 🎒 **Allt stannar i appmappen (1.3.0)** — inställningar, regler, historik, loggar, cache, ikoner, säkerhetskopior, uppdateringar och tempfiler bor i appmappens undermappar (`json/`, `logs/`, `cache/`, `icons/`, `backups/`, `updates/`, `temp/`); inget skrivs till `%APPDATA%` eller hemkatalogen (styr om endast via `PDFSORTER_HOME`)
-- 🔄 **Autouppdatering från GitHub (1.3.0)** — söker nya versioner, uppdaterar bara appens egna filer med säkerhetskopia + kompileringstest, uppdaterar sedan Python-paketen; din data rörs aldrig (fliken Hjälp → *Sök efter uppdateringar*, eller `--update`)
+- 🎒 **Portabelt som standard** — inställningar, regler, historik, loggar, cache, ikoner, säkerhetskopior, uppdateringar och tempfiler bor i appmappens undermappar (`json/`, `logs/`, …). Är appmappen skrivskyddad (t.ex. `/Applications` eller `/opt`) flyttas datan till användarens ordinarie datamapp i stället; `PDFSORTER_HOME` styr om
+- 🔄 **Autouppdatering från GitHub Releases (1.4.0)** — verifierar paketet mot release-postens `SHA256SUMS.txt`, uppdaterar bara appens egna filer med säkerhetskopia, kompileringstest och rollback, uppdaterar sedan Python-paketen; din data rörs aldrig. På som standard (Hjälp → *Sök efter uppdateringar*, eller `--update`)
 - 🚀 **Autostart på Windows/macOS/Linux (1.3.0)** — register med Startup-mapp som reserv (Windows), LaunchAgent (macOS), XDG (Linux); självläkande synk vid varje start, verifierad efter skrivning
 - ❤️ **Donationsvy i appen** (Hjälp → Stöd projektet) med SV/EN-växel och verifierad Swish-QR
 
@@ -218,6 +252,18 @@ pythonw pdfsorter.pyw
 ```
 
 Eller starta gränssnittet direkt med `python pdfsorter.py` (utan argument öppnas det grafiska gränssnittet).
+
+## Kom igång (macOS & Linux)
+
+```bash
+./install.sh              # venv + requirements.txt, frågar om autostart
+./install.sh --autostart  # ...eller slå på/av autostart utan frågor
+./install.sh --uninstall  # ta bort autostart + genvägar, behåll din data
+```
+
+`install.sh` installerar allt i en lokal `.venv` (inget sudo), kontrollerar Tkinter och Tesseract med tips per distribution, skapar genväg på skrivbordet/i appmenyn och bygger en riktig `~/Applications/ArkivPiloten.app` på macOS. Autostarten använder LaunchAgent på macOS och XDG `autostart/*.desktop` på Linux (KDE, GNOME, XFCE, …) — båda verifieras efter skrivning och lagas vid nästa start om de går sönder.
+
+> Systemfältet på Linux kräver en StatusNotifier-värd. På GNOME behövs tillägget *AppIndicator*; utan det öppnar appen fönstret i stället för att gömma sig.
 
 > **Bra att veta:** alla Python-beroenden är valfria — appen startar ändå och talar om i statusraden vad som saknas. För bästa läskvalitet installerar du hela stacken, och tänk på att OCR dessutom kräver systemprogrammet **Tesseract**:
 >
@@ -251,6 +297,11 @@ Kör `python pdfsorter.py --help` för alla växlar (`--copy`, `--exclude`, `--j
 ```text
 ArkivPiloten/
 ├── ArkivPiloten - Installera senaste Python och starta.bat   enda startfilen du behöver (Windows)
+├── install.sh              installation för macOS & Linux (venv, genväg, autostart)
+├── tests/                  pytest-svit (autostart per OS, uppdateraren, datamapp)
+├── tools/build_release.py  bygger ArkivPiloten.zip + SHA256SUMS.txt
+├── .github/workflows/      CI (tester/lint) + automatisk release-publicering
+├── pyproject.toml          inställningar för pytest/ruff
 ├── pdfsorter.py            huvudprogram (GUI, motor, matchning)
 ├── pdfsorter.pyw           konsolfri start
 ├── pdfsorter_data.py       regler, historik, lås, atomisk skrivning
@@ -266,6 +317,19 @@ ArkivPiloten/
 
 De fem Python-filerna måste ligga i samma mapp. Saknas `pdfsorter_system.py` eller `pdfsorter_theme.py` startar appen ändå (utan tray/autostart, respektive med Tkinters gråa standardutseende) — `pdfsorter_data.py` och `pdfsorter_read.py` är obligatoriska.
 
+## Releaser & autouppdatering (underhåll)
+
+Appen uppdaterar från **senaste GitHub-releasen**, aldrig från en gren. Varje release måste därför innehålla `ArkivPiloten.zip` och `SHA256SUMS.txt`:
+
+```bash
+python tools/build_release.py --bump patch   # höjer alla fem moduler + README
+git commit -am "Release 1.4.1" && git push
+```
+
+`.github/workflows/release.yml` bygger paketet och publicerar/uppdaterar releasen automatiskt vid varje push till `main` och varje `v*`-tagg. Är versionen oförändrad byts release-filerna ut, men redan installerade appar ser uppdateringen först när `APP_VERSION` höjs.
+
+**Grenpolicy:** inga merge-commits. Arbeta på en gren och publicera med fast-forward-push eller tagg/release — aldrig `gh pr merge`.
+
 ## Integritet & säkerhet
 
 - 🔒 **Allt sker lokalt.** Sorteringen gör inga nätverksanrop och det finns ingen spårning. (Bara Windows-installeraren — Python-/pip-hämtningar — och donationsknapparna öppnar externa sidor.)
@@ -280,6 +344,10 @@ python pdfsorter.py --status
 python pdfsorter_data.py
 python pdfsorter_read.py --check
 python pdfsorter_system.py --check
+
+# utvecklartester (Linux/macOS, inga riktiga autostartsposter rörs)
+pip install -r requirements-dev.txt
+python -m pytest
 ```
 
 Hittat en bugg? Kör `python pdfsorter.py --diagnostik` (eller *Kopiera diagnostik* i appen) och bifoga utdata när du rapporterar — den innehåller versioner, inställningar och motorstatus, inget dokumentinnehåll.
@@ -316,7 +384,7 @@ Du kan också donera inifrån appen via **Hjälp → Stöd projektet 💖**, ell
 
 <div align="center">
 
-**ArkivPiloten 1.1.0** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
+**ArkivPiloten 1.4.0** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
 
 [🇬🇧 Back to English ↑](#english) · [🇸🇪 Tillbaka till Svenska ↑](#svenska) · [❤️ Donate / Donera ↑](#support)
 

@@ -51,7 +51,7 @@ except ImportError:                                  # pragma: no cover
 SCHEMA_VERSION = 1
 
 #: Programmets version. Höjs vid varje leverans.
-VERSION = "1.1.0"
+VERSION = "1.4.0"
 
 
 # ==========================================================================
@@ -134,7 +134,8 @@ except Exception:                                   # pragma: no cover
 
 #: Cache: config_dir() anropas i princip vid varje filoperation; att
 #: göra om beräkningen + mkdir varje gång är onödigt (snabbhet).
-_CONFIG_DIR_CACHE: Dict[str, Path] = {}
+#: Nyckel = (PDFSORTER_HOME, appmapp), värde = (sökväg, läge).
+_CONFIG_DIR_CACHE: Dict[Tuple[str, str], Tuple[Path, str]] = {}
 
 
 def _app_dir() -> Path:
@@ -165,30 +166,45 @@ def _os_config_dir() -> Path:
 
 
 def config_dir() -> Path:
-    """VAR allt rörande appen sparas - 100 % PORTABELT
-    (ANVÄNDARORDER 2026-10-05: "ska funka överallt, även på usb").
+    """VAR allt rörande appen sparas.
 
-    Ordning: 1) PDFSORTER_HOME om användaren uttryckligen satt den.
-    2) ALLTID APPMAPPEN (användarorder 2026-10-16: "allt som skapas ska
-    hamna i undermappar av appmappen, inget sparas utanför"). Regler,
-    inställningar, historik, loggar m.m. följer med pdfsorter.py vart
-    den än ligger (USB, nätverksdisk, valfri mapp). Ingen tyst fallback
-    till %APPDATA%/hemkatalogen längre - är appmappen skrivskyddad är
-    det bättre att lagringen synligt misslyckas än att data hamnar på
-    ett ställe användaren aldrig hittar. Gamla OS-platsen läses bara
-    en gång som migrationskälla (se migrate_to_portable).
+    Ordning:
+      1) PDFSORTER_HOME om användaren uttryckligen satt den.
+      2) Appmappen när den är skrivbar - portabelt, följer med på USB
+         och nätverksdisk (användarorder 2026-10-05/2026-10-16).
+      3) Användarens data-mapp när appmappen är skrivskyddad
+         (/Applications, /opt, paketerad .app eller en låst USB-sticka).
+
+    Punkt 3 tillkom 2026-10-20 för multi-OS: en app som installeras
+    systembrett måste kunna spara regler, loggar och inställningar utan
+    att kräva skrivrättighet i programmappen. Så länge appmappen går att
+    skriva i ändras ingenting - portabelt beteende är fortfarande
+    standard. Gamla OS-platsen läses dessutom som migrationskälla
+    (se migrate_to_portable).
     """
     env = os.environ.get("PDFSORTER_HOME", "")
-    p = _CONFIG_DIR_CACHE.get(env)
-    if p is not None:
-        return p
+    app = _app_dir()
+    nyckel = (env, str(app))
+    hit = _CONFIG_DIR_CACHE.get(nyckel)
+    if hit is not None:
+        return hit[0]
     if env:
-        p = Path(env).expanduser()
+        p, läge = Path(env).expanduser(), "override"
+    elif _skrivbar(app):
+        p, läge = app, "portable"
     else:
-        p = _app_dir()
+        p, läge = _os_config_dir(), "user"
     p.mkdir(parents=True, exist_ok=True)
-    _CONFIG_DIR_CACHE[env] = p
+    _CONFIG_DIR_CACHE[nyckel] = (p, läge)
     return p
+
+
+def config_dir_mode() -> str:
+    """'override' | 'portable' | 'user' - visas i status/diagnostik."""
+    config_dir()
+    env = os.environ.get("PDFSORTER_HOME", "")
+    hit = _CONFIG_DIR_CACHE.get((env, str(_app_dir())))
+    return hit[1] if hit else "portable"
 
 
 _PORTABEL_MIGRERAD = False
@@ -534,7 +550,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "learned_matching": True,    # N14: lärande klassificerare (kan stängas av)
     "swish_number": "0721817177",  # Swish-nummer för donations-QR (N15)
     "check_updates": True,       # 2026-10-16: sök Git-uppdatering vid start
-    "auto_update": False,        # 2026-10-16: installera utan att fråga först
+    # 2026-10-20: autouppdatering på som standard. Nya versioner hämtas
+    # från GitHub Releases, verifieras mot release-postens SHA256SUMS.txt
+    # och installeras med backup + rollback. Saknas kontrollsumman frågar
+    # appen i stället för att installera tyst.
+    "auto_update": True,
     "ui_language": "sv",           # 1.1.0: gränssnittsspråk sv | en
     "tag_pdf_metadata": True,      # 1.1.0: skriv kategori som PDF-metadata
     "orgnr_lookup": False,         # 1.1.0: slå upp okända avsändare via nätet

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Startar ArkivPiloten utan konsolfönster - dubbelklicka mig.
 #
-# Robust startfil (v1.1.0):
+# Robust startfil (v1.4.0):
 #   * Flyttbar: hittar pdfsorter.py bredvid sig själv i stället för en
 #     hårdkodad sökväg - hela mappen kan flyttas utan att startfilen dör.
 #   * Rätt ikon i aktivitetsfältet: AppUserModelID sätts före första
@@ -23,12 +23,26 @@ _APP_ID = "ArkivPiloten.App.1"
 
 def _config_dir():
     # Portabel (2026-10-05): appmappen först (fungerar på USB/varsom),
-    # PDFSORTER_HOME styr om satt, OS-plats som fallback.
+    # PDFSORTER_HOME styr om satt. Är appmappen skrivskyddad (t.ex.
+    # /Applications eller /opt) används användarens data-mapp, annars
+    # kunde startaren inte ens skriva sin kraschlogg.
     env = os.environ.get("PDFSORTER_HOME")
     if env:
         return Path(env).expanduser()
-    # Alltid appmappen (2026-10-16: inget sparas utanför den).
-    return Path(__file__).resolve().parent
+    hem = Path(__file__).resolve().parent
+    try:
+        t = hem / ".pdfsorter_write_test"
+        t.write_text("ok", encoding="utf-8")
+        t.unlink()
+        return hem
+    except OSError:
+        pass
+    if sys.platform.startswith("win"):
+        bas = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(bas) / "ArkivPiloten"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "ArkivPiloten"
+    return Path.home() / ".config" / "pdfsorter"
 
 
 def _fixa_stdio():

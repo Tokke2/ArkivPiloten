@@ -27,15 +27,20 @@
 >
 > **Leverans 1.3.0 (2026-10-16) — allt i appmappen, autostart alla OS,
 > paket-/Python-uppdateringar, Git-autouppdatering.**
-> (a) Allt i undermappar: config_dir() faller aldrig tillbaka till
-> OS-plats (bara PDFSORTER_HOME eller appmappen; gamla OS-platsen är
-> enbart migrationskälla). history.journal -> json/, genererad ikon ->
+> (a) Allt i undermappar: config_dir() = PDFSORTER_HOME, annars appmappen
+> när den är skrivbar, annars användarens data-mapp (read-only
+> /Applications, /opt eller låst USB) - och gamla OS-platsen är enbart
+> migrationskälla. history.journal -> json/, genererad ikon ->
 > icons/, Tesseract-installeraren -> temp/, bat-filens TEMP/TMP/
 > PIP_CACHE_DIR/install.log -> temp/, cache/pip resp. logs/ i appmappen.
 > (b) Autostart: Linux arkivpiloten.desktop (gamla pdfsorter.desktop
 > städas), macOS-plist loggar till logs/autostart.log, Windows får
 > Startup-mapp som reserv om registret nekar; autostart_status() för
 > --status/diagnostik; självläkande synk vid start som förut.
+> 2026-10-20: install.sh (macOS/Linux, venv + genväg + valfri autostart),
+> verkliga .app-paket på macOS, shell-/plist-escaping verifierad med
+> automatiska tester (tests/), och startskedet ärvs från OS-posten i
+> stället för att raderas när settings säger av.
 > (c) Paket/Python: --install-packages (+ update_python_packages())
 > installerar hela requirements.txt med importkontroll; bat-filen
 > har winget-reserv för Python. Senaste Python via python.org som förut.
@@ -46,6 +51,26 @@
 > loggar updates/last_update.json. CLI --check-update/--update,
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
+>
+> **Leverans 1.4.0 (2026-10-20) — multi-OS-installation + verifierad
+> autouppdatering från Releases.**
+> (a) install.sh för macOS/Linux (venv, genväg, valfri autostart,
+> --uninstall), riktig .app i ~/Applications på macOS, .bat-filen frågar
+> om autostart.
+> (b) Autostart: Windows-register med Startup-mapp som reserv, macOS
+> LaunchAgent via plistlib + launchctl, Linux XDG; klassning
+> (correct/startup_folder/stale_console/stale_path/duplicate), verifiering
+> efter skrivning, rollback av backup och effective_autostart() som ÄRVER
+> en fungerande OS-post i stället för att radera den vid start.
+> (c) Uppdatering: GitHub Releases är primär kanal (api releases/latest),
+> paketet ArkivPiloten.zip verifieras mot SHA256SUMS.txt innan uppackning,
+> zip-slip via Path.relative_to, compile()+versionskontroll, backup och
+> fullständig rollback om något går fel, updates/last_update.json.
+> auto_update är på som standard men installerar tyst ENDAST när
+> kontrollsumma finns. .github/workflows/release.yml publicerar/uppdaterar
+> releasen vid varje push till main och varje v*-tagg.
+> (d) Tester: tests/ (pytest) för autostart per OS, datamapp, startfil,
+> genvägar, CLI-autostart och uppdateraren; CI på Linux/macOS/Windows.
 >
 > **Leverans 1.3.1 (2026-10-16) — kvalitetsrunda.** pyflakes-granskning
 > hittade samma buggklass som json_dir-fyndet: `search_tesseract`
