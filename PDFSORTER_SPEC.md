@@ -52,7 +52,7 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
-> **Leverans 1.4.1 (2026-10-20) — multi-OS-installation + verifierad
+> **Leverans 1.4.2 (2026-10-20) — multi-OS-installation + verifierad
 > autouppdatering från Releases.**
 > (a) install.sh för macOS/Linux (venv, genväg, valfri autostart,
 > --uninstall), riktig .app i ~/Applications på macOS, .bat-filen frågar

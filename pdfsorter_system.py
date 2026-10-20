@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 
 def _mod_versions_line() -> str:
     """Versioner för alla fem modulerna (felsökning/support)."""
@@ -3003,17 +3003,19 @@ def _latest_release(timeout: float = 15.0) -> Optional[dict]:
     # tagg-arkiv och kontrollsumman läses ur release-texten.
     m_sha = re.search(r"SHA-?256[^\n]{0,80}?([0-9a-fA-F]{64})", notes)
     body_sha = m_sha.group(1).lower() if m_sha else ""
+    har_paketfil = bool(zip_url)
     if not zip_url and tag:
         zip_url = (f"https://codeload.github.com/{UPDATE_REPO}/zip/"
                    f"refs/tags/{tag}")
-    if not sums_url and not body_sha and zip_url:
-        body_sha = ""
+    # Kroppens summa gäller ENDAST tagg-arkivet. Finns ett bifogat
+    # paket måste summan komma från dess SHA256SUMS.txt - annars skulle
+    # fel fil kunna verifieras mot fel hash.
     return {
         "tag": tag,
         "version": version,
         "zip_url": zip_url or "",
         "sums_url": sums_url or "",
-        "sha256": body_sha,
+        "sha256": body_sha if (body_sha and not har_paketfil) else "",
         "release_url": str(data.get("html_url") or ""),
         "notes": notes[:4000],
     }

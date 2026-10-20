@@ -38,28 +38,45 @@ jobs:
           set -euo pipefail
           VERSION=$(python -c "import json;print(json.load(open('dist/release.json'))['version'])")
           TAG="v$VERSION"
-          PREV=$(git describe --tags --abbrev=0 2>/dev/null || true)
+
+          # Se till att releasen finns först - då finns även taggen, och
+          # även om en filuppladdning skulle strula kan appen falla
+          # tillbaka på tagg-arkivet med en publicerad kontrollsumma.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+              gh release create "$TAG" --title "ArkivPiloten $VERSION" \
+                --notes "" --latest
+            else
+              gh release create "$TAG" --title "ArkivPiloten $VERSION" \
+                --notes "" --target "$GITHUB_SHA" --latest
+            fi
+          fi
+
+          gh release upload "$TAG" dist/ArkivPiloten.zip dist/SHA256SUMS.txt \
+            --clobber || echo "::warning::Kunde inte ladda upp release-filerna - tagg-arkivet används som reserv"
+
+          # Kontrollsumma för tagg-arkivet (reservvägen). GitHubs arkiv är
+          # stabila för en oförändrad tagg; ändras de avbryter appen
+          # uppdateringen i stället för att installera något overifierat.
+          TAG_SHA=$(curl -fsSL "https://codeload.github.com/${GITHUB_REPOSITORY}/zip/refs/tags/${TAG}" | sha256sum | cut -d' ' -f1)
+          PREV=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
 
           {
             echo "Paket byggt från \`${GITHUB_SHA::12}\` på \`${GITHUB_REF_NAME}\`."
             echo
             echo "Autouppdateringen verifierar paketet mot \`SHA256SUMS.txt\` innan något installeras."
             echo
-            if [ -n "$PREV" ] && [ "$PREV" != "$TAG" ]; then
+            if [ -n "$PREV" ]; then
               echo "### Ändringar sedan $PREV"
               echo
-              git log --pretty='- %s (%h)' "$PREV..HEAD" | head -40
+              git log --pretty='- %s (%h)' "$PREV..$TAG" | head -40
+              echo
             fi
+            echo "### Reserv om release-filerna inte kan hämtas"
+            echo
+            echo "SHA256 (ArkivPiloten-$VERSION.zip): $TAG_SHA"
+            echo
+            echo "Summan avser GitHubs tagg-arkiv för \`$TAG\`."
           } > "$RUNNER_TEMP/notes.md"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Uppdaterar befintlig release $TAG med senaste bygget."
-            gh release upload "$TAG" dist/ArkivPiloten.zip dist/SHA256SUMS.txt --clobber
-            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
-          else
-            echo "Skapar release $TAG."
-            gh release create "$TAG" dist/ArkivPiloten.zip dist/SHA256SUMS.txt \
-              --title "ArkivPiloten $VERSION" \
-              --notes-file "$RUNNER_TEMP/notes.md" \
-              --latest
-          fi
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
