@@ -78,6 +78,17 @@ jobs:
               git log --pretty='- %s (%h)' "$PREV..$TAG" | head -40
               echo
             fi
+            echo "### Har du 1.0.0 eller 1.1.0?"
+            echo
+            echo "De versionerna letade uppdateringar i \`main\` i stället för här,"
+            echo "så de ser aldrig en release. Kör engångsuppgraderingen en gång:"
+            echo
+            echo "- Windows: ladda ner \`uppgradera-arkivpiloten.bat\` nedan och dubbelklicka"
+            echo "- macOS/Linux: \`bash uppgradera-arkivpiloten.sh\`"
+            echo
+            echo "Den hämtar senaste versionen, kontrollerar summan och byter bara"
+            echo "programfilerna. Regler, inställningar och historik rörs aldrig."
+            echo
             echo "### Reserv om release-filerna inte kan hämtas"
             echo
             echo "SHA256 (ArkivPiloten-$VERSION.zip): $TAG_SHA"
