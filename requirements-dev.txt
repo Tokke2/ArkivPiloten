@@ -1,3 +1,5 @@
 # Utvecklingsverktyg (installeras med: pip install -r requirements-dev.txt)
 pytest>=8.0
 ruff>=0.6
+# Läsmotorn, så att testerna kan köra riktiga PDF-filer i CI.
+PyMuPDF>=1.24

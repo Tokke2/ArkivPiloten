@@ -83,6 +83,23 @@ def test_ordinary_words_are_not_flexible():
     assert not P._is_flexible("utrymningsplan")
 
 
+def test_middle_dot_is_accepted_as_separator():
+    # En del typsnitt och OCR ger "·" i stället för bindestreck.
+    pat = P._cached_pattern({"text": "556033-9086", "whole_word": True})
+    assert pat.search(P.normalize("556033·9086"))
+    assert pat.search(P.normalize("556033•9086"))
+    assert P.keyword_strength("556033·9086") == "orgnr"
+
+
+def test_domain_keeps_its_dot():
+    # En domän får inte bli flexibel - då kunde "Pilkington se bilaga"
+    # matcha "pilkington.se".
+    assert not P._is_flexible("pilkington.se")
+    pat = P._cached_pattern({"text": "pilkington.se", "whole_word": True})
+    assert not pat.search(P.normalize("Pilkington se bilaga"))
+    assert pat.search(P.normalize("se www.pilkington.se")[3:])
+
+
 def test_score_text_matches_orgnr_in_the_identity_zone(tmp_path):
     rules = _rules(tmp_path, ["556033-9086"])
     text = "Pilkington Sverige AB\nOrg.nr 556033 9086\nFaktura 123"

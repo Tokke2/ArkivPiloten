@@ -52,6 +52,25 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Leverans 1.4.7 (2026-10-20) — verifierad matching och sökning.**
+> (a) Ände-till-ände-tester: tests/test_matching_pdf.py bygger riktiga
+> PDF:er, kör läsaren och decide() - samma kedja som appen. PyMuPDF
+> tillagd i requirements-dev så att testerna även går i CI.
+> tests/test_dialog_flow.py kör granskningsdialogens riktiga metoder mot
+> en Tk-fri stand-in: skriv p -> i -> l -> PIL, Enter väljer, Escape
+> återställer, okänt namn blir ny mapp. Inget Tkinter krävs.
+> (b) Fynd från testerna, rättade: mottagarblocket vinner nu över
+> sidhuvudet - en kund som står i sidhuvudets band ("Kund: X" högt upp
+> på fakturan) räknades förut som avsändarbevis med vikten 1,20 i
+> stället för 0,30. Undantag: står samma text också överst som
+> avsändare gäller avsändaren.
+> (c) "·" och "•" accepteras som avskiljare i organisationsnummer och
+> giro (typsnitt och OCR ger dem ibland i stället för bindestreck).
+> Domäner är däremot inte flexibla: "Pilkington se bilaga" får inte
+> matcha "pilkington.se".
+> (d) Enter stänger en öppen träfflista innan listan återställs, så att
+> de filtrerade raderna inte ligger kvar efter valet.
+>
 > **Leverans 1.4.6 (2026-10-20) — minimering och krysset är skilda saker.**
 > Minimera-knappen göms inte längre automatiskt i systemfältet: fönstret
 > stannar i aktivitetsfältet som vanliga program, och krysset fortsätter

@@ -90,7 +90,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.6"
+APP_VERSION = "1.4.7"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -299,9 +299,11 @@ STRONG_LABELS = {
 #: veta vilken typ de hade när de sparades.
 _STRONG_PATTERNS = (
     # Blanksteg tillåts: "556033 9086" förekommer i sidfötter och OCR-text.
-    ("orgnr", re.compile(r"^\d{6}[-\u2013 ]?\d{4}$")),
+    # Även "·" och "•" räknas som avskiljare: en del typsnitt och OCR ger
+    # dem i stället för bindestreck ("556033·9086").
+    ("orgnr", re.compile(r"^\d{6}[-\u2013\u00b7\u2022 ]?\d{4}$")),
     ("vat", re.compile(r"^[a-z]{2}\d{9,12}$")),
-    ("giro", re.compile(r"^\d{3,4}-\d{4}$")),
+    ("giro", re.compile(r"^\d{3,4}[-\u2013\u00b7\u2022]?\d{4}$")),
     # Domän: sista delen måste vara en riktig toppdomän av bokstäver.
     # Tidigare räckte "\w", vilket gjorde "24.10.2025", "1.234" och
     # "v1.4.4" till starka bevis - datum och versionsnummer är precis
@@ -357,8 +359,12 @@ def keyword_strength(text: str) -> str:
 
 #: Skiljetecken som får skilja delarna i en identifierare. Samma nummer
 #: skrivs "556033-9086", "556033 9086", "556033–9086" eller "5560339086"
-#: beroende på avsändare och OCR - regeln ska matcha alla skrivsätten.
-_ID_SEP_RE = re.compile(r"[-\u2013\u2014\u2212:/]+")
+#: beroende på avsändare, typsnitt och OCR - och en del typsnitt/OCR ger
+#: "·" eller "•" i stället för bindestreck. Alla ska matcha samma regel.
+_ID_SEP_CHARS = ("-\u2010\u2011\u2012\u2013\u2014\u2212"
+                 "\u00b7\u2022\u00a0:/ .")
+_ID_SEP_CLASS = "[" + re.escape(_ID_SEP_CHARS) + "]"
+_ID_SEP_RE = re.compile(_ID_SEP_CLASS + "+")
 
 #: Memo: text -> är stödordet en flexibel identifierare? (Dyr att räkna
 #: ut per dokument, svaret beror bara på texten.)
@@ -395,7 +401,18 @@ def _flexible_id_pattern(text: str) -> Optional[re.Pattern]:
         return None
     if not all(re.fullmatch(r"[a-z0-9]+", p) for p in parts):
         return None
-    core = r"[-\u2013\u2014\u2212:/ ]*".join(re.escape(p) for p in parts)
+    # Bara identifierare som faktiskt är nummer: varje del utom en möjlig
+    # landsprefix i början måste innehålla en siffra. Då blir "556033-9086"
+    # flexibel, medan "pilkington.se" inte kan matcha "Pilkington se
+    # bilaga" - en domän ska ha sin punkt.
+    if not all(any(ch.isdigit() for ch in p) for p in parts[1:]):
+        return None
+    if not any(ch.isdigit() for ch in parts[0]):
+        if not (len(parts) >= 3
+                and re.fullmatch(r"se|no|dk|fi", parts[0])):
+            return None
+    core = _ID_SEP_CLASS + "*"
+    core = core.join(re.escape(p) for p in parts)
     return re.compile(r"(?<![0-9a-z])" + core + r"(?![0-9a-z])")
 
 
@@ -835,6 +852,14 @@ class TextZones:
         if i_full:
             for zone in ("sender", "header", "pagehead", "identity", "pagefoot"):
                 if träffar(zone):
+                    # Står ordet i mottagarblocket hör det till KUNDEN, även
+                    # när blocket råkar ligga i sidhuvudets band. Undantag:
+                    # står samma text också överst som avsändare, då är det
+                    # avsändaren (annars kunde en rubrik i mottagarblocket
+                    # göra kunden till avsändare).
+                    if (in_recipient and zone != "sender"
+                            and not träffar("sender")):
+                        return True, "recipient", ZONE_WEIGHTS["recipient"]
                     return True, zone, ZONE_WEIGHTS[zone]
 
         if i_name:
@@ -3513,6 +3538,13 @@ class ReviewDialog:
         text = self.combo.get().strip()
         namn = _resolve_category_name(text, self._all_categories)
         if namn:
+            # Stäng en öppen lista först - annars ligger de filtrerade
+            # raderna kvar även sedan valet är gjort.
+            if self._popdown_open():
+                try:
+                    self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+                except Exception:
+                    pass
             self.combo.set(namn)
             self.mode.set("existing")
             self._sync()
