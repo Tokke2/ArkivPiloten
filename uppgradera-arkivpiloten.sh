@@ -8,7 +8,10 @@
 #  filerna på plats. Regler, inställningar och historik rörs aldrig.
 #
 #    bash uppgradera-arkivpiloten.sh
-#    bash uppgradera-arkivpiloten.sh --root /sökväg/till/appmappen
+#    bash uppgradera-arkivpiloten.sh /sökväg/till/appmappen
+#
+#  Filen kan ligga var som helst: hittas ingen app i dess egen mapp letar
+#  skriptet på vanliga platser (Skrivbord, Dokument, Hämtade filer, ...).
 # ---------------------------------------------------------------------
 set -u
 
@@ -45,10 +48,17 @@ else
     exit 1
 fi
 
+# Första argumentet får vara appmappen (t.ex. om filen ligger i Hämtade
+# filer och appen någon annanstans). Flaggor går rakt igenom.
+ROOT="$HÄR"
+if [ $# -gt 0 ] && [ -d "$1" ]; then
+    ROOT="$1"
+    shift
+fi
 echo
 echo "  Stäng ArkivPiloten om den är igång."
 echo
-"$PY" "$TMPPY" --root "$HÄR" "$@"
+"$PY" "$TMPPY" --root "$ROOT" "$@"
 RC=$?
 
 echo

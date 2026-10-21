@@ -52,6 +52,22 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Leverans 1.4.9 (2026-10-21) — launchern hittar appen själv.**
+> 1.4.8 krävde att uppgradera-arkivpiloten.bat låg i appmappen, men den
+> hämtas ju till Hämtade filer - då hade den gett upp med "hittar ingen
+> appmapp". Nu: (a) ges en sökväg som inte är en appmapp letar
+> install_latest.py vidare i stället för att avbryta - Skrivbord,
+> Dokument, Hämtade filer, ~/Applications, /opt,
+> %LOCALAPPDATA%\Programs, OneDrive (inkl. Dokument) och två nivåer ned.
+> (b) .bat-filen tar en appmapp som dragits till filen som första argument
+> och tar bort ett avslutande `\` ur sökvägen, annars blir `\"` ett
+> citattecken i argv och sökvägen fel. (.sh gör samma sak om första
+> argumentet är en mapp.) (c) Feltexten säger nu hur man anger mappen.
+> 20 tester, och de rör aldrig nätet: autouse-fixturen pekar om
+> reservvägen (tagg-arkivet) till en fil som inte finns, så ett trasigt
+> paket alltid är ett fel. Skarpt verifierat: en 1.1.0-mapp i
+> Hämtade filer hittades på Skrivbordet och uppgraderades till 1.4.9.
+>
 > **Leverans 1.4.8 (2026-10-21) — vägen från 1.0.0/1.1.0 till
 > autouppdatering.** 1.0.0 och 1.1.0 letade uppdateringar i main-grenen
 > (`contents/pdfsorter.py?ref=main`) i stället för i Releases. main står

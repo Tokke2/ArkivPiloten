@@ -7,7 +7,9 @@ rem  nya releaserna (den letade i main-grenen). Kör den här filen en gång:
 rem  den hämtar senaste versionen, kontrollerar summan och lägger filerna
 rem  på plats. Dina regler, inställningar och historik rörs aldrig.
 rem
-rem  Tips: lägg filen i appmappen om appen ligger på ett ovanligt ställe.
+rem  Filen kan ligga var som helst: den letar upp appmappen sjalv pa
+rem  vanliga platser (Skrivbord, Dokument, Nedladdningar, OneDrive, ...),
+rem  och du kan ocksa dra appmappen till filen och slappa den dar.
 rem ---------------------------------------------------------------------
 setlocal enabledelayedexpansion
 chcp 65001 >nul 2>&1
@@ -57,10 +59,17 @@ if errorlevel 1 (
 )
 
 rem -- 3. Kör uppgraderingen (stäng appen först) -------------------------
+rem  Har du dragit appmappen till filen ar det den som gäller, annars
+rem  mappen filen ligger i. Hittas ingen app dar letar skriptet sjalvt.
+set "ROOT=%~dp0"
+if not "%~1"=="" set "ROOT=%~1"
+rem  Ta bort ett avslutande \ - annars blir det " i kommandoraden och
+rem  Python tolkar citattecknet som en del av sokvagen.
+if "!ROOT:~-1!"=="\" set "ROOT=!ROOT:~0,-1!"
 echo.
 echo   Stang ArkivPiloten om den ar igang - annars ar filerna lasa.
 echo.
-!PY! "%TMPPY%" --root "%~dp0" %*
+!PY! "%TMPPY%" --root "!ROOT!"
 set "RC=%ERRORLEVEL%"
 del "%TMPPY%" >nul 2>&1
 

@@ -4,8 +4,8 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.4.8 — your PDFs, sorted into the right folders. Automatically.**
-**PDF Sorter 1.4.8 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
+**PDF Sorter 1.4.9 — your PDFs, sorted into the right folders. Automatically.**
+**PDF Sorter 1.4.9 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
@@ -80,7 +80,7 @@ bash uppgradera-arkivpiloten.sh          # macOS / Linux
 python3 tools/install_latest.py --root . # or run the script directly
 ```
 
-After that the app updates itself from Releases, as described above. Add `--dry-run` to see what would happen first.
+Download the launcher anywhere and double-click it — it finds the app folder on its own (Desktop, Documents, Downloads, OneDrive, `%LOCALAPPDATA%\Programs`), or drag the app folder onto it. After that the app updates itself from Releases, as described above. Add `--dry-run` to see what would happen first.
 
 ## Quick start (macOS & Linux)
 
@@ -273,7 +273,7 @@ bash uppgradera-arkivpiloten.sh          # macOS / Linux
 python3 tools/install_latest.py --root . # eller kör skriptet direkt
 ```
 
-Efter det sköter appen sina uppdateringar själv via Releases, precis som beskrivits ovan. Lägg till `--dry-run` om du först vill se vad som skulle hända.
+Ladda ner launchern var du vill och dubbelklicka — den hittar appmappen själv (Skrivbord, Dokument, Hämtade filer, OneDrive, `%LOCALAPPDATA%\Programs`), och du kan också dra appmappen till filen. Efter det sköter appen sina uppdateringar själv via Releases, precis som beskrivits ovan. Lägg till `--dry-run` om du först vill se vad som skulle hända.
 
 ### Manuell installation
 
@@ -415,7 +415,7 @@ Du kan också donera inifrån appen via **Hjälp → Stöd projektet 💖**, ell
 
 <div align="center">
 
-**ArkivPiloten 1.4.8** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
+**ArkivPiloten 1.4.9** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
 
 [🇬🇧 Back to English ↑](#english) · [🇸🇪 Tillbaka till Svenska ↑](#svenska) · [❤️ Donate / Donera ↑](#support)
 

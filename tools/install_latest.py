@@ -111,7 +111,8 @@ def _candidate_bases() -> List[Path]:
     for vara in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
         v = os.environ.get(vara)
         if v:
-            bases += [Path(v) / "Desktop", Path(v) / "Skrivbord"]
+            bases += [Path(v) / "Desktop", Path(v) / "Skrivbord",
+                      Path(v) / "Documents", Path(v) / "Dokument"]
     out, seen = [], set()
     for b in bases:
         try:
@@ -124,14 +125,27 @@ def _candidate_bases() -> List[Path]:
     return out
 
 
+def _direct_bases() -> List[Path]:
+    """Mappar som prövas först: cwd och skriptets egen mapp (och dess förälder)."""
+    return [Path.cwd(), Path(__file__).resolve().parent,
+            Path(__file__).resolve().parent.parent]
+
+
 def find_root(explicit: Optional[str] = None) -> Optional[Path]:
-    """Hitta appmappen: given sökväg, skriptets mapp, cwd eller vanliga platser."""
+    """Hitta appmappen: given sökväg, skriptets mapp, cwd eller vanliga platser.
+
+    En given sökväg som inte är en appmapp är inget hinder: launchern skickar
+    med sin egen mapp (t.ex. Hämtade filer), och då letar vi vidare i stället
+    för att ge upp. Ett fel här vore särskilt retligt eftersom hela poängen
+    är att det ska gå att dubbelklicka på en nedladdad fil.
+    """
     if explicit:
         p = Path(explicit).expanduser()
-        return p if looks_like_app(p) else None
+        if looks_like_app(p):
+            return p
+        _log(f"Ingen ArkivPiloten-mapp i {p} - letar vidare ...")
 
-    direkta = [Path.cwd(), Path(__file__).resolve().parent,
-               Path(__file__).resolve().parent.parent]
+    direkta = _direct_bases()
     for d in direkta:
         if looks_like_app(d):
             return d
@@ -335,7 +349,9 @@ def run(root: Optional[Path], dry_run: bool = False,
     if root is None or not looks_like_app(root):
         _log("Hittar ingen ArkivPiloten-mapp (pdfsorter.py + "
              "pdfsorter_system.py).")
-        _log("Kör med --root och ange mappen där pdfsorter.py ligger.")
+        _log("Starta filen från appmappen, eller ange den: "
+             "--root \"C:\\sökväg\\ArkivPiloten\"")
+        _log("Du kan också dra appmappen till filen och släppa den där.")
         return 1
 
     root = Path(root)

@@ -38,6 +38,8 @@ def _ingen_natverk(monkeypatch):
     monkeypatch.setattr(U, "TAG_ZIP",
                         "file:///finns/inte/{tag}/ArkivPiloten.zip")
     monkeypatch.setattr(U, "latest_tag", lambda timeout=30.0: "")
+    # Repot självt är en appmapp - låt inte sökningen hitta det.
+    monkeypatch.setattr(U, "_direct_bases", lambda: [])
 
 
 def _zip_bytes(files):
@@ -95,11 +97,13 @@ def test_version_in_reads_the_version(tmp_path):
     assert U.version_in(tmp_path / "finns-inte") == ""
 
 
-def test_find_root_accepts_a_real_app_folder_and_rejects_others(tmp_path):
+def test_find_root_accepts_a_real_app_folder_and_rejects_others(
+        tmp_path, monkeypatch):
     app = _install(tmp_path)
     assert U.find_root(str(app)) == app
     tom = tmp_path / "tom"
     tom.mkdir()
+    monkeypatch.setattr(U, "_candidate_bases", lambda: [tom])
     assert U.find_root(str(tom)) is None
 
 
@@ -214,6 +218,18 @@ def test_missing_release_files_fall_back_to_tag_archive(tmp_path, monkeypatch):
                             (tmp_path / "release" / U.SUMS).read_text()))
     assert U.run(app, url_base=tom.as_uri(), tag="v1.4.7") == 0
     assert U.version_in(app) == "1.4.7"
+
+
+def test_find_root_searches_when_the_given_folder_is_not_the_app(
+        tmp_path, monkeypatch, capsys):
+    """Nedladdad fil i Hämtade filer: appmappen hittas ändå."""
+    downloads = tmp_path / "Nedladdningar"
+    downloads.mkdir()
+    app = _install(tmp_path)
+    monkeypatch.setattr(U, "_candidate_bases",
+                        lambda: [downloads, tmp_path])
+    assert U.find_root(str(downloads)) == app
+    assert "letar vidare" in capsys.readouterr().out
 
 
 def test_missing_app_folder_gives_a_clear_error(tmp_path, capsys):
