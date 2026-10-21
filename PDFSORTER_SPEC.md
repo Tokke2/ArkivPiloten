@@ -52,6 +52,30 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Leverans 1.4.12 (2026-10-21) — minimering med öppen dialog.**
+> Rapporterat: minimerade man medan matchningsdialogen var öppen gick
+> fönstret inte att få fram igen, och loggen fylldes av
+> `TclError: cannot invoke "toplevel" command: application has been
+> destroyed`.
+> (a) `_minimize_action` tar nu `modal_open`: är granskningsdialogen
+> öppen går minimeringen ALLTID till aktivitetsfältet, även med
+> `minimize_to_tray` påslaget. Att withdrawa huvudfönstret lämnade en
+> Toplevel med `grab_set` utan förälder.
+> (b) `hide_window` vägrar withdrawa medan dialogen är öppen (minimerar
+> i stället), och `show_window` tar fram dialogen igen när fönstret
+> återställs.
+> (c) Kön (`_process_queue`) kontrollerar `winfo_exists()` FÖRE VARJE
+> dialog, inte bara en gång före loopen, och fångar `TclError` från
+> dialogbygget. `_closing` stoppar kön helt; `_close_open_review()`
+> stänger dialogen innan `root.destroy()` - tidigare skapade kön tre nya
+> Toplevel-fönster i en död tolk.
+> (d) Loggarkiveringen rör aldrig dagens loggning: pågående sessionsfil
+> (`_SESSION_PATH`), filnamnets datum och filens mtime kontrolleras mot
+> dagens datum innan `days`-gränsen. En pågående session med gammal
+> mtime kunde annars gzippas medan appen fortfarande skrev i filen.
+> 11 nya tester i tests/test_dialog_safety.py (124 totalt) - Tk-fria
+> stand-ins, så de går i CI på alla tre OS.
+>
 > **Leverans 1.4.11 (2026-10-21) — uppdatering enbart från Releases.**
 > Reserven mot main-grenen är borttagen. Skälet: en gren rör sig och kan
 > inte verifieras mot en publicerad kontrollsumma, och den band appen

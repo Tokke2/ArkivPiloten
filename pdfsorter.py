@@ -90,7 +90,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.11"
+APP_VERSION = "1.4.12"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -3675,7 +3675,12 @@ class ReviewDialog:
         self.win.destroy()
 
     def show(self) -> Optional[Dict[str, Any]]:
-        self.win.wait_window()
+        try:
+            self.win.wait_window()
+        except Exception:
+            # Fönstret revs under tiden (appen avslutades). Resultatet är
+            # då inget - anroparen måste tåla det, se _process_queue.
+            pass
         return self.result
 
 
@@ -4012,13 +4017,18 @@ def _translate_ui_tree(widget, mapping) -> int:
 
 
 def _minimize_action(state: str, settings: Dict[str, Any],
-                     has_tray: bool) -> str:
+                     has_tray: bool, modal_open: bool = False) -> str:
     """Vad ska hända när fönstret minimeras?
 
     "none"    - inte en minimering (t.ex. withdraw, eller <Unmap> av annat
                 skäl som att byta virtuellt skrivbord)
     "tray"    - göm fönstret i systemfältet
     "taskbar" - låt det ligga kvar minimerat i aktivitetsfältet
+
+    Är en modal dialog öppen (matchningsdialogen) går minimeringen ALLTID
+    till aktivitetsfältet. Att withdrawa huvudfönstret då lämnar en
+    grab-hållande Toplevel utan förälder - fönstret gick inte att få fram
+    igen, och kön fortsatte skapa dialoger i en död Tk.
 
     Minimering och krysset är två olika saker: close_to_tray styr bara
     krysset (som det står i inställningen), medan minimize_to_tray styr
@@ -4027,6 +4037,8 @@ def _minimize_action(state: str, settings: Dict[str, Any],
     """
     if str(state or "") != "iconic":
         return "none"
+    if modal_open:
+        return "taskbar"
     if not has_tray or not settings.get("minimize_to_tray", False):
         return "taskbar"
     return "tray"
@@ -4089,6 +4101,12 @@ class App:
         self._quitting = False
         self._rescanning = False
         self._hiding_for_minimize = False
+        #: Kön visar en modal granskningsdialog just nu (eller None). Används
+        #: av fönsterhanteringen så att varken minimering eller krysset kan
+        #: gömma appen medan dialogen väntar på svar.
+        self._review_dialog: Optional[Any] = None
+        #: Sätts när appen avslutas. Kön får då inte skapa fler dialoger.
+        self._closing = False
         self._icon_ref = None                    # håll kvar PhotoImage
 
         self.root = tk.Tk()
@@ -6462,7 +6480,7 @@ class App:
 
     def _process_queue(self, start: int = 0) -> None:
         """Visa granskningsdialogen för varje kvarvarande fil."""
-        if not self.queue:
+        if not self.queue or getattr(self, "_closing", False):
             return
         try:
             if not self.root.winfo_exists():
@@ -6474,6 +6492,17 @@ class App:
         last_category = ""
         i = start
         while i < len(self.queue):
+            # Fönstret kan ha rivits medan förra dialogen var öppen (t.ex.
+            # krysset). Då finns ingen Tk kvar att skapa en Toplevel i -
+            # utan den här kontrollen blev det "application has been
+            # destroyed" och en rad nya försök i en död tolk.
+            if getattr(self, "_closing", False):
+                return
+            try:
+                if not self.root.winfo_exists():
+                    return
+            except Exception:
+                return
             decision = self.queue[i]
             if not decision.path.exists():
                 self.queue.pop(i)
@@ -6489,12 +6518,21 @@ class App:
                         f"{len(cands)} stödordsförslag")
             _hint = (self._lookup_sender_hint(decision)
                      if self.settings.get("orgnr_lookup", False) else "")
-            res = ReviewDialog(self.root, decision, self.rules, cands,
-                               index=i + 1, total=len(self.queue),
-                               theme=self.theme,
-                               preview=bool(self.settings.get(
-                                   "preview_in_dialog", False)),
-                               suggested_sender=_hint).show()
+            try:
+                dlg = ReviewDialog(self.root, decision, self.rules, cands,
+                                   index=i + 1, total=len(self.queue),
+                                   theme=self.theme,
+                                   preview=bool(self.settings.get(
+                                       "preview_in_dialog", False)),
+                                   suggested_sender=_hint)
+                self._review_dialog = dlg
+                res = dlg.show()
+            except self.tk.TclError as exc:
+                session_log("granska", "Kunde inte visa granskningsdialogen: "
+                            f"{type(exc).__name__}: {exc}", "warn")
+                return
+            finally:
+                self._review_dialog = None
             if res is None:                        # hoppa över
                 session_log("granska", f"Hoppade över {decision.path.name} "
                             "- filen ligger kvar i kön")
@@ -6551,7 +6589,10 @@ class App:
                 i -= self._apply_rule_to_queue(i)
 
             self._refresh_queue()
-            self.root.update_idletasks()
+            try:
+                self.root.update_idletasks()
+            except Exception:
+                return
 
         self._refresh_queue()
         self._refresh_categories()
@@ -7859,6 +7900,16 @@ class App:
     # ======================================================================
     # Fönster och systemfält
     # ======================================================================
+    def _review_is_open(self) -> bool:
+        """Är en granskningsdialog öppen just nu?"""
+        dlg = getattr(self, "_review_dialog", None)
+        if dlg is None:
+            return False
+        try:
+            return bool(dlg.win.winfo_exists())
+        except Exception:
+            return False
+
     def show_window(self, reason: str = "") -> None:
         """Visa fönstret igen från systemfältet."""
         try:
@@ -7884,12 +7935,32 @@ class App:
         self.visible = True
         self._hiding_for_minimize = False
         self._sync_tray()
+        # Låg dialogen bakom det gömda fönstret ska den fram igen - annars
+        # ser appen ut att ha tappat sin fråga.
+        if self._review_is_open():
+            try:
+                dlg = self._review_dialog
+                dlg.win.deiconify()
+                dlg.win.lift()
+                dlg.win.focus_force()
+            except Exception:
+                pass
         # Beta av kön som samlats medan fönstret var gömt
         if self.queue and self.settings.get("ask_when_unsure", True):
             self.root.after(250, self._process_queue)
 
     def hide_window(self, reason: str = "") -> None:
         """Göm fönstret - appen fortsätter i systemfältet."""
+        if self._review_is_open():
+            # En modal dialog väntar på svar. Withdrawar vi huvudfönstret
+            # blir dialogen kvar utan förälder och går inte att få fram.
+            self._h("fönster", "Fönstret kan inte gömmas medan "
+                    "matchningsdialogen är öppen - minimerar i stället")
+            try:
+                self.root.iconify()
+            except Exception:
+                pass
+            return
         if not self.tray:
             self._h("fönster", f"Fönstret minimeras till aktivitetsfältet "
                     f"({reason or 'anledning ej angiven'}) - systemfält saknas, "
@@ -7923,7 +7994,9 @@ class App:
             state = self.root.state()
         except Exception:
             return
-        action = _minimize_action(state, self.settings, bool(self.tray))
+        modal = self._review_is_open()
+        action = _minimize_action(state, self.settings, bool(self.tray),
+                                  modal)
         if action == "tray":
             if getattr(self, "_hiding_for_minimize", False):
                 return
@@ -7933,7 +8006,8 @@ class App:
             self.root.after(10, lambda: self.hide_window("minimering"))
         elif action == "taskbar":
             self._h("fönster", "Användaren minimerade - blir kvar i "
-                    "aktivitetsfältet")
+                    "aktivitetsfältet" + (" (matchningsdialogen är öppen)"
+                                          if modal else ""))
 
     def _sync_tray(self) -> None:
         if self.tray:
@@ -7942,6 +8016,22 @@ class App:
     def _notify(self, message: str) -> None:
         if self.tray and self.settings.get("notify", True):
             self.tray.notify(message)
+
+    def _close_open_review(self) -> None:
+        """Stäng en öppen granskningsdialog innan fönstret rivs.
+
+        Annars ligger kön kvar i wait_window och fortsätter skapa dialoger
+        i en Tk som rivits ("cannot invoke toplevel command: application
+        has been destroyed"), tre gånger i rad i loggen.
+        """
+        self._closing = True
+        dlg = getattr(self, "_review_dialog", None)
+        if dlg is not None:
+            try:
+                dlg._skip()
+            except Exception:
+                pass
+            self._review_dialog = None
 
     def quit_app(self) -> None:
         """Avsluta appen på riktigt."""
@@ -7954,6 +8044,7 @@ class App:
         if not self._quitting and self.tray and self.settings.get("close_to_tray", True):
             self.hide_window("krysset - close_to_tray är påslaget")
             return
+        self._close_open_review()
         self._h("avslut", "Appen avslutas: inställningar samlas, bevakning "
                 "stoppas, regler och historik sparas")
         try:

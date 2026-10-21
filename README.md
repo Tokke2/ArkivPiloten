@@ -4,8 +4,8 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.4.11 — your PDFs, sorted into the right folders. Automatically.**
-**PDF Sorter 1.4.11 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
+**PDF Sorter 1.4.12 — your PDFs, sorted into the right folders. Automatically.**
+**PDF Sorter 1.4.12 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
@@ -415,7 +415,7 @@ Du kan också donera inifrån appen via **Hjälp → Stöd projektet 💖**, ell
 
 <div align="center">
 
-**ArkivPiloten 1.4.11** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
+**ArkivPiloten 1.4.12** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
 
 [🇬🇧 Back to English ↑](#english) · [🇸🇪 Tillbaka till Svenska ↑](#svenska) · [❤️ Donate / Donera ↑](#support)
 

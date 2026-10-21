@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.11"
+APP_VERSION = "1.4.12"
 
 def _mod_versions_line() -> str:
     """Versioner för alla fem modulerna (felsökning/support)."""
@@ -2658,6 +2658,7 @@ def archive_old_logs(days: int = 3) -> int:
     try:
         import time as _time
         gräns = _time.time() - days * 86400
+        idag = _dt.now().date()
         bas = session_dir()
         if not bas.is_dir():
             return 0
@@ -2666,14 +2667,28 @@ def archive_old_logs(days: int = 3) -> int:
                 continue
             for fil in list(månadsmap.glob("app_*.log")):
                 try:
-                    if fil.stat().st_mtime >= gräns:
+                    # Dagens loggning arkiveras ALDRIG - varken den pågående
+                    # sessionens fil eller en fil som skapades i dag. En
+                    # pågående session kan ha gammal mtime om appen stått
+                    # stilla länge; då skulle den annars flyttas (och på
+                    # Linux gzippas medan appen fortfarande skriver i den).
+                    if _SESSION_PATH is not None and fil == _SESSION_PATH:
                         continue
-                    stamp = _dt.fromtimestamp(fil.stat().st_mtime)
+                    m = re.match(r"app_(\d{8})_", fil.name)
+                    if (m and _dt.strptime(m.group(1), "%Y%m%d").date()
+                            == idag):
+                        continue
+                    st = fil.stat()
+                    if _dt.fromtimestamp(st.st_mtime).date() == idag:
+                        continue
+                    if st.st_mtime >= gräns:
+                        continue
+                    stamp = _dt.fromtimestamp(st.st_mtime)
                     dest = bas / "arkiv" / f"{stamp:%Y}" / f"{stamp:%m}"
                     dest.mkdir(parents=True, exist_ok=True)
                     mål = dest / (fil.name + ".gz")
                     if mål.exists():
-                        mål = dest / (fil.stem + f"_{int(fil.stat().st_mtime)}"
+                        mål = dest / (fil.stem + f"_{int(st.st_mtime)}"
                                       + ".log.gz")
                     import gzip
                     data = fil.read_bytes()
