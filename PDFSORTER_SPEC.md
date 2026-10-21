@@ -52,6 +52,23 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Leverans 1.4.11 (2026-10-21) — uppdatering enbart från Releases.**
+> Reserven mot main-grenen är borttagen. Skälet: en gren rör sig och kan
+> inte verifieras mot en publicerad kontrollsumma, och den band appen
+> till main. Nu finns bara `/releases/latest`:
+> (a) `check_for_update` läser enbart GitHub Releases; svarar API:t inte
+> returneras `ok=False` med felet, inget erbjuds och nästa försök görs
+> vid nästa start. Den returnerar aldrig `source: branch`.
+> (b) `UPDATE_BRANCH`, `UPDATE_RAW_BASE` och `UPDATE_ZIP_URL` är borttagna
+> ur `__all__` och koden; `perform_update` kräver att releasen har ett
+> paket och en kontrollsumma, annars avbryts allt utan att något hämtas.
+> (c) GUI/CLI säger "GitHub Releases" rakt av (ingen main-gren kvar som
+> alternativ). (d) Test: `test_no_branch_fallback` fångar varje URL och
+> kräver att **endast** `UPDATE_RELEASES_LATEST` anropas, samt att inget
+> går till codeload eller raw.githubusercontent. Releaser utan bifogat
+> paket kan fortfarande använda GitHubs **tagg-arkiv** med summan ur
+> release-texten - det är en fryst tagg, inte en gren.
+>
 > **Leverans 1.4.10 (2026-10-21) — .sh kör även med LANG=C.**
 > Skriptet använde variabelnamnet `HÄR`. Bash tillåter Å/Ä/Ö i
 > variabelnamn bara i en UTF-8-locale; med LC_ALL=C tolkas `HÄR=...` som

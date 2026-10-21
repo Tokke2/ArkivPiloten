@@ -54,7 +54,7 @@ __all__ = [
     "autostart_session_available", "icon_file_path",
     # uppdatering från Git + Python-paket (2026-10-16)
     "check_for_update", "perform_update", "update_python_packages",
-    "UPDATE_REPO", "UPDATE_BRANCH", "UPDATE_RELEASES_LATEST",
+    "UPDATE_REPO", "UPDATE_RELEASES_LATEST",
     "create_desktop_shortcut", "install_helpers",
     # systemfält
     "tray_available", "tray_backend_name", "tray_hidden_start_safe", "TrayIcon",
@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.10"
+APP_VERSION = "1.4.11"
 
 def _mod_versions_line() -> str:
     """Versioner för alla fem modulerna (felsökning/support)."""
@@ -2921,18 +2921,14 @@ def _write_errors_log(text: str) -> None:
 
 
 # =========================================================================
-# AUTOUPPDATERING FRÅN GIT + UPPDATERING AV PYTHON-PAKET (2026-10-16)
+# AUTOUPPDATERING FRÅN GITHUB RELEASES (2026-10-21: enbart Releases)
 # =========================================================================
-#: Källan appen uppdaterar sig från när ny version läggs upp på GitHub.
+#: Källan appen uppdaterar sig från: publicerade GitHub Releases.
+#: INGEN gren används - inte main, inte någon annan. En gren rör sig och
+#: kan inte verifieras mot en publicerad kontrollsumma; en release är
+#: fryst och har SHA256SUMS.txt. Svarar API:t inte erbjuds ingen
+#: uppdatering, och nästa försök görs vid nästa start.
 UPDATE_REPO = "Tokke2/ArkivPiloten"
-UPDATE_BRANCH = "main"
-UPDATE_RAW_BASE = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}"
-UPDATE_ZIP_URL = f"https://codeload.github.com/{UPDATE_REPO}/zip/refs/heads/{UPDATE_BRANCH}"
-
-#: GitHub Releases är den primära uppdateringskanalen (1.4.0). Varje
-#: publicerad release har ett färdigt paket + SHA256SUMS.txt, vilket gör
-#: att appen kan verifiera innehållet innan något skrivs. Grenen ovan
-#: finns kvar som reserv om API:t eller releasen inte kan läsas.
 UPDATE_RELEASES_LATEST = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_ASSET_NAME = "ArkivPiloten.zip"
 UPDATE_SUMS_NAME = "SHA256SUMS.txt"
@@ -3029,57 +3025,39 @@ def _latest_release(timeout: float = 15.0) -> Optional[dict]:
 
 
 def check_for_update(timeout: int = 15) -> dict:
-    """Finns en nyare version? Läser GitHub Releases först och faller
-    tillbaka på UPDATE_BRANCH om API:t inte svarar. Inget laddas ner och
-    inget ändras här - bara versionsjämförelse."""
-    rel = _latest_release(timeout)
-    if rel:
-        return {
-            "ok": True,
-            "current": APP_VERSION,
-            "remote": rel["version"],
-            "available": (_version_tuple(rel["version"])
-                          > _version_tuple(APP_VERSION)),
-            "source": "release",
-            "tag": rel["tag"],
-            "zip_url": rel["zip_url"] or (
-                f"https://codeload.github.com/{UPDATE_REPO}/zip/refs/tags/"
-                f"{rel['tag']}"),
-            "sha256_url": rel["sums_url"],
-            "sha256": rel.get("sha256", ""),
-            "release_url": rel["release_url"],
-            "notes": rel["notes"],
-        }
+    """Finns en nyare version? Läser ENDAST GitHub Releases.
+
+    Ingen reserv mot någon gren: appen uppdaterar sig från releaser,
+    aldrig från main. Svarar API:t inte returneras ok=False med felet,
+    inget erbjuds, och nästa försök görs vid nästa start. Inget laddas
+    ner och inget ändras här - bara versionsjämförelse.
+    """
     try:
-        # Reserv: läs versionsnumret direkt ur pdfsorter.py på grenen.
-        text = None
-        for url, accept in (
-                (f"https://api.github.com/repos/{UPDATE_REPO}/contents/"
-                 f"pdfsorter.py?ref={UPDATE_BRANCH}",
-                 "application/vnd.github.raw+json"),
-                (f"{UPDATE_RAW_BASE}/pdfsorter.py", "*/*")):
-            try:
-                text = _http_get(url, timeout, accept, 2_000_000).decode(
-                    "utf-8", "ignore")
-                break
-            except Exception:
-                continue
-        if text is None:
-            raise ConnectionError("GitHub svarade inte")
-        m = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', text)
-        if not m:
-            return {"ok": False, "current": APP_VERSION, "remote": None,
-                    "available": False,
-                    "error": "kunde inte läsa versionsnumret på GitHub"}
-        remote = m.group(1)
-        return {"ok": True, "current": APP_VERSION, "remote": remote,
-                "available": _version_tuple(remote) > _version_tuple(APP_VERSION),
-                "source": "branch", "tag": "",
-                "zip_url": UPDATE_ZIP_URL, "sha256_url": "",
-                "sha256": "", "release_url": "", "notes": ""}
-    except Exception as exc:
+        rel = _latest_release(timeout)
+    except Exception as exc:          # _latest_release fångar själv, men
+        rel = None                    # ett oväntat fel ska inte krascha
+        fel = f"{type(exc).__name__}: {exc}"
+    else:
+        fel = "GitHub Releases svarade inte - försök igen senare"
+    if not rel:
         return {"ok": False, "current": APP_VERSION, "remote": None,
-                "available": False, "error": f"{type(exc).__name__}: {exc}"}
+                "available": False, "source": "release", "error": fel}
+    return {
+        "ok": True,
+        "current": APP_VERSION,
+        "remote": rel["version"],
+        "available": (_version_tuple(rel["version"])
+                      > _version_tuple(APP_VERSION)),
+        "source": "release",
+        "tag": rel["tag"],
+        "zip_url": rel["zip_url"] or (
+            f"https://codeload.github.com/{UPDATE_REPO}/zip/refs/tags/"
+            f"{rel['tag']}"),
+        "sha256_url": rel["sums_url"],
+        "sha256": rel.get("sha256", ""),
+        "release_url": rel["release_url"],
+        "notes": rel["notes"],
+    }
 
 
 def _sha256_file(path: Path, chunk: int = 1 << 20) -> str:
@@ -3268,7 +3246,11 @@ def perform_update(timeout: int = 180,
         return False, f"Kunde inte söka uppdatering: {info.get('error', '?')}"
     if not info["available"]:
         return True, f"Du har redan den senaste versionen ({APP_VERSION})."
-    url = info.get("zip_url") or UPDATE_ZIP_URL
+    url = info.get("zip_url") or ""
+    if not url:
+        return False, ("Releasen saknar ett nedladdningsbart paket - "
+                       "uppdateringen avbröts. Ladda ner manuellt från "
+                       "releasesidan i stället.")
     tmp = root / "temp"; tmp.mkdir(parents=True, exist_ok=True)
     staging = root / "updates" / "staging"
     zippath = tmp / "arkivpiloten-update.zip"
@@ -3288,7 +3270,7 @@ def perform_update(timeout: int = 180,
             if not forvantad:
                 return False, ("SHA256SUMS.txt saknar paketet - "
                                "uppdateringen avbröts.")
-        if not forvantad and info.get("source") == "release":
+        if not forvantad:
             session_log("uppdatering",
                         "Release saknar kontrollsumma - avbröt", "warn")
             return False, ("Releasen saknar kontrollsumma (SHA256SUMS.txt "
@@ -3527,7 +3509,7 @@ def _self_test() -> int:
     print(f"  Loggmapp:       {config_dir() / 'logs'}")
     print(f"  Hjälptext:      {len(HELP_CONTENT)} block, "
           f"{len(help_as_text())} tecken")
-    print(f"  Uppdatering:    GitHub Releases ({UPDATE_REPO}) - "
+    print(f"  Uppdatering:    enbart GitHub Releases ({UPDATE_REPO}) - "
           f"paketverifiering {'ja' if callable(_safe_extract) else 'nej'}, "
           f"rollback {'ja' if callable(_restore_files) else 'nej'}")
     return 0

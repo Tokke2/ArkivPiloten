@@ -4,8 +4,8 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.4.10 — your PDFs, sorted into the right folders. Automatically.**
-**PDF Sorter 1.4.10 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
+**PDF Sorter 1.4.11 — your PDFs, sorted into the right folders. Automatically.**
+**PDF Sorter 1.4.11 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
@@ -48,7 +48,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 - 🧰 **Tray icon, autostart, single instance**, dark / light / high-contrast themes, HiDPI-aware
 - 🪵 **Session logging** in `logs/` and a one-click diagnostics bundle (*Copy diagnostics*) for support
 - 🎒 **Portable by default** — settings, rules, history, logs, cache, icons, backups, updates and temp files live in subfolders of the app folder (`json/`, `logs/`, …). If the app folder is read-only (e.g. `/Applications` or `/opt`), data moves to the standard per-user folder instead; override with `PDFSORTER_HOME`
-- 🔄 **Auto-update from GitHub Releases (1.4.0)** — verifies the package against the release's `SHA256SUMS.txt`, updates only the app's own files with backup, compile check and rollback, then updates the Python packages; your data is never touched. On by default (Help → *Search for updates*, or `--update`)
+- 🔄 **Auto-update from GitHub Releases (1.4.0)** — and **only** from Releases: no branch is ever used as a source, so every package is frozen and verifiable. Verifies the package against the release's `SHA256SUMS.txt`, updates only the app's own files with backup, compile check and rollback, then updates the Python packages; your data is never touched. If GitHub's API is unreachable nothing is offered and the app tries again next start. On by default (Help → *Search for updates*, or `--update`)
 - 🚀 **Autostart on Windows/macOS/Linux (1.3.0)** — registry with Startup-folder fallback (Windows), LaunchAgent (macOS), XDG (Linux); self-healing sync at every start, verified after writing
 - ❤️ **Donation view in the app** (Help → Support the project) with SV/EN toggle and a verified Swish QR code
 
@@ -250,7 +250,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 - 🧰 **Tray-ikon, autostart, enkelinstans**, mörkt/ljust/högkontrast-tema, HiDPI-medveten
 - 🪵 **Sessionsloggning** i `logs/` och ett diagnostikpaket med ett klick (*Kopiera diagnostik*) för support
 - 🎒 **Portabelt som standard** — inställningar, regler, historik, loggar, cache, ikoner, säkerhetskopior, uppdateringar och tempfiler bor i appmappens undermappar (`json/`, `logs/`, …). Är appmappen skrivskyddad (t.ex. `/Applications` eller `/opt`) flyttas datan till användarens ordinarie datamapp i stället; `PDFSORTER_HOME` styr om
-- 🔄 **Autouppdatering från GitHub Releases (1.4.0)** — verifierar paketet mot release-postens `SHA256SUMS.txt`, uppdaterar bara appens egna filer med säkerhetskopia, kompileringstest och rollback, uppdaterar sedan Python-paketen; din data rörs aldrig. På som standard (Hjälp → *Sök efter uppdateringar*, eller `--update`)
+- 🔄 **Autouppdatering från GitHub Releases (1.4.0)** — och **enbart** därifrån: ingen gren används någonsin som källa, så varje paket är fryst och kan verifieras. Verifierar paketet mot release-postens `SHA256SUMS.txt`, uppdaterar bara appens egna filer med säkerhetskopia, kompileringstest och rollback, uppdaterar sedan Python-paketen; din data rörs aldrig. Svarar GitHubs API inte erbjuds ingen uppdatering, och appen försöker igen vid nästa start. På som standard (Hjälp → *Sök efter uppdateringar*, eller `--update`)
 - 🚀 **Autostart på Windows/macOS/Linux (1.3.0)** — register med Startup-mapp som reserv (Windows), LaunchAgent (macOS), XDG (Linux); självläkande synk vid varje start, verifierad efter skrivning
 - ❤️ **Donationsvy i appen** (Hjälp → Stöd projektet) med SV/EN-växel och verifierad Swish-QR
 
@@ -415,7 +415,7 @@ Du kan också donera inifrån appen via **Hjälp → Stöd projektet 💖**, ell
 
 <div align="center">
 
-**ArkivPiloten 1.4.10** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
+**ArkivPiloten 1.4.11** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
 
 [🇬🇧 Back to English ↑](#english) · [🇸🇪 Tillbaka till Svenska ↑](#svenska) · [❤️ Donate / Donera ↑](#support)
 

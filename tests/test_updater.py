@@ -77,20 +77,45 @@ def test_checksum_in_release_notes_uses_tag_archive(monkeypatch):
         f"https://codeload.github.com/{S.UPDATE_REPO}/zip/refs/tags/v9.9.9")
 
 
-def test_branch_is_the_fallback(monkeypatch):
-    calls = {"n": 0}
+def test_no_branch_fallback(monkeypatch):
+    """Svarar GitHub Releases inte ska INGEN gren användas.
+
+    Tidigare föll appen tillbaka på main och laddade ner grenens zip. Det
+    gjorde uppdateringen omöjlig att verifiera (ingen publicerad summa)
+    och band appen till main. Nu: ok=False, inget erbjuds, och ingen
+    begäran får gå till raw.githubusercontent eller codeload/main.
+    """
+    anropade = []
 
     def fake_get(url, *a, **k):
-        calls["n"] += 1
-        if "releases/latest" in url:
-            raise OSError("API nere")
-        return b'APP_VERSION = "9.9.9"\n'
+        anropade.append(url)
+        raise OSError("API nere")
 
     monkeypatch.setattr(S, "_http_get", fake_get)
     info = S.check_for_update()
-    assert info["source"] == "branch"
-    assert info["remote"] == "9.9.9"
-    assert info["zip_url"] == S.UPDATE_ZIP_URL
+    assert info["ok"] is False
+    assert info["available"] is False
+    assert info["source"] == "release"
+    assert "error" in info
+    assert anropade == [S.UPDATE_RELEASES_LATEST], anropade
+    assert not any("codeload" in u or "raw.githubusercontent" in u
+                   for u in anropade)
+
+
+def test_update_without_release_packet_is_refused(monkeypatch):
+    """Release utan paket och utan tagg-arkiv ska inte installeras."""
+    payload = _release_payload(with_sums=True)
+    payload["assets"] = []
+    payload["body"] = ""
+    monkeypatch.setattr(S, "_http_get",
+                        lambda *a, **k: json.dumps(payload).encode())
+    info = S.check_for_update()
+    # Taggen finns, så zip_url blir tagg-arkivet - men summan saknas.
+    assert info["ok"] is True
+    assert info["sha256"] == ""
+    ok, msg = S.perform_update(root=pathlib.Path("/tmp"))
+    assert ok is False
+    assert "kontrollsumma" in msg.lower()
 
 
 def test_sha_from_sums():

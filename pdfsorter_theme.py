@@ -23,7 +23,7 @@ import sys
 from typing import Dict, Tuple
 
 #: Programmets version. Höjs vid varje leverans.
-VERSION = "1.4.10"
+VERSION = "1.4.11"
 
 
 #: Färgpalett. Ljus, sval grundton med en tydlig blå accent. Alla färger

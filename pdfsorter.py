@@ -90,7 +90,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.10"
+APP_VERSION = "1.4.11"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -7254,10 +7254,9 @@ class App:
                 self.messagebox.showinfo(
                     APP_NAME, f"Du har den senaste versionen ({APP_VERSION}).")
             return
-        kalla = ("GitHub Releases" if info.get("source") == "release"
-                 else "GitHub (main-grenen)")
+        kalla = "GitHub Releases"
         verifierad = bool(info.get("sha256_url") or info.get("sha256"))
-        if info.get("source") == "release" and not verifierad:
+        if not verifierad:
             self._h("uppdatering",
                     f"Releasen {info.get('remote')} saknar kontrollsumma - "
                     "uppdateringen kan inte verifieras", "warn")
@@ -8377,16 +8376,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not info.get("ok"):
             print(f"Kunde inte söka uppdatering: {info.get('error', '?')}")
             return 1
-        kalla = ("GitHub Releases" if info.get("source") == "release"
-                 else "GitHub main-grenen")
+        kalla = "GitHub Releases"
         print(f"Installerad version: {info['current']}  |  "
               f"Senaste på GitHub: {info['remote']}  ({kalla})")
         if info.get("release_url"):
             print(f"Release: {info['release_url']}")
-        if info.get("source") == "release":
-            print("Kontrollsumma: "
-                  + ("ja (verifieras före installation)"
-                     if info.get("sha256_url") else "SAKNAS - frågar i GUI"))
+        print("Kontrollsumma: "
+              + ("ja (verifieras före installation)"
+                 if info.get("sha256_url") else "SAKNAS - frågar i GUI"))
         if not info.get("available"):
             print("Du har redan den senaste versionen.")
             return 0
