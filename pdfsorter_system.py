@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.7"
+APP_VERSION = "1.4.8"
 
 def _mod_versions_line() -> str:
     """Versioner för alla fem modulerna (felsökning/support)."""
@@ -2944,6 +2944,9 @@ UPDATE_FILES = (
     "pdfsorter.py", "pdfsorter.pyw", "pdfsorter_data.py",
     "pdfsorter_read.py", "pdfsorter_system.py", "pdfsorter_theme.py",
     "requirements.txt", "install.sh", "ArkivPiloten.png", "ArkivPiloten.ico",
+    # Engångsuppgraderingen från 1.0.0/1.1.0. Ligger kvar i mappen så att
+    # den som behöver den slipper leta.
+    "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
     "ArkivPiloten - Installera senaste Python och starta.bat",
     "README.md", "PDFSORTER_SPEC.md", "Stöd ArkivPiloten.html",
     "swish_qr.png", "desktop.ini",

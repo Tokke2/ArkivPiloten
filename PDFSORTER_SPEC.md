@@ -52,6 +52,31 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Leverans 1.4.8 (2026-10-21) — vägen från 1.0.0/1.1.0 till
+> autouppdatering.** 1.0.0 och 1.1.0 letade uppdateringar i main-grenen
+> (`contents/pdfsorter.py?ref=main`) i stället för i Releases. main står
+> kvar på 1.1.0, så de installationerna ser aldrig någon release och
+> svarar alltid "du har senaste versionen". Det går inte att laga från
+> servern utan att röra main - i stället finns nu en engångsuppgradering:
+> (a) tools/install_latest.py hämtar `/releases/latest/download/`-
+> filerna, kräver SHA256SUMS.txt, kompilerar alla .py FÖRE något skrivs,
+> tar backup till backups/upgrade_<tid>/ och byter filerna atomiskt.
+> Bara de kända programfilerna skrivs (vitlista, zip-slip-skydd), så
+> json/, logs/, backups/ och egna filer är orörda. Går release-filerna
+> inte att hämta används tagg-arkivet med summan ur release-texten -
+> men en fil med FEL summa avbryter allt, utan reserv.
+> (b) uppgradera-arkivpiloten.bat och .sh är dubbelklickbara: de hittar
+> Python (py/python/venv), hämtar skriptet och kör det mot sin egen
+> mapp. Båda följer med i zip:en och laddas dessutom upp som
+> release-filer, så adressen
+> `.../releases/latest/download/uppgradera-arkivpiloten.bat` alltid
+> pekar på senaste versionen.
+> (c) 19 tester (tests/test_upgrade_tool.py) kör hela flödet mot en
+> lokal release på file://: summa, zip-slip, okända filer, användardata,
+> backup, torrkörning och trasig kod. Verifierat skarpt: en 1.1.0-mapp
+> uppgraderades till 1.4.7 via tagg-arkivet och rapporterar därefter
+> "Senaste på GitHub: 1.4.7 (GitHub Releases)".
+>
 > **Leverans 1.4.7 (2026-10-20) — verifierad matching och sökning.**
 > (a) Ände-till-ände-tester: tests/test_matching_pdf.py bygger riktiga
 > PDF:er, kör läsaren och decide() - samma kedja som appen. PyMuPDF

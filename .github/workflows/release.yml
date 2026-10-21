@@ -36,6 +36,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Engångsuppgraderingen ska kunna hämtas med fast URL:
+          #   .../releases/latest/download/uppgradera-arkivpiloten.bat
+          cp tools/install_latest.py uppgradera-arkivpiloten.bat \
+             uppgradera-arkivpiloten.sh dist/
           VERSION=$(python -c "import json;print(json.load(open('dist/release.json'))['version'])")
           TAG="v$VERSION"
 
@@ -53,6 +57,8 @@ jobs:
           fi
 
           gh release upload "$TAG" dist/ArkivPiloten.zip dist/SHA256SUMS.txt \
+            dist/install_latest.py dist/uppgradera-arkivpiloten.bat \
+            dist/uppgradera-arkivpiloten.sh \
             --clobber || echo "::warning::Kunde inte ladda upp release-filerna - tagg-arkivet används som reserv"
 
           # Kontrollsumma för tagg-arkivet (reservvägen). GitHubs arkiv är

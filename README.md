@@ -4,8 +4,8 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.4.7 — your PDFs, sorted into the right folders. Automatically.**
-**PDF Sorter 1.4.7 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
+**PDF Sorter 1.4.8 — your PDFs, sorted into the right folders. Automatically.**
+**PDF Sorter 1.4.8 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
@@ -67,6 +67,21 @@ pythonw pdfsorter.pyw
 
 Or start the GUI directly with `python pdfsorter.py` (no arguments opens the graphical interface).
 
+### Upgrading from the old 1.0.0 / 1.1.0
+
+Those versions looked for updates in the `main` branch instead of GitHub Releases, so they can never see a release and will always claim to be up to date. Run the one-time upgrader once — it fetches the latest release, verifies the checksum and replaces only the program files (your rules, settings and history are untouched):
+
+```bat
+uppgradera-arkivpiloten.bat
+```
+
+```bash
+bash uppgradera-arkivpiloten.sh          # macOS / Linux
+python3 tools/install_latest.py --root . # or run the script directly
+```
+
+After that the app updates itself from Releases, as described above. Add `--dry-run` to see what would happen first.
+
 ## Quick start (macOS & Linux)
 
 ```bash
@@ -112,6 +127,7 @@ Run `python pdfsorter.py --help` for all options (`--copy`, `--exclude`, `--json
 ArkivPiloten/
 ├── ArkivPiloten - Installera senaste Python och starta.bat   the only launcher you need (Windows)
 ├── install.sh              installer for macOS & Linux (venv, shortcut, autostart)
+├── uppgradera-arkivpiloten.bat / .sh   one-time upgrade from 1.0.0/1.1.0
 ├── tests/                  pytest suite (autostart per OS, updater, config dir)
 ├── tools/build_release.py  builds ArkivPiloten.zip + SHA256SUMS.txt
 ├── .github/workflows/      CI (tests/lint) + automatic release publishing
@@ -243,6 +259,21 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 1. Dubbelklicka på **`ArkivPiloten - Installera senaste Python och starta.bat`**
    — den installerar senaste stabila Python vid behov (per användare, ingen admin krävs), uppgraderar pip, installerar **alla** Python-tillägg från `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) med retry och importkontroll, installerar Tesseract OCR med svenska + engelska via winget (bästa försök), kör appens egen `--status`-kontroll och startar sedan appen.
 2. Klart. Appen startar utan konsolfönster, och allt sparas i appmappen.
+
+### Uppgradera från gamla 1.0.0 / 1.1.0
+
+De versionerna letade uppdateringar i `main`-grenen i stället för i GitHub Releases, och kan därför aldrig se en release — de påstår alltid att de är uppdaterade. Kör engångsuppgraderingen en gång: den hämtar senaste releasen, kontrollerar summan och byter bara programfilerna (dina regler, inställningar och din historik rörs aldrig):
+
+```bat
+uppgradera-arkivpiloten.bat
+```
+
+```bash
+bash uppgradera-arkivpiloten.sh          # macOS / Linux
+python3 tools/install_latest.py --root . # eller kör skriptet direkt
+```
+
+Efter det sköter appen sina uppdateringar själv via Releases, precis som beskrivits ovan. Lägg till `--dry-run` om du först vill se vad som skulle hända.
 
 ### Manuell installation
 
@@ -384,7 +415,7 @@ Du kan också donera inifrån appen via **Hjälp → Stöd projektet 💖**, ell
 
 <div align="center">
 
-**ArkivPiloten 1.4.7** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
+**ArkivPiloten 1.4.8** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
 
 [🇬🇧 Back to English ↑](#english) · [🇸🇪 Tillbaka till Svenska ↑](#svenska) · [❤️ Donate / Donera ↑](#support)
 
