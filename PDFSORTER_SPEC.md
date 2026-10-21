@@ -52,6 +52,16 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Leverans 1.4.10 (2026-10-21) — .sh kör även med LANG=C.**
+> Skriptet använde variabelnamnet `HÄR`. Bash tillåter Å/Ä/Ö i
+> variabelnamn bara i en UTF-8-locale; med LC_ALL=C tolkas `HÄR=...` som
+> ett kommando och skriptet dör på `set -u` ("H: unbound variable") innan
+> något hämtas. Namnet är nu `APP_DIR`, och ett test kör `bash -n` med
+> LC_ALL=C samt kontrollerar att alla variabelnamn är ASCII och att
+> .bat-filen har enbart CRLF. Verifierat skarpt med LC_ALL=C: skriptet i
+> Hämtade filer hittade appen på Skrivbordet och uppgraderade 1.1.0 till
+> 1.4.10.
+>
 > **Leverans 1.4.9 (2026-10-21) — launchern hittar appen själv.**
 > 1.4.8 krävde att uppgradera-arkivpiloten.bat låg i appmappen, men den
 > hämtas ju till Hämtade filer - då hade den gett upp med "hittar ingen

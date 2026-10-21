@@ -15,6 +15,9 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import re
+import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -235,6 +238,32 @@ def test_find_root_searches_when_the_given_folder_is_not_the_app(
 def test_missing_app_folder_gives_a_clear_error(tmp_path, capsys):
     assert U.run(tmp_path / "finns-inte") == 1
     assert "Hittar ingen ArkivPiloten-mapp" in capsys.readouterr().out
+
+
+def test_launchers_are_portable():
+    """Launchern ska fungera även med LANG=C.
+
+    Bash godtar bara Å/Ä/Ö i variabelnamn i en UTF-8-locale; med LC_ALL=C
+    blir `HÄR=...` ett kommando och skriptet faller på `set -u`. Därför
+    ASCII-namn, och ett `bash -n` som kontrollerar syntaxen.
+    """
+    sh = ROOT / "uppgradera-arkivpiloten.sh"
+    text = sh.read_text(encoding="utf-8")
+    for rad in text.splitlines():
+        m = re.match(r"\s*(?:export\s+)?([^\s=]+)=", rad)
+        if m:
+            assert m.group(1).isascii(), \
+                f"variabelnamn med icke-ASCII: {m.group(1)}"
+    if shutil.which("bash"):
+        r = subprocess.run(["bash", "-n", str(sh)],
+                           capture_output=True, text=True,
+                           env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
+        assert r.returncode == 0, r.stderr
+
+    bat = (ROOT / "uppgradera-arkivpiloten.bat").read_bytes()
+    assert b"\r\n" in bat, "Windows-launchern måste ha CRLF-radbrytningar"
+    assert bat.count(b"\n") == bat.count(b"\r\n"), \
+        "blandade radbrytningar i .bat-filen"
 
 
 @pytest.mark.parametrize("gammal,ny,byter", [

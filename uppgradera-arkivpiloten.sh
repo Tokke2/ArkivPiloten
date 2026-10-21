@@ -16,7 +16,7 @@
 set -u
 
 SCRIPT_URL="https://github.com/Tokke2/ArkivPiloten/releases/latest/download/install_latest.py"
-HÄR="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMPPY="$(mktemp "${TMPDIR:-/tmp}/arkivpiloten-uppg.XXXXXX.py")"
 trap 'rm -f "$TMPPY"' EXIT
 
@@ -50,7 +50,7 @@ fi
 
 # Första argumentet får vara appmappen (t.ex. om filen ligger i Hämtade
 # filer och appen någon annanstans). Flaggor går rakt igenom.
-ROOT="$HÄR"
+ROOT="$APP_DIR"
 if [ $# -gt 0 ] && [ -d "$1" ]; then
     ROOT="$1"
     shift
