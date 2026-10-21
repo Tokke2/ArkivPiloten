@@ -4,8 +4,8 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.4.12 — your PDFs, sorted into the right folders. Automatically.**
-**PDF Sorter 1.4.12 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
+**PDF Sorter 1.4.13 — your PDFs, sorted into the right folders. Automatically.**
+**PDF Sorter 1.4.13 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
@@ -48,6 +48,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 - 🧰 **Tray icon, autostart, single instance**, dark / light / high-contrast themes, HiDPI-aware
 - 🪵 **Session logging** in `logs/` and a one-click diagnostics bundle (*Copy diagnostics*) for support
 - 🎒 **Portable by default** — settings, rules, history, logs, cache, icons, backups, updates and temp files live in subfolders of the app folder (`json/`, `logs/`, …). If the app folder is read-only (e.g. `/Applications` or `/opt`), data moves to the standard per-user folder instead; override with `PDFSORTER_HOME`
+- 🧭 **AI report in one click (1.4.13)** — every error, warning and Tk callback exception collected into one compact block, ready to paste into an AI chat or a bug report. The same error from memory, the session log and `errors.log` is merged into one row with a count; only the tail of each log is read, so the report is ready in well under a second even with tens of megabytes of logs, and it says plainly if a log was only read in part. Tk callback exceptions are now captured even when the app runs without a console (`pythonw`). GUI: *Help → Copy AI report*, or `--ai-rapport` (add `--djup` to read the logs in full)
 - 🔄 **Auto-update from GitHub Releases (1.4.0)** — and **only** from Releases: no branch is ever used as a source, so every package is frozen and verifiable. Verifies the package against the release's `SHA256SUMS.txt`, updates only the app's own files with backup, compile check and rollback, then updates the Python packages; your data is never touched. If GitHub's API is unreachable nothing is offered and the app tries again next start. On by default (Help → *Search for updates*, or `--update`)
 - 🚀 **Autostart on Windows/macOS/Linux (1.3.0)** — registry with Startup-folder fallback (Windows), LaunchAgent (macOS), XDG (Linux); self-healing sync at every start, verified after writing
 - ❤️ **Donation view in the app** (Help → Support the project) with SV/EN toggle and a verified Swish QR code
@@ -180,7 +181,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-Found a bug? Run `python pdfsorter.py --diagnostik` (or *Copy diagnostics* in the app) and include the output when you report it — it contains versions, settings and engine status, no document content.
+Found a bug? Run `python pdfsorter.py --ai-rapport` (or *Copy AI report* in the app) and paste the block into the report — it lists every error with a stable fingerprint, a count, the code location and the traceback, merged from memory, the session log and `errors.log`. `--diagnostik` adds versions, settings and engine status. Neither contains document content, and the AI report redacts your user name and home folder.
 
 ---
 
@@ -250,6 +251,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 - 🧰 **Tray-ikon, autostart, enkelinstans**, mörkt/ljust/högkontrast-tema, HiDPI-medveten
 - 🪵 **Sessionsloggning** i `logs/` och ett diagnostikpaket med ett klick (*Kopiera diagnostik*) för support
 - 🎒 **Portabelt som standard** — inställningar, regler, historik, loggar, cache, ikoner, säkerhetskopior, uppdateringar och tempfiler bor i appmappens undermappar (`json/`, `logs/`, …). Är appmappen skrivskyddad (t.ex. `/Applications` eller `/opt`) flyttas datan till användarens ordinarie datamapp i stället; `PDFSORTER_HOME` styr om
+- 🧭 **AI-rapport på ett klick (1.4.13)** — alla fel, varningar och Tk-callbackundantag samlade i ett kompakt block, klart att klistra in i en AI-chatt eller felanmälan. Samma fel från minnet, sessionsloggen och `errors.log` slås ihop till en rad med antal; bara svansen av varje logg läses, så rapporten är klar på under en sekund även med tiotalet megabyte loggar — och den säger rakt ut om en logg bara lästes delvis. Tk-callbackundantag fångas nu även när appen körs utan konsol (`pythonw`). I appen: *Hjälp → Kopiera AI-rapport (alla fel)*, eller `--ai-rapport` (lägg till `--djup` för att läsa hela loggarna)
 - 🔄 **Autouppdatering från GitHub Releases (1.4.0)** — och **enbart** därifrån: ingen gren används någonsin som källa, så varje paket är fryst och kan verifieras. Verifierar paketet mot release-postens `SHA256SUMS.txt`, uppdaterar bara appens egna filer med säkerhetskopia, kompileringstest och rollback, uppdaterar sedan Python-paketen; din data rörs aldrig. Svarar GitHubs API inte erbjuds ingen uppdatering, och appen försöker igen vid nästa start. På som standard (Hjälp → *Sök efter uppdateringar*, eller `--update`)
 - 🚀 **Autostart på Windows/macOS/Linux (1.3.0)** — register med Startup-mapp som reserv (Windows), LaunchAgent (macOS), XDG (Linux); självläkande synk vid varje start, verifierad efter skrivning
 - ❤️ **Donationsvy i appen** (Hjälp → Stöd projektet) med SV/EN-växel och verifierad Swish-QR
@@ -312,6 +314,8 @@ python pdfsorter.py --watch                                    :: bevaka inmappe
 python pdfsorter.py --install-autostart                        :: starta med Windows
 python pdfsorter.py --make-shortcut                            :: skapa genväg på skrivbordet
 python pdfsorter.py --diagnostik                               :: komplett diagnostikpaket för support
+python pdfsorter.py --ai-rapport                               :: alla fel i ett block, klart att klistra in i en AI-chatt
+python pdfsorter.py --ai-rapport --djup                        :: ...men läser hela loggarna i stället för svansen
 python pdfsorter.py --version                                  :: visa version
 python pdfsorter.py --check                                    :: inbyggt självtest (importer, matchning, ikon)
 python pdfsorter.py --export-archive MAPP                       :: exportera årsarkiv (öppna mappar + HTML-index, ej zip)
@@ -381,7 +385,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-Hittat en bugg? Kör `python pdfsorter.py --diagnostik` (eller *Kopiera diagnostik* i appen) och bifoga utdata när du rapporterar — den innehåller versioner, inställningar och motorstatus, inget dokumentinnehåll.
+Hittat en bugg? Kör `python pdfsorter.py --ai-rapport` (eller *Kopiera AI-rapport* i appen) och klistra in blocket i felanmälan — det listar varje fel med ett stabilt fingeravtryck, antal, kodplats och spårning, sammanslaget från minnet, sessionsloggen och `errors.log`. `--diagnostik` lägger till versioner, inställningar och motorstatus. Inget av dem innehåller dokumentinnehåll, och AI-rapporten avidentifierar användarnamn och hemkatalog.
 
 ---
 
@@ -415,7 +419,7 @@ Du kan också donera inifrån appen via **Hjälp → Stöd projektet 💖**, ell
 
 <div align="center">
 
-**ArkivPiloten 1.4.12** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
+**ArkivPiloten 1.4.13** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
 
 [🇬🇧 Back to English ↑](#english) · [🇸🇪 Tillbaka till Svenska ↑](#svenska) · [❤️ Donate / Donera ↑](#support)
 

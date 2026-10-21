@@ -52,6 +52,37 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
+> Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
+> bara till `stderr`, som inte finns när appen startar med `pythonw`, och
+> felen låg utspridda i sessionsloggar, `errors.log` och `krasch.log` -
+> diagnostikpaketet läste dessutom hela filerna.
+> (a) Ny modul `pdfsorter_diag.py`: felringbuffert i minnet (250 poster),
+> `report_callback_exception`-krok för Tk (knappar, `after`, bindningar),
+> vidarebefordran från appens `sys.excepthook`/`threading.excepthook` och
+> `crash_report`, så ALLT hamnar på ett ställe.
+> (b) `build_ai_report()`: ett kompakt block med miljö, unika fel med
+> fingeravtryck (`TclError` från minne/logg/errors.log blir EN rad med
+> antal), varningar, senaste händelserna och vilka filer som lästes.
+> Fingeravtrycket normaliserar bort siffror, hex, tidsstämplar, sökvägar,
+> modulprefix och radnummer, så samma fel får samma nyckel mellan
+> versioner och mellan loggkällor.
+> (c) Noll sekunder: filer ≤ 8 MB läses hela, större läses bara i svansen
+> (200 kB). `--djup` läser hela filer upp till 64 MB. Rapporten säger
+> alltid om en fil bara lästes delvis ("kör --djup"), så "inga fel" aldrig
+> kan feltolkas. Mätt: 23 MB loggar → rapport på 0,08 s (0,45 s med
+> Pythonstart), `--djup` 24,5 MB på 0,31 s.
+> (d) Ytor: `--ai-rapport` (+ `--djup`) i CLI, *Kopiera AI-rapport (alla
+> fel)* i Hjälp-fliken (kopierar till urklipp och skriver
+> `logs/ai-rapport-senaste.txt` atomiskt), sammanfattning i
+> `--diagnostik`, och `_svans` i supportpaketet läser bara svansen.
+> (e) Avidentifiering: hemkatalog, användarnamn och `%USERPROFILE%` byts
+> mot `~`/`<användare>` - rapporten kan klistras in var som helst.
+> 24 nya tester i tests/test_diagnostics.py (168 totalt), inklusive
+> Tk-kroken, hopslagning över tre källor, trunkeringsärlighet, tidsgräns
+> på 5 MB-logg och att `UPDATE_FILES` och uppgraderingsverktyget alltid
+> listar samma filer (nu inkl. `pdfsorter_diag.py`).
+>
 > **Leverans 1.4.12 (2026-10-21) — minimering med öppen dialog.**
 > Rapporterat: minimerade man medan matchningsdialogen var öppen gick
 > fönstret inte att få fram igen, och loggen fylldes av

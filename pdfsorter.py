@@ -84,13 +84,18 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+try:
+    import pdfsorter_diag as diag
+except Exception:                     # pragma: no cover - trasig installation
+    diag = None                       # type: ignore[assignment]
+
 
 # ========================================================================
 # KONSTANTER
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.12"
+APP_VERSION = "1.4.13"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -4110,6 +4115,11 @@ class App:
         self._icon_ref = None                    # håll kvar PhotoImage
 
         self.root = tk.Tk()
+        if diag is not None:
+            # Undantag i knappar/after-jobb fångas av Tk och skrevs tidigare
+            # bara till stderr - som inte finns när appen startas med
+            # pythonw. Nu hamnar de i loggen och i AI-rapporten.
+            diag.install_tk_hooks(self.root)
         self.root.title(f"{APP_NAME} {APP_VERSION}")
         # Fönstret anpassas dynamiskt till skärmstorleken (användarorder
         # 2026-08-26) - aldrig större än skärmen, centrerat, åtkomligt
@@ -7177,6 +7187,8 @@ class App:
                    command=self._save_help).pack(side="left")
         ttk.Button(bar, text="Öppna inställningsmappen",
                    command=lambda: open_externally(config_dir())).pack(side="left", padx=6)
+        ttk.Button(bar, text="Kopiera AI-rapport (alla fel)",
+                   command=self._copy_ai_report).pack(side="left", padx=6)
         ttk.Button(bar, text="Kopiera diagnostik för support",
                    command=self._copy_support_log).pack(side="left", padx=6)
         ttk.Button(bar, text="Öppna log-mappen",
@@ -7824,6 +7836,42 @@ class App:
             self._h("tillägg", f"Tilläggsdialogen kunde inte visas: {exc}",
                     "warn")
 
+    def _copy_ai_report(self) -> None:
+        """Kopiera ALLA fel samlade i ett block - klart på noll sekunder.
+
+        Blocket klistras rakt in i en AI-chatt eller felanmälan: miljö,
+        unika fel med spårning, varningar, senaste händelserna och vilka
+        loggfiler som lästes. En kopia skrivs också till
+        ``logs/ai-rapport-senaste.txt``, så den finns kvar även om appen
+        inte går att öppna.
+        """
+        self._ui("Kopiera AI-rapport")
+        if diag is None:
+            self.messagebox.showwarning(
+                APP_NAME, "pdfsorter_diag.py saknas i appmappen - kopiera "
+                "den från releasen och försök igen.", parent=self.root)
+            return
+        try:
+            text = build_ai_report()
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            fil = diag.dump_report(session_dir(), extra=_diag_extra())
+        except Exception as exc:
+            self._fel(exc, "ai-rapport")
+            self.messagebox.showerror(
+                APP_NAME, f"Kunde inte bygga AI-rapporten:\n{exc}",
+                parent=self.root)
+            return
+        sammanfattning = diag.sammanfattning(session_dir())
+        self._h("ai-rapport", f"AI-rapport kopierad: {sammanfattning}"
+                + (f" - sparad i {fil}" if fil else ""))
+        self.messagebox.showinfo(
+            APP_NAME,
+            "AI-rapporten ligger i urklipp - klistra in den i chatten.\n\n"
+            f"{sammanfattning}"
+            + (f"\n\nSparad i:\n{fil}" if fil else ""),
+            parent=self.root)
+
     def _copy_support_log(self) -> None:
         """Kopiera ett komplett diagnostikpaket till urklipp (LÅNAT MÖNSTER
         L1): systeminfo + inställningar + motorstatus + autostart + hela
@@ -8151,6 +8199,80 @@ def _self_check() -> int:
     return 1 if fel else 0
 
 
+def _diag_extra() -> List[str]:
+    """Statusrader till AI-rapporten - lokala fakta, inga nätanrop.
+
+    Rapporten ska vara klar på noll sekunder. Därför läses bara det som
+    redan finns i minnet/filerna; uppdateringskontrollen visas som den är
+    konfigurerad, inte som ett nytt GitHub-anrop.
+    """
+    rader: List[str] = []
+    try:
+        rader.append(f"App: {APP_NAME} {APP_VERSION} · moduler "
+                     + ", ".join(f"{k}={v}" for k, v in
+                                 _module_versions().items()))
+        if VERSIONS_BLANDADE:
+            rader.append("VARNING: blandade modulversioner - kopiera ALLA "
+                         "fem .py-filerna")
+    except Exception:
+        pass
+    try:
+        s = load_settings()
+        rader.append(
+            "Inställningar: " + ", ".join(
+                f"{k}={s.get(k)}" for k in
+                ("strictness", "min_keywords", "action", "dry_run",
+                 "ask_when_unsure", "check_updates", "auto_update",
+                 "minimize_to_tray", "close_to_tray") if k in s))
+        rader.append(f"Mappar: in={s.get('input_dir', '')} "
+                     f"ut={s.get('output_dir', '')} "
+                     f"exkluderade={list(s.get('exclude_dirs', []))}")
+    except Exception as exc:
+        rader.append(f"Inställningar: KUNDE INTE LÄSAS ({exc})")
+    try:
+        rader.append("Läsmotorer: " + ", ".join(
+            f"{k}={'ja' if v else 'nej'}" for k, v in backend_status().items()))
+    except Exception:
+        pass
+    try:
+        rader.append(f"Autostart: {'på' if autostart_enabled() else 'av'}"
+                     f" · systemfält: {'ja' if tray_available() else 'nej'}")
+    except Exception:
+        pass
+    try:
+        regler = Rules.load()
+        rader.append(f"Regler: {len(regler.categories)} kategorier, "
+                     f"{sum(len(c['keywords']) for c in regler.categories)} stödord")
+    except Exception as exc:
+        rader.append(f"Regler: KUNDE INTE LÄSAS ({exc})")
+    rader.append(f"Uppdateringskanal: enbart GitHub Releases "
+                 f"({_sys_mod.UPDATE_REPO})")
+    return rader
+
+
+def build_ai_report(djup: bool = False) -> str:
+    """Ett klistra-in-block med ALLA fel - klart på noll sekunder.
+
+    ``djup`` läser mer av loggarna (för en envis bugg), annars bara
+    svansen: 200 kB per fil, 8 filer. Tiden beror på hur mycket som ska
+    visas - inte på hur stora loggarna är.
+    """
+    if diag is None:
+        return ("AI-rapporten kräver pdfsorter_diag.py - filen saknas i "
+                "appmappen. Kopiera den från releasen och försök igen.")
+    try:
+        if djup:
+            return diag.build_ai_report(
+                session_dir(), extra=_diag_extra(), djup=True,
+                max_files=24, max_per_nivå=40, spårningsrader=16,
+                kontext=60)
+        return diag.build_ai_report(session_dir(), extra=_diag_extra())
+    except Exception as exc:
+        # Rapporten får aldrig bli ännu ett fel - men den ska säga det.
+        return (f"Kunde inte bygga AI-rapporten: {type(exc).__name__}: {exc}\n"
+                f"Loggar finns i: {session_dir()}")
+
+
 def build_diagnostics() -> str:
     """ETT klistra-in-block för support (LÅNAT MÖNSTER L1).
 
@@ -8166,6 +8288,11 @@ def build_diagnostics() -> str:
     rader.append("=" * 72)
     rader.append(f"Python:      {sys.version.split()[0]}  "
                  f"Plattform: {sys.platform}")
+    if diag is not None:
+        try:
+            rader.append(f"Felbild:     {diag.sammanfattning(session_dir())}")
+        except Exception:
+            pass
     rader.append(f"Moduler:     {_module_versions()}")
     rader.append(f"Konfiguration: {config_dir()} ({config_dir_mode()})")
     try:
@@ -8208,9 +8335,13 @@ def build_diagnostics() -> str:
             if fil and fil.exists():
                 rader.append("")
                 rader.append(f"--- {etikett}: {fil} (sista {antal} raderna) ---")
-                rader.extend(fil.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()[-antal:])
+                if diag is not None:
+                    text = diag.tail_text(fil, 400_000)
+                else:
+                    with open(fil, "r", encoding="utf-8",
+                              errors="replace") as fh:
+                        text = fh.read()[-400_000:]
+                rader.extend(text.splitlines()[-antal:])
         except OSError:
             pass
 
@@ -8352,6 +8483,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"Arbetskatalog: {Path.cwd()}",
     ])
     install_excepthooks()
+    if diag is not None:
+        # Allt som går fel ska hamna på ett ställe - även fel som Tk fångar
+        # själv och som tidigare bara skrevs till en konsol som inte finns.
+        diag.configure(APP_NAME, APP_VERSION, session_dir(),
+                       logger=session_log, extra=_diag_extra)
     if compact_history_if_large():
         session_log("start", "Historikjournalen kompakterades vid start "
                     "(>200 rader) - snabbare start", "ok")
@@ -8386,6 +8522,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Visa vilka PDF-motorer och tillägg som hittats")
     p.add_argument("--diagnostik", action="store_true",
                    help="Skriv ut ett komplett diagnostikpaket för support")
+    p.add_argument("--ai-rapport", action="store_true",
+                   help="Skriv ut ALLA fel samlade i ett block - klart att "
+                        "klistra in i en AI-chatt eller felanmälan")
+    p.add_argument("--djup", action="store_true",
+                   help="Läs mer av loggarna i --ai-rapport (för envisa fel)")
     p.add_argument("--tray", action="store_true",
                    help="Starta minimerad i systemfältet (används vid autostart)")
     p.add_argument("--install-autostart", action="store_true",
@@ -8414,6 +8555,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Installera/uppdatera alla Python-tillägg från requirements.txt och avsluta")
     p.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     args = p.parse_args(argv)
+
+    if getattr(args, "ai_rapport", False):
+        rapport = build_ai_report(djup=bool(getattr(args, "djup", False)))
+        print(rapport)
+        if diag is not None:
+            # Lämna alltid en fil kvar - då kan den bifogas utan terminal.
+            diag.dump_report(session_dir(), extra=_diag_extra())
+        return 0
 
     if args.diagnostik:
         print(build_diagnostics())

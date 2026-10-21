@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.12"
+APP_VERSION = "1.4.13"
 
 def _mod_versions_line() -> str:
     """Versioner för alla fem modulerna (felsökning/support)."""
@@ -2304,6 +2304,9 @@ def crash_report(exc: BaseException) -> None:
     # Även i den löpande sessionsloggen, om en körning redan pågår -
     # då syns kraschen i sitt sammanhang (vad hände precis innan).
     session_log("krasch", text.rstrip(), level="err")
+    if _diag is not None:
+        _diag.note("krasch", f"{type(exc).__name__}: {exc}", tb_text=text,
+                   logg=False)
     log = None
     for target in (session_dir() / "krasch.log", _month_log_path("errors")):
         try:
@@ -2901,6 +2904,10 @@ def install_excepthooks() -> None:
         session_log("oväntat", "Ohanderat undantag (huvudspåret):\n"
                     + text.rstrip(), level="err")
         _write_errors_log(text)
+        if _diag is not None:
+            # logg=False: raden ovan har redan skrivits till sessionsloggen.
+            _diag.note("oväntat", f"{exc_type.__name__}: {exc}",
+                       tb_text=text, logg=False)
         try:
             _OLD_EXCEPTHOOK(exc_type, exc, tb)
         except Exception:
@@ -2914,6 +2921,10 @@ def install_excepthooks() -> None:
                     f"Ohanderat undantag i tråd {args.thread.name if args.thread else '?'}:\n"
                     + text.rstrip(), level="err")
         _write_errors_log(text)
+        if _diag is not None:
+            _diag.note(f"tråd:{getattr(args.thread, 'name', '?')}",
+                       f"{getattr(args, 'exc_type', type(args.exc_value)).__name__}: "
+                       f"{args.exc_value}", tb_text=text, logg=False)
 
     _OLD_EXCEPTHOOK = sys.excepthook
     try:
@@ -2935,6 +2946,14 @@ def _write_errors_log(text: str) -> None:
         pass
 
 
+#: Feldiagnostik (AI-rapport). Valfri: saknas modulen fungerar appen som
+#: förut, men utan samlad felbild.
+try:
+    import pdfsorter_diag as _diag
+except Exception:                     # pragma: no cover - trasig installation
+    _diag = None
+
+
 # =========================================================================
 # AUTOUPPDATERING FRÅN GITHUB RELEASES (2026-10-21: enbart Releases)
 # =========================================================================
@@ -2954,6 +2973,7 @@ UPDATE_SUMS_NAME = "SHA256SUMS.txt"
 UPDATE_FILES = (
     "pdfsorter.py", "pdfsorter.pyw", "pdfsorter_data.py",
     "pdfsorter_read.py", "pdfsorter_system.py", "pdfsorter_theme.py",
+    "pdfsorter_diag.py",
     "requirements.txt", "install.sh", "ArkivPiloten.png", "ArkivPiloten.ico",
     # Engångsuppgraderingen från 1.0.0/1.1.0. Ligger kvar i mappen så att
     # den som behöver den slipper leta.

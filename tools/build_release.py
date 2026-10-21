@@ -12,7 +12,7 @@ den senaste koden.
     python tools/build_release.py --bump patch    # höj versionen först
     python tools/build_release.py --bump minor
 
-Bumpen ändrar versionen i alla fem modulerna och i README, men gör
+Bumpen ändrar versionen i alla sex modulerna och i README, men gör
 ingen commit - granska och committa själv.
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ from pdfsorter_system import (  # noqa: E402
 )
 
 MODULES = ("pdfsorter.py", "pdfsorter_data.py", "pdfsorter_read.py",
-           "pdfsorter_system.py", "pdfsorter_theme.py")
+           "pdfsorter_system.py", "pdfsorter_theme.py", "pdfsorter_diag.py")
 _VERSION_RE = re.compile(r'((?:APP_)?VERSION\s*=\s*")(\d+\.\d+\.\d+)(")')
 
 

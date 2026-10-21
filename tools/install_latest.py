@@ -53,6 +53,7 @@ SUMS = "SHA256SUMS.txt"
 FILES = (
     "pdfsorter.py", "pdfsorter.pyw", "pdfsorter_data.py",
     "pdfsorter_read.py", "pdfsorter_system.py", "pdfsorter_theme.py",
+    "pdfsorter_diag.py",
     "requirements.txt", "install.sh",
     "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
     "ArkivPiloten.png", "ArkivPiloten.ico",
