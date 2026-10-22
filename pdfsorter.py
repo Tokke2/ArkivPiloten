@@ -4143,6 +4143,146 @@ def _minimize_action(state: str, settings: Dict[str, Any],
     return "tray"
 
 
+# --------------------------------------------------------------------------
+# Menyraden - samma funktioner som flikarna, nåbara utan att leta
+# --------------------------------------------------------------------------
+#: Menyerna beskrivs som DATA och byggs sedan av _build_menubar(). Då kan
+#: innehållet granskas i test utan Tk (som inte finns i CI på alla OS), och
+#: en post som pekar på en metod som inte finns upptäcks innan den klickas.
+#:
+#: Posttyper:
+#:   (ingen)    - vanlig post, kör "atgard"
+#:   avdelare   - avgränsningslinje
+#:   kryss      - bockbar post, bunden till variabeln i "var"
+#:   radio      - en av flera, bunden till "var" med värdet i "varde"
+#:   flik       - byter till fliken i "flik"
+_MENY_FLIKAR = {"tab_sort", "tab_cats", "tab_opts", "tab_review",
+                "tab_hist", "tab_json", "tab_help"}
+
+#: Genvägarna använder Ctrl på Windows/Linux och Command på macOS.
+_MENY_SNABB_CTRL = "Ctrl"
+_MENY_SNABB_CMD = "Command"
+
+
+def meny_spec() -> List[Dict[str, Any]]:
+    """Menyradens innehåll som data - testbart utan Tk."""
+    c = _MENY_SNABB_CTRL
+    return [
+        {"titel": "Arkiv", "poster": [
+            {"id": "lagg_till_inmapp", "text": "Lägg till inmapp…",
+             "snabb": f"{c}+O", "atgard": "_add_input_dir"},
+            {"id": "ta_bort_inmapp", "text": "Ta bort vald inmapp",
+             "snabb": f"{c}+Shift+O", "atgard": "_remove_input_dir"},
+            {"typ": "avdelare"},
+            {"id": "sortera_nu", "text": "Sortera nu", "snabb": "F5",
+             "atgard": "_sort_now"},
+            {"id": "bevaka", "typ": "kryss", "text": "Bevaka mapparna",
+             "snabb": f"{c}+B", "var": "var_bevaka",
+             "atgard": "_meny_bevaka"},
+            {"typ": "avdelare"},
+            {"id": "oppna_ut", "text": "Öppna utmappen",
+             "atgard": "open_output"},
+            {"id": "oppna_logg", "text": "Öppna loggmappen",
+             "atgard": "_open_log_dir"},
+            {"typ": "avdelare"},
+            {"id": "avsluta", "text": "Avsluta", "snabb": f"{c}+Q",
+             "atgard": "quit_app"},
+        ]},
+        {"titel": "Inställningar", "poster": [
+            {"id": "autostart", "typ": "kryss",
+             "text": "Starta automatiskt med datorn",
+             "var": "var_autostart", "atgard": "_toggle_autostart"},
+            {"id": "tray", "typ": "kryss", "text": "Visa ikon i systemfältet",
+             "var": "var_tray", "installning": "tray_enabled"},
+            {"id": "min_tray", "typ": "kryss",
+             "text": "Minimera till systemfältet",
+             "var": "var_min_tray", "installning": "minimize_to_tray"},
+            {"id": "close_tray", "typ": "kryss",
+             "text": "Krysset minimerar i stället för att avsluta",
+             "var": "var_close_tray", "installning": "close_to_tray"},
+            {"typ": "avdelare"},
+            {"id": "tema_ljus", "typ": "radio", "text": "Ljust tema",
+             "var": "var_theme", "varde": "ljus",
+             "atgard": "_on_theme_radio"},
+            {"id": "tema_mork", "typ": "radio", "text": "Mörkt tema",
+             "var": "var_theme", "varde": "mork",
+             "atgard": "_on_theme_radio"},
+            {"typ": "avdelare"},
+            {"id": "oppna_installningar", "text": "Alla inställningar…",
+             "snabb": f"{c}+,", "typ": "flik", "flik": "tab_opts"},
+        ]},
+        {"titel": "Visa", "poster": [
+            {"id": "flik_sortera", "text": "Sortera", "typ": "flik",
+             "flik": "tab_sort"},
+            {"id": "flik_matchningar", "text": "Matchningar", "typ": "flik",
+             "flik": "tab_cats"},
+            {"id": "flik_granska", "text": "Granska", "typ": "flik",
+             "flik": "tab_review"},
+            {"id": "flik_historik", "text": "Historik", "typ": "flik",
+             "flik": "tab_hist"},
+            {"id": "flik_json", "text": "JSON", "typ": "flik",
+             "flik": "tab_json"},
+            {"typ": "avdelare"},
+            {"id": "genvag", "text": "Skapa genväg på skrivbordet",
+             "atgard": "_make_shortcut"},
+            {"id": "spara_ikon", "text": "Spara appikonen…",
+             "atgard": "_save_icon"},
+        ]},
+        {"titel": "Hjälp", "poster": [
+            {"id": "hjalp", "text": "Användarhjälp", "snabb": "F1",
+             "typ": "flik", "flik": "tab_help"},
+            {"typ": "avdelare"},
+            {"id": "ai_rapport", "text": "Kopiera AI-rapport (alla fel)",
+             "snabb": f"{c}+Shift+A", "atgard": "_copy_ai_report"},
+            {"id": "diagnostik", "text": "Kopiera diagnostik för support",
+             "atgard": "_copy_support_log"},
+            {"typ": "avdelare"},
+            {"id": "sok_uppdatering", "text": "Sök efter uppdateringar…",
+             "atgard": "_meny_sok_uppdatering"},
+            {"typ": "avdelare"},
+            {"id": "om", "text": "Om ArkivPiloten…", "atgard": "_meny_om"},
+        ]},
+    ]
+
+
+def meny_snabbmodifierare(plattform: str = "") -> str:
+    """Ctrl på Windows/Linux, Command på macOS."""
+    p = plattform or sys.platform
+    return _MENY_SNABB_CMD if p == "darwin" else _MENY_SNABB_CTRL
+
+
+def meny_snabb_tangent(snabb: str, plattform: str = "") -> str:
+    """Gör om "Ctrl+Shift+A" till rätt Tk-sekvens för plattformen.
+
+    Windows/Linux: Control-Shift-KeyPress-A. macOS: Command-Shift-A.
+    F5 och F1 lämnas orörda (de har ingen modifierare).
+    """
+    text = str(snabb or "").strip()
+    if not text:
+        return ""
+    if text.upper() in ("F1", "F5", "F2", "F3", "F4", "F6", "F7", "F8",
+                        "F9", "F10", "F11", "F12"):
+        return f"<{text.upper()}>"
+    delar = text.split("+")
+    tang = delar[-1]
+    mods = [d for d in delar[:-1]]
+    mod = meny_snabbmodifierare(plattform)
+    nyckel = "Command" if mod == _MENY_SNABB_CMD else "Control"
+    mods = [nyckel if d.lower() in ("ctrl", "control", "cmd", "command")
+            else d for d in mods]
+    # Tk skiljer på versaler och gemener när Shift är nedtryckt: Ctrl+O ska
+    # bindas som <Control-KeyPress-o>, Ctrl+Shift+O som
+    # <Control-Shift-KeyPress-O>. Att alltid skriva versal (eller alltid
+    # gemen) gör att genvägen fungerar på en del Tk-versioner men inte alla.
+    prefix = "-".join(mods)
+    shift = any(m.lower() == "shift" for m in mods)
+    if len(tang) == 1 and tang.isalpha():
+        bokstav = tang.upper() if shift else tang.lower()
+        return (f"<{prefix}-KeyPress-{bokstav}>" if prefix
+                else f"<{bokstav}>")
+    return f"<{prefix}-{tang}>" if prefix else f"<{tang}>"
+
+
 class App:
     def __init__(self, start_hidden: bool = False) -> None:
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
@@ -4260,6 +4400,8 @@ class App:
         self._build_help_tab()
         # Efter alla flikar: mushjulet ska rulla inställningarna.
         self._install_tab_wheel()
+        # Sist: menyraden (behöver flikarna och deras variabler).
+        self._build_menubar()
 
         status_line = status_text()
         if not SYSTEM_MODULE:
@@ -4435,6 +4577,212 @@ class App:
     # ======================================================================
     # Flik 1 - Sortera
     # ======================================================================
+    # -- menyraden --------------------------------------------------------
+    def _meny_variabel(self, namn: str) -> Any:
+        """Hämta (eller skapa) en Tk-variabel som en menypost binder till."""
+        var = getattr(self, namn, None)
+        if var is None:
+            # Temat är en sträng ("ljus"/"mork"), allt annat är på/av.
+            if namn == "var_theme":
+                var = self.tk.StringVar(value=self.settings.get("theme", "ljus"))
+            else:
+                var = self.tk.BooleanVar(value=False)
+            setattr(self, namn, var)
+        return var
+
+    def _build_menubar(self) -> None:
+        """Bygg menyraden ur meny_spec() - samma funktioner som flikarna.
+
+        Flikarna kräver att man letar; menyraden ger genvägar till det man
+        gör oftast (sortera, bevaka, autostart, AI-rapport) och visar dessutom
+        genvägarna. Innehållet är data (meny_spec), så det kan granskas i
+        test utan Tk.
+        """
+        tk = self.tk
+        try:
+            bar = tk.Menu(self.root)
+            for meny in meny_spec():
+                m = tk.Menu(bar, tearoff=0)
+                for post in meny["poster"]:
+                    typ = post.get("typ", "")
+                    if typ == "avdelare":
+                        m.add_separator()
+                        continue
+                    text = post["text"]
+                    snabb = post.get("snabb", "")
+                    visa = (snabb.replace(_MENY_SNABB_CTRL,
+                                          meny_snabbmodifierare())
+                            if snabb else "")
+                    if typ == "kryss":
+                        m.add_checkbutton(
+                            label=text, accelerator=visa,
+                            variable=self._meny_variabel(post["var"]),
+                            command=self._meny_atgard(post))
+                    elif typ == "radio":
+                        m.add_radiobutton(
+                            label=text, accelerator=visa,
+                            variable=self._meny_variabel(post["var"]),
+                            value=post["varde"],
+                            command=self._meny_atgard(post))
+                    else:
+                        m.add_command(label=text, accelerator=visa,
+                                      command=self._meny_atgard(post))
+                bar.add_cascade(label=meny["titel"], menu=m)
+            # macOS lägger menyraden i skärmens överkant, övriga i fönstret.
+            self.root.configure(menu=bar)
+            self.menubar = bar
+            self._bind_meny_snabb()
+            self._sync_meny()
+            self._h("meny", "Menyrad byggd: " + ", ".join(
+                m["titel"] for m in meny_spec()))
+        except Exception as exc:
+            # En trasig menyrad får aldrig hindra appen från att starta.
+            self.menubar = None
+            session_error("meny", exc)
+
+    def _meny_atgard(self, post: Dict[str, Any]) -> Callable[[], None]:
+        """Klickfunktion för en menypost."""
+        if post.get("typ") == "flik":
+            return lambda p=post: self._visa_flik(p["flik"])
+        if post.get("installning"):
+            return lambda p=post: self._meny_kryss(p["installning"], p["var"])
+        namn = post.get("atgard", "")
+        metod = getattr(self, namn, None)
+        if callable(metod):
+            return lambda: metod()
+        # Ska aldrig kunna hända (testet kontrollerar att metoden finns) -
+        # men hellre en tydlig logg än en krasch i en meny.
+        return lambda n=namn: self._h(
+            "meny", f"Menyposten saknar funktion ({n})", "warn")
+
+    def _visa_flik(self, namn: str) -> None:
+        """Byt till en flik (används av menyn och av genvägarna)."""
+        flik = getattr(self, namn, None)
+        if flik is None:
+            return
+        try:
+            self.nb.select(flik)
+            self._ui(f"Menyn: fliken {namn}")
+        except Exception as exc:
+            self._fel(exc, "meny")
+
+    def _meny_kryss(self, nyckel: str, var_namn: str) -> None:
+        """Spara och verkställ en bockad menypost direkt (ingen omstart)."""
+        var = getattr(self, var_namn, None)
+        varde = bool(var.get()) if var is not None else False
+        self.settings[nyckel] = varde
+        try:
+            save_settings(self.settings)
+        except Exception as exc:
+            self._fel(exc, "meny")
+        if nyckel == "tray_enabled":
+            self._meny_tray(varde)
+        self._h("meny", f"{nyckel} = {varde} (sparat direkt)")
+        self._log(f"Inställning: {nyckel} = {'på' if varde else 'av'}.", "info")
+
+    def _meny_tray(self, på: bool) -> None:
+        """Slå på/av systemfältsikonen direkt när menyn ändrar den."""
+        try:
+            if på:
+                if self.tray is None and TrayIcon is not None and tray_available():
+                    self.tray = TrayIcon(self)
+                    if not self.tray.start():
+                        self.tray = None
+                        self._h("systemfält", "Systemfältsikonen kunde inte "
+                                "startas", "warn")
+            elif self.tray is not None:
+                self.tray.stop()
+                self.tray = None
+            self._sync_tray()
+        except Exception as exc:
+            self._fel(exc, "systemfält")
+
+    def _meny_bevaka(self) -> None:
+        """Bevakning på/av - menyposten är en kryssruta."""
+        self._toggle_watch()
+        self._sync_meny()
+
+    def _sync_meny(self) -> None:
+        """Håll menyns kryssruta för bevakning i takt med verkligheten."""
+        var = getattr(self, "var_bevaka", None)
+        if var is None:
+            return
+        try:
+            kör = bool(self.watcher and self.watcher.running)
+            if bool(var.get()) != kör:
+                var.set(kör)
+        except Exception:
+            pass
+
+    def _meny_sok_uppdatering(self) -> None:
+        self._check_updates_gui(manual=True)
+
+    def _meny_om_text(self) -> str:
+        """Texten i Om-rutan: allt en supportfråga behöver, utan nätanrop."""
+        rader = [f"{APP_NAME} {APP_VERSION}", ""]
+        try:
+            rader.append("Moduler: " + ", ".join(
+                f"{k}={v}" for k, v in _module_versions().items()))
+            if VERSIONS_BLANDADE:
+                rader.append("OBS: blandade modulversioner - kopiera ALLA "
+                             "fem .py-filerna.")
+        except Exception:
+            pass
+        rader.append(f"Python {sys.version.split()[0]} · {sys.platform}")
+        rader.append("")
+        rader.append(f"Uppdateringar: enbart GitHub Releases "
+                     f"({_sys_mod.UPDATE_REPO})")
+        rader.append(f"Inställningar och data: {config_dir()}")
+        rader.append(f"Loggar: {session_dir()}")
+        rader.append("")
+        rader.append("Gratis - och förblir gratis.")
+        return "\n".join(rader)
+
+    def _meny_om(self) -> None:
+        self._ui("Menyn: Om")
+        try:
+            self.messagebox.showinfo(f"Om {APP_NAME}", self._meny_om_text(),
+                                     parent=self.root)
+        except Exception as exc:
+            self._fel(exc, "meny")
+
+    def _bind_meny_snabb(self) -> None:
+        """Koppla menyernas genvägar till rotfönstret.
+
+        ``accelerator`` i en meny är bara en etikett - Tk kopplar ingen
+        tangent av sig själv. Bindningen läggs på rotfönstret (inte
+        ``bind_all``), så en dialog med eget tangentbord störs inte.
+        """
+        for meny in meny_spec():
+            for post in meny["poster"]:
+                snabb = post.get("snabb", "")
+                if not snabb:
+                    continue
+                sekvens = meny_snabb_tangent(snabb)
+                if not sekvens:
+                    continue
+                try:
+                    self.root.bind(sekvens, self._meny_snabb_hanterare(post))
+                except Exception:
+                    continue
+
+    def _meny_snabb_hanterare(self, post: Dict[str, Any]):
+        """Tangenthanterare som gör samma sak som menyposten."""
+        if post.get("typ") == "flik":
+            atgard = lambda: self._visa_flik(post["flik"])     # noqa: E731
+        elif post.get("installning"):
+            atgard = (lambda: self._meny_kryss(post["installning"],
+                                               post["var"]))
+        else:
+            metod = getattr(self, post.get("atgard", ""), None)
+            atgard = metod if callable(metod) else (lambda: None)
+
+        def _kor(_event=None):
+            self._ui(f"Genväg: {post.get('snabb', '')} ({post['id']})")
+            atgard()
+            return "break"
+        return _kor
+
     def _scrollable_tab(self, parent, namn: str = ""):
         """Gör en flik rullbar och returnera den inre ramen.
 
@@ -5017,6 +5365,10 @@ class App:
         themrad = ttk.Frame(sysbox, style="CardInner.TFrame")
         themrad.grid(row=5, column=0, columnspan=4, sticky="w",
                      padx=8, pady=(8, 2))
+        #: Menyns kryssruta för bevakning - speglar watcherns verkliga läge.
+        self.var_bevaka = tk.BooleanVar(
+            value=bool(self.watcher and self.watcher.running))
+        self.menubar = None
         self.var_theme = tk.StringVar(value=self.settings.get("theme", "ljus"))
         ttk.Label(themrad, text="Tema:", style="Card.TLabel").pack(side="left")
         for txt, val in (("Ljust", "ljus"), ("Mörkt", "mork")):
@@ -5819,6 +6171,7 @@ class App:
                           "bevakas INTE.\nKryssa i 'Läs även undermappar' "
                           "i Inställningar för att ta med dem.", "warn")
         self._sync_tray()
+        self._sync_meny()
         return True
 
     def _stop_watch(self) -> None:
@@ -5829,6 +6182,7 @@ class App:
         self._update_pills()
         self._log("Bevakning stoppad.", "info")
         self._sync_tray()
+        self._sync_meny()
 
     def _restart_watch(self) -> None:
         """Starta om bevakningen så att ändrade mappar slår igenom."""

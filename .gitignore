@@ -14,6 +14,8 @@ release-notes.md
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.coverage
+coverage.xml
 .ruff_cache/
 .mypy_cache/
 .venv/

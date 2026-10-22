@@ -1805,6 +1805,22 @@ HELP_CONTENT: List[Tuple[str, str]] = [
              "Efter tio, femton svar känner den igen dina vanligaste "
              "leverantörer och sköter resten på egen hand."),
 
+    ("h2", "Menyraden — allt nåbart utan att leta"),
+    ("body", "Ovanför flikarna finns en menyrad med samma funktioner som "
+             "flikarna, plus genvägarna. Den som inte hittar en inställning "
+             "kan gå dit i stället för att leta i flikarna."),
+    ("bullet", "Arkiv:  lägg till eller ta bort inmapp, Sortera nu (F5), "
+               "Bevaka mapparna (Ctrl+B), öppna utmappen eller loggmappen, "
+               "Avsluta (Ctrl+Q)."),
+    ("bullet", "Inställningar:  autostart, systemfältsikon, minimering och "
+               "krysset — samt ljust/mörkt tema. Ändringarna sparas direkt."),
+    ("bullet", "Visa:  hoppa direkt till en flik, skapa genväg på "
+               "skrivbordet, spara appikonen."),
+    ("bullet", "Hjälp:  användarhjälpen (F1), Kopiera AI-rapport "
+               "(Ctrl+Shift+A), diagnostik, sök uppdateringar, Om."),
+    ("note", "På macOS ligger menyraden i skärmens överkant och genvägarna "
+             "använder Command i stället för Ctrl — appen byter själv."),
+
     ("h2", "När appen frågar"),
     ("body", "Är appen osäker hamnar filen i granskningskön och du får upp "
              "en ruta med tio förslag på stödord hämtade ur just den filen. "

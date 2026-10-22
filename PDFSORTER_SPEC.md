@@ -72,6 +72,37 @@
 > Versionen är INTE höjd och ingen release är publicerad - det görs först
 > på begäran.
 >
+> **Ej publicerad än — menyrad utöver flikarna (2026-10-22).**
+> Önskemål: "gör en menyrad också, inte enbart flikar". Flikarna kräver att
+> man letar; menyraden ger samma funktioner på ett ställe och visar
+> genvägarna direkt i etiketten.
+> (a) Fyra menyer: **Arkiv** (lägg till/ta bort inmapp, Sortera nu, Bevaka
+> mapparna som kryssruta, Öppna utmappen, Öppna loggmappen, Avsluta),
+> **Inställningar** (autostart, ikon i systemfältet, minimera till
+> systemfältet, krysset, Ljust/Mörkt tema, Alla inställningar…),
+> **Visa** (genväg till varje flik, Skapa genväg, Spara appikonen) och
+> **Hjälp** (Användarhjälp, Kopiera AI-rapport, diagnostik, Sök
+> uppdateringar, Om).
+> (b) Innehållet är data: `meny_spec()` returnerar posterna, så testet kan
+> granska dem utan Tk och upptäcka en post som pekar på en metod som inte
+> finns. `_meny_atgard()` gör om en post till en klickfunktion; saknas
+> metoden loggas det i stället för att krascha.
+> (c) Genvägar: Ctrl på Windows/Linux, Command på macOS. `accelerator` i en
+> Tk-meny är bara en etikett - därför binder `_bind_meny_snabb()` varje
+> tangent på rotfönstret (inte `bind_all`, så en dialog behåller sina
+> tangenter). Utan Shift binds gemener, med Shift versaler, eftersom Tk
+> annars inte matchar tangenten på alla plattformar.
+> (d) En bock i menyn sparas direkt (`_meny_kryss`): `tray_enabled`,
+> `minimize_to_tray` och `close_to_tray`, och systemfältsikonen slås
+> på/av utan omstart. Bevakningens kryssruta följer den verkliga
+> bevakningen via `_sync_meny()`.
+> (e) En trasig menyrad får aldrig hindra appen från att starta
+> (undantaget loggas med `session_error("meny", …)`).
+> (f) 28 tester i tests/test_menubar.py, inklusive ett test som bygger hela
+> menyraden med Tk-attrapper och klickar igenom varje post. Ingen Tk
+> behövs, så de går i CI på alla tre OS. Versionen är INTE höjd och ingen
+> release är publicerad.
+>
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
 > bara till `stderr`, som inte finns när appen startar med `pythonw`, och
