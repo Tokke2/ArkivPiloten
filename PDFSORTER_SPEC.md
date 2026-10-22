@@ -52,6 +52,26 @@
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
 >
+> **Ej publicerad än — inställningsfliken går att rulla (2026-10-21).**
+> Rapporterat: "ser inte att jag kan ställa in autostart av appen".
+> Kryssrutan fanns - "Starta automatiskt med datorn" i kortet "Start och
+> systemfält" - men det kortet är det SJÄTTE på fliken Inställningar, och
+> fliken var en vanlig Frame utan rullning. Allt under fönsterkanten gick
+> alltså inte att nå, varken autostarten eller uppdateringsvalen.
+> (a) `_scrollable_tab()` lägger flikens innehåll i en canvas med
+> rullningslist som bara visas när innehållet är högre än fönstret.
+> (b) Mushjulet rullar fliken via en enda bindning på rotfönstret;
+> `_widget_scrolls_itself()` ser till att en lista, ett textfält eller en
+> rullgardin aldrig flyttar hela fliken i stället. Bindningen läggs till
+> en gång (`_bind_tab_wheel`) - annars rullar det dubbelt - och kopplas
+> tillbaka av `_reinstall_tab_wheel()` efter en dialog, eftersom
+> granskningsdialogens `unbind_all` tar bort även flikens bindning.
+> (c) 15 tester i tests/test_scrollable_settings.py, bl.a. AST-kontroll
+> av att korten byggs i den rullbara ramen och att autostart-kortet
+> ligger där. Ingen Tk behövs, så de går i CI på alla tre OS.
+> Versionen är INTE höjd och ingen release är publicerad - det görs först
+> på begäran.
+>
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
 > bara till `stderr`, som inte finns när appen startar med `pythonw`, och

@@ -2897,6 +2897,99 @@ def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None
 _FIELD_CLASSES = {"TCombobox", "TSpinbox", "TEntry", "Entry",
                   "Spinbox", "Text"}
 
+#: Widgets som rullar sig SJÄLVA. När mushjulet är över en sådan ska
+#: fliken inte rulla - då skulle listan hoppa undan i stället för att
+#: rulla, och i en rullgardin skulle hjulet byta värde.
+_SELF_SCROLLING = {"Listbox", "Text", "Treeview", "TCombobox", "TSpinbox",
+                   "TEntry", "Entry", "Spinbox", "Canvas"}
+
+
+def _widget_scrolls_itself(widget) -> bool:
+    """Rullar widgeten (eller en förälder) sig själv?
+
+    Går uppåt i widgetträdet: en etikett inne i en Listbox har klassen
+    TLabel, men det är listan som ska rulla. Utan den här kontrollen
+    rullade hela inställningsfliken när man försökte rulla i en lista.
+    """
+    while widget is not None:
+        try:
+            klass = widget.winfo_class()
+        except Exception:
+            return False
+        if klass in _SELF_SCROLLING:
+            return True
+        widget = getattr(widget, "master", None)
+    return False
+
+
+def _wheel_steps(event) -> int:
+    """Mushjulets riktning som antal steg (+1 ned, -1 upp).
+
+    macOS rapporterar ibland ±1 per hack och Windows ±120 - därför bara
+    tecknet, aldrig storleken. X11 använder Button-4/5 utan delta.
+    """
+    try:
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta:
+            return -1 if delta > 0 else 1
+        num = getattr(event, "num", 0)
+        if num == 4:
+            return -1
+        if num == 5:
+            return 1
+        return 0
+    except Exception:
+        return 0
+
+
+#: Appen som äger de rullbara flikarna. En ENDA bindning på "all" räcker,
+#: och den får bara läggas till en gång per rotfönster - annars rullar
+#: fliken dubbelt så långt för varje gång bindningen lagts till.
+_TAB_WHEEL_APP = None
+
+
+def _tab_wheel(event):
+    """Mushjul: rulla den flik pekaren står över (annars ingenting)."""
+    app = _TAB_WHEEL_APP
+    if app is None:
+        return ""
+    return app._tab_wheel_scroll(event)
+
+
+def _bind_tab_wheel(root) -> None:
+    """Lägg mushjulsbindningen på rotfönstret - en gång."""
+    if root is None or getattr(root, "_tab_wheel_bound", False):
+        return
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        try:
+            root.bind_all(seq, _tab_wheel, add="+")
+        except Exception:
+            return
+    try:
+        root._tab_wheel_bound = True
+    except Exception:
+        pass
+
+
+def _reinstall_tab_wheel() -> None:
+    """Koppla tillbaka flikens mushjul efter att en dialog stängt sig.
+
+    Granskningsdialogen avregistrerar alla "all"-bindningar när den stängs
+    (``unbind_all`` tar även våra), så utan det här slutar rullningen
+    fungera så fort man svarat på en fråga.
+    """
+    app = _TAB_WHEEL_APP
+    if app is None:
+        return
+    root = getattr(app, "root", None)
+    if root is None:
+        return
+    try:
+        root._tab_wheel_bound = False
+    except Exception:
+        return
+    _bind_tab_wheel(root)
+
 
 def _dialog_wheel(inner_canvas, outer_canvas, is_inner, event):
     """Mushjul i granskningsdialogen (ANVÄNDARORDER 2026-08-26):
@@ -3673,6 +3766,7 @@ class ReviewDialog:
                 self._canvas.unbind_all(seq)
             except Exception:
                 pass
+        _reinstall_tab_wheel()
         try:
             self.win.grab_release()
         except Exception:
@@ -4141,6 +4235,8 @@ class App:
 
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(fill="both", expand=True, padx=12, pady=(10, 0))
+        #: (canvas, namn) för varje rullbar flik - mushjulet letar här.
+        self._scroll_canvases: List[Any] = []
         self.tab_sort = ttk.Frame(self.nb)
         self.tab_opts = ttk.Frame(self.nb)
         self.tab_cats = ttk.Frame(self.nb)
@@ -4162,6 +4258,8 @@ class App:
         self._build_hist_tab()
         self._build_json_tab()
         self._build_help_tab()
+        # Efter alla flikar: mushjulet ska rulla inställningarna.
+        self._install_tab_wheel()
 
         status_line = status_text()
         if not SYSTEM_MODULE:
@@ -4337,6 +4435,95 @@ class App:
     # ======================================================================
     # Flik 1 - Sortera
     # ======================================================================
+    def _scrollable_tab(self, parent, namn: str = ""):
+        """Gör en flik rullbar och returnera den inre ramen.
+
+        Flikarna växer på höjden (inställningarna har sex kort), medan
+        fönstret har en fast höjd. Utan rullning hamnade de nedersta
+        korten - bl.a. "Starta automatiskt med datorn" - utanför fönstret
+        och gick inte att nå alls. Här läggs innehållet i en canvas med
+        rullningslist; korten gridas som vanligt i den inre ramen.
+        """
+        tk, ttk = self.tk, self.ttk
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(parent, highlightthickness=0, borderwidth=0,
+                           background=self.C["bg"])
+        rull = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=rull.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        rull.grid(row=0, column=1, sticky="ns")
+
+        inre = ttk.Frame(canvas, style="TFrame")
+        inre.columnconfigure(0, weight=1)
+        fönster = canvas.create_window((0, 0), window=inre, anchor="nw")
+        inre.bind("<Configure>",
+                  lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(fönster, width=e.width))
+
+        # Rullningslisten visas bara när det finns något att rulla till.
+        def _uppdatera(_e=None):
+            try:
+                behövs = inre.winfo_reqheight() > canvas.winfo_height()
+            except Exception:
+                return
+            if behövs:
+                rull.grid()
+            else:
+                rull.grid_remove()
+
+        canvas.bind("<Configure>", lambda e: (canvas.itemconfigure(
+            fönster, width=e.width), _uppdatera()), add="+")
+        inre.bind("<Configure>", lambda e: _uppdatera(), add="+")
+
+        self._scroll_canvases.append((canvas, namn))
+        return inre
+
+    def _install_tab_wheel(self) -> None:
+        """Gör inställningsflikarna rullbara med mushjulet."""
+        global _TAB_WHEEL_APP
+        _TAB_WHEEL_APP = self
+        _bind_tab_wheel(getattr(self, "root", None))
+
+    def _tab_wheel_scroll(self, event) -> str:
+        """Rulla den rullbara flik som pekaren står över.
+
+        Returnerar "break" när vi rullar, annars "" så att widgeten under
+        pekaren får sköta saken själv (en lista eller ett inmatningsfält
+        ska aldrig flytta hela fliken).
+        """
+        try:
+            w = self.root.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            return ""
+        if w is None:
+            return ""
+        for canvas, _namn in getattr(self, "_scroll_canvases", []):
+            if not self._widget_in_canvas(w, canvas):
+                continue
+            if _widget_scrolls_itself(w):
+                return ""
+            steg = _wheel_steps(event)
+            if not steg:
+                return ""
+            try:
+                canvas.yview_scroll(steg * 3, "units")
+            except Exception:
+                return ""
+            return "break"
+        return ""
+
+    @staticmethod
+    def _widget_in_canvas(widget, canvas) -> bool:
+        """Ligger widgeten (eller någon av dess föräldrar) i canvasen?"""
+        while widget is not None:
+            if widget is canvas:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
     def _build_sort_tab(self) -> None:
         """Den dagliga vyn: mappar, en stor knapp och loggen."""
         tk, ttk = self.tk, self.ttk
@@ -4346,8 +4533,10 @@ class App:
         f.columnconfigure(0, weight=1)
         f.rowconfigure(2, weight=1)
 
-        g = self.tab_opts          # tunga inställningar bor på egen flik
-        g.columnconfigure(0, weight=1)
+        # Tunga inställningar bor på egen flik - och den måste gå att
+        # rulla, annars hamnar de nedersta korten (autostart, systemfält,
+        # uppdateringar) utanför fönstret och går inte att nå.
+        g = self._scrollable_tab(self.tab_opts, "inställningar")
 
         # -- rad 1: mapparna sida vid sida --------------------------------
         top = ttk.Frame(f)
@@ -8093,6 +8282,8 @@ class App:
             self.hide_window("krysset - close_to_tray är påslaget")
             return
         self._close_open_review()
+        global _TAB_WHEEL_APP
+        _TAB_WHEEL_APP = None
         self._h("avslut", "Appen avslutas: inställningar samlas, bevakning "
                 "stoppas, regler och historik sparas")
         try:
