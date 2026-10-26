@@ -4585,8 +4585,9 @@ class App:
         if not SYSTEM_MODULE:
             status_line += "  |  pdfsorter_system.py saknas"
         self.status = ttk.Label(self.root, text=status_line, style="Status.TLabel",
-                                anchor="w")
+                                anchor="w", takefocus=True)
         self.status.pack(fill="x", side="bottom")
+        self._install_keyboard_navigation()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Unmap>", self._on_unmap)
@@ -4847,6 +4848,122 @@ class App:
             self._ui(f"Menyn: fliken {namn}")
         except Exception as exc:
             self._fel(exc, "meny")
+
+    def _install_keyboard_navigation(self) -> None:
+        """Genvägar för flikar, dialoger och områdesvis fokusförflyttning."""
+        for sequence, delta in (("<Control-Tab>", 1),
+                                ("<Control-Shift-Tab>", -1),
+                                ("<Control-ISO_Left_Tab>", -1)):
+            self.root.bind(sequence,
+                           lambda event, step=delta:
+                           self._keyboard_tab_step(step), add="+")
+        for index in range(1, len(self.nb.tabs()) + 1):
+            self.root.bind(
+                f"<Control-Key-{index}>",
+                lambda event, i=index: self._keyboard_tab_number(i), add="+")
+        self.root.bind("<F6>",
+                       lambda event: self._keyboard_focus_step(1), add="+")
+        self.root.bind("<Shift-F6>",
+                       lambda event: self._keyboard_focus_step(-1), add="+")
+        # Widget/dialogspecifika Escape-bindningar (t.ex. återställning av
+        # en sök-combobox eller Hoppa över i granskningen) får företräde.
+        # Annars stänger Escape det aktuella Toplevel-fönstret men aldrig appen.
+        self.root.bind_all("<Escape>", self._keyboard_escape, add="+")
+
+    def _keyboard_tab_step(self, delta: int):
+        """Byt till nästa/föregående flik i den synliga ordningen."""
+        try:
+            tabs = self.nb.tabs()
+            if not tabs:
+                return "break"
+            current = tabs.index(self.nb.select()) if self.nb.select() in tabs else 0
+            self.nb.select(tabs[(current + delta) % len(tabs)])
+            return "break"
+        except Exception as exc:
+            self._fel(exc, "tangentbord")
+            return "break"
+
+    def _keyboard_tab_number(self, number: int):
+        """Ctrl+1…7 väljer flikens nuvarande position."""
+        try:
+            tabs = self.nb.tabs()
+            if 1 <= number <= len(tabs):
+                self.nb.select(tabs[number - 1])
+            return "break"
+        except Exception as exc:
+            self._fel(exc, "tangentbord")
+            return "break"
+
+    def _keyboard_escape(self, event=None):
+        """Stäng fokuserad dialog, aldrig huvudfönstret."""
+        try:
+            focused = self.root.focus_get()
+            if focused is None:
+                return None
+            top = focused.winfo_toplevel()
+            if top == self.root:
+                return None
+            if top.winfo_exists():
+                top.destroy()
+                return "break"
+        except Exception:
+            # Dialogen kan ha stängts av en annan bindning under samma event.
+            return None
+        return None
+
+    def _keyboard_focus_step(self, delta: int):
+        """F6 cyklar mellan flikväljaren, flikinnehållet och statusraden."""
+        try:
+            tabs = self.nb.tabs()
+            if not tabs:
+                return "break"
+            selected = self.nb.select()
+            page = self.root.nametowidget(selected) if selected else self.tab_sort
+            focused = self.root.focus_get()
+            focus_path = str(focused) if focused is not None else ""
+            page_path = str(page)
+            status_path = str(self.status)
+            if focus_path == status_path:
+                region = 2
+            elif focus_path == str(self.nb):
+                region = 0
+            elif focus_path == page_path or focus_path.startswith(page_path + "."):
+                region = 1
+            else:
+                region = 0 if delta > 0 else 2
+
+            target = (region + delta) % 3
+            if target == 0:
+                self.nb.focus_set()
+            elif target == 1:
+                candidate = self._keyboard_first_focusable(page)
+                (candidate or self.nb).focus_set()
+            else:
+                self.status.focus_set()
+            return "break"
+        except Exception as exc:
+            self._fel(exc, "tangentbord")
+            return "break"
+
+    def _keyboard_first_focusable(self, parent):
+        """Hitta första synliga, aktiverade fokusmålet i vald flik."""
+        try:
+            for child in parent.winfo_children():
+                if not child.winfo_ismapped():
+                    continue
+                try:
+                    if str(child.cget("takefocus")) not in ("", "0", "false"):
+                        state = str(child.cget("state"))
+                        if state != "disabled":
+                            return child
+                except Exception:
+                    pass
+                nested = self._keyboard_first_focusable(child)
+                if nested is not None:
+                    return nested
+        except Exception:
+            return None
+        return None
 
     def _meny_kryss(self, nyckel: str, var_namn: str) -> None:
         """Spara och verkställ en bockad menypost direkt (ingen omstart)."""

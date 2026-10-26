@@ -142,6 +142,24 @@
 > väntar, och att låset släpps före start. Versionen är INTE höjd och
 > ingen release är publicerad.
 >
+> **Ej publicerad än — tangentbordsnavigering i hela appen (2026-10-26).**
+> Önskemål: mindre beroende av musen och snabbare förflyttning mellan flikar
+> och kontrollområden.
+> (a) `Ctrl+Tab` / `Ctrl+Shift+Tab` byter flik framåt/bakåt och slår runt
+> vid första/sista fliken. `Ctrl+1…7` väljer fliken efter dess nuvarande
+> ordning (Sortera, Matchningar, Inställningar, Granska, Historik, JSON,
+> Hjälp); ogiltiga index gör inget.
+> (b) `F6` och `Shift+F6` cyklar mellan flikväljaren, första synliga och
+> aktiverade fokusmålet i den valda fliken, och statusraden. Statusraden
+> är därmed också tangentbordsfokuserbar.
+> (c) `Escape` stänger fokuserad dialog, men stänger aldrig huvudfönstret.
+> Dialogens egen Escape-funktion får företräde (t.ex. återställning av
+> sökfält eller Hoppa över i granskningen).
+> (d) 9 tester i `tests/test_keyboard_navigation.py` täcker bindningar,
+> flikväxling, Escape-säkerhet, fokuscykeln och att dolda/inaktiva kontroller
+> hoppas över. Ingen Tk-session behövs. Versionen är INTE höjd och ingen
+> release är publicerad.
+>
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
 > bara till `stderr`, som inte finns när appen startar med `pythonw`, och
