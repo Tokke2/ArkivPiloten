@@ -80,7 +80,7 @@ import time
 import unicodedata
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta  # noqa: F401
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -4283,8 +4283,174 @@ def meny_snabb_tangent(snabb: str, plattform: str = "") -> str:
     return f"<{prefix}-{tang}>" if prefix else f"<{tang}>"
 
 
+# ========================================================================
+# VERSIONSPAKTEN - tyst sökning två gånger per dygn och tyst omstart
+# ========================================================================
+#: Hur många gånger per dygn appen letar efter en ny version (tyst).
+UPPDATERING_PER_DYGN = 2
+#: Kortaste tid mellan två sökningar - taket är "var 15:e minut".
+_UPPDATERING_TAK_PER_DYGN = 96
+#: Misslyckades sökningen (nätet svek) försöker appen igen så här snabbt
+#: i stället för att vänta ett halvt dygn.
+UPPDATERING_OMFORSOK_SEKUNDER = 30 * 60
+#: Hur ofta vakten väcker sig för att se om det är dags (Tk-timer).
+UPPDATERING_VAKT_SEKUNDER = 60
+
+
+def uppdateringar_per_dygn(settings: Dict[str, Any]) -> int:
+    """Inställningens antal sökningar per dygn, hållbart avgränsat (1-96)."""
+    rått = settings.get("update_checks_per_day")
+    if rått in (None, ""):              # inte angivet alls
+        rått = UPPDATERING_PER_DYGN
+    try:
+        n = int(rått)
+    except (TypeError, ValueError):
+        n = UPPDATERING_PER_DYGN
+    return max(1, min(n, _UPPDATERING_TAK_PER_DYGN))
+
+
+def uppdaterings_intervall(per_dygn: int = UPPDATERING_PER_DYGN) -> float:
+    """Sekunder mellan två sökningar - 2 per dygn ger 12 timmar."""
+    n = max(1, min(int(per_dygn or 1), _UPPDATERING_TAK_PER_DYGN))
+    return 86400.0 / n
+
+
+def _iso_tid(text: Any) -> Optional[datetime]:
+    """Läs en ISO-tid från inställningarna (None om den är tom eller trasig)."""
+    text = str(text or "").strip()
+    if not text:
+        return None
+    try:
+        tid = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if tid.tzinfo is not None:          # sparad i en annan tidszon
+        tid = tid.astimezone().replace(tzinfo=None)
+    return tid
+
+
+def _intervall(last: str, per_dygn: int, forra_lyckades: bool) -> float:
+    intervall = uppdaterings_intervall(per_dygn)
+    if not forra_lyckades:
+        intervall = min(intervall, float(UPPDATERING_OMFORSOK_SEKUNDER))
+    return intervall
+
+
+def uppdaterings_dags(last: str, per_dygn: int = UPPDATERING_PER_DYGN,
+                      forra_lyckades: bool = True,
+                      nu: Optional[datetime] = None) -> bool:
+    """Är det dags för nästa tysta sökning?
+
+    Tiden sparas i inställningarna, så antalet gäller över omstarter: en
+    app som startas tio gånger om dagen frågar inte GitHub tio gånger.
+    """
+    sen = _iso_tid(last)
+    if sen is None:                     # aldrig sökt (eller trasig tid)
+        return True
+    kvar = _intervall(last, per_dygn, forra_lyckades) - \
+        ((nu or datetime.now()) - sen).total_seconds()
+    return kvar <= 0
+
+
+def uppdaterings_nasta_text(last: str, per_dygn: int = UPPDATERING_PER_DYGN,
+                            forra_lyckades: bool = True,
+                            nu: Optional[datetime] = None) -> str:
+    """Kort text om när nästa sökning sker: "om 3 t 12 min" eller "nu"."""
+    sen = _iso_tid(last)
+    if sen is None:
+        return "nu"
+    kvar = int(_intervall(last, per_dygn, forra_lyckades)
+               - ((nu or datetime.now()) - sen).total_seconds())
+    if kvar <= 0:
+        return "nu"
+    minuter = max(1, kvar // 60)
+    tim, min_ = divmod(minuter, 60)
+    if tim and min_:
+        return f"om {tim} t {min_} min"
+    return f"om {tim} t" if tim else f"om {minuter} min"
+
+
+def tid_kort(iso: str, nu: Optional[datetime] = None) -> str:
+    """Läsbar tid: "i dag 09:12", "i går 21:03" eller datum."""
+    tid = _iso_tid(iso)
+    if tid is None:
+        return "aldrig"
+    nu = nu or datetime.now()
+    dagar = (nu.date() - tid.date()).days
+    if dagar == 0:
+        return f"i dag {tid:%H:%M}"
+    if dagar == 1:
+        return f"i går {tid:%H:%M}"
+    return f"{tid:%Y-%m-%d %H:%M}"
+
+
+def uppdateringsplan(info: Dict[str, Any], manual: bool,
+                     settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Vad ett svar från GitHub ska leda till - utan Tk-dialoger.
+
+    ``steg``:
+      fel      - sökningen misslyckades
+      aktuell  - ingen nyare version
+      osaker   - nyare version, men paketet kan inte verifieras
+      erbjudande - ny version finns, men användaren har valt att
+                   godkänna själv: notis + logg, ingen dialog
+      fraga    - fråga användaren innan installation (manuell sökning)
+      installera - installera utan frågor (tyst)
+    ``tyst``    - sökningen/installationen sker utan dialoger
+    ``omstart``  - "tyst", "fraga" eller "ingen"
+    """
+    tyst = not manual
+    omstart = "tyst" if settings.get("silent_restart", True) else "fraga"
+    if not info.get("ok"):
+        return {"steg": "fel", "tyst": tyst, "omstart": "ingen"}
+    if not info.get("available"):
+        return {"steg": "aktuell", "tyst": tyst, "omstart": "ingen"}
+    if not (info.get("sha256_url") or info.get("sha256")):
+        return {"steg": "osaker", "tyst": tyst, "omstart": "ingen"}
+    if bool(settings.get("auto_update", False)) and not manual:
+        return {"steg": "installera", "tyst": True, "omstart": omstart}
+    if not manual:
+        # Automatisk sökning med autouppdatering av: ingen dialog klockan
+        # tre på natten - en notis i systemfältet och en rad i loggen.
+        return {"steg": "erbjudande", "tyst": True, "omstart": omstart}
+    return {"steg": "fraga", "tyst": False, "omstart": omstart}
+
+
+def omstart_kommando(rot: Path, exe: str = "", plattform: str = "",
+                     dold: bool = False, bevaka_igen: bool = False) -> List[str]:
+    """Kommandot som startar om appen efter en uppdatering.
+
+    ``dold`` startar det nya fönstret i systemfältet (appen låg där när
+    uppdateringen kom), ``bevaka_igen`` slår på bevakningen direkt, så att
+    en pågående bevakning inte tystnar av omstarten. På Windows väljs
+    pythonw.exe när det finns - en tyst omstart ska inte blinka till med
+    en svart konsol.
+    """
+    rot = Path(rot)
+    plattform = plattform or sys.platform
+    exe = exe or sys.executable or "python3"
+    start = exe
+    if plattform.startswith("win"):
+        kandidat = Path(exe).with_name("pythonw.exe")
+        if kandidat.is_file():
+            start = str(kandidat)
+        skript = rot / "pdfsorter.pyw"
+        if not skript.is_file():
+            skript = rot / "pdfsorter.py"
+    else:
+        skript = rot / "pdfsorter.py"
+    cmd = [start, str(skript)]
+    if dold:
+        cmd.append("--tray")
+    if bevaka_igen:
+        cmd.append("--resume-watch")
+    return cmd
+
+
 class App:
-    def __init__(self, start_hidden: bool = False) -> None:
+    def __init__(self, start_hidden: bool = False,
+                 instanslås: Optional[Any] = None,
+                 resume_watch: bool = False) -> None:
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk, self.ttk = tk, ttk
         self.filedialog, self.messagebox, self.simpledialog = filedialog, messagebox, simpledialog
@@ -4336,6 +4502,18 @@ class App:
         # TrayIcon är en variabel (klassen eller None-reserven), vilket en
         # typkontrollant inte accepterar i typuttryck - därför Any här.
         self.tray: Optional[Any] = None
+        #: Instanslåset ägs av main() men måste kunna släppas här: vid en
+        #: omstart startas den nya processen innan den här hunnit avslutas,
+        #: och utan släppt lås skulle den bara be den döende processen visa
+        #: fönstret och sedan avsluta sig själv.
+        self.instanslås = instanslås
+        #: Startad av omstarten efter en uppdatering: bevakningen ska igång
+        #: igen, annars tystnar den av en uppdatering mitt i natten.
+        self._resume_watch = bool(resume_watch)
+        #: Vakten för tyst versionssökning (startas en gång).
+        self._uppdateringsvakt = False
+        #: En omstart väntar på att appen blir ledig.
+        self._omstart_vantar = False
         self.visible = True
         self._quitting = False
         self._rescanning = False
@@ -4451,11 +4629,10 @@ class App:
         except Exception as exc:
             session_error("autostart", exc)
 
-        # Uppdatering från Git (2026-10-16): sök tyst vid start om
-        # inställningen är på - fråga alltid före installation om inte
-        # auto_update valts uttryckligen.
-        if self.settings.get("check_updates", True):
-            self.root.after(5000, lambda: self._check_updates_gui(manual=False))
+        # Ny version (2026-10-26): sök tyst två gånger per dygn, inte vid
+        # varje start. Tiden sparas i inställningarna, så en app som startas
+        # ofta frågar GitHub lika sällan ändå.
+        self._starta_uppdateringsvakt()
 
         # Systemfältsikon. TrayIcon är None när systemmodulen saknas
         # (REQ-A2) - då ska appen starta ändå, utan ikon.
@@ -4481,8 +4658,13 @@ class App:
                     f"(inställning tray_enabled={self.settings.get('tray_enabled', True)}, "
                     f"modul tillgänglig={TrayIcon is not None})")
 
-        # Starta bevakning direkt
+        # Starta bevakning direkt (även efter en omstart efter uppdatering -
+        # den som bevakade mapparna ska inte tappa bevakningen i natten).
         if self.settings.get("autowatch_on_start", False):
+            self.root.after(400, lambda: self._start_watch(quiet=True))
+        elif self._resume_watch:
+            self._h("bevaka", "Bevakningen återupptas efter omstarten "
+                    "(den var på när appen uppdaterades)")
             self.root.after(400, lambda: self._start_watch(quiet=True))
 
         # Vid start: installera saknade Python-tillägg automatiskt med
@@ -4732,6 +4914,18 @@ class App:
         rader.append("")
         rader.append(f"Uppdateringar: enbart GitHub Releases "
                      f"({_sys_mod.UPDATE_REPO})")
+        inst = getattr(self, "settings", None) or {}
+        if inst.get("check_updates", True):
+            per_dygn = uppdateringar_per_dygn(inst)
+            nasta = uppdaterings_nasta_text(
+                inst.get("last_update_check", ""), per_dygn=per_dygn,
+                forra_lyckades=bool(inst.get("last_update_check_ok", True)))
+            rader.append(f"  Automatisk sökning: {per_dygn} ggr/dygn "
+                         f"(tyst), nästa {nasta}")
+            rader.append("  Tyst omstart vid uppdatering: "
+                         + ("på" if inst.get("silent_restart", True) else "av"))
+        else:
+            rader.append("  Automatisk sökning: avstängd")
         rader.append(f"Inställningar och data: {config_dir()}")
         rader.append(f"Loggar: {session_dir()}")
         rader.append("")
@@ -5310,8 +5504,6 @@ class App:
             value=self.settings.get("minimize_to_tray", False))
         self.var_autowatch = tk.BooleanVar(value=self.settings.get("autowatch_on_start", False))
         self.var_notify = tk.BooleanVar(value=self.settings.get("notify", True))
-        self.var_checkupd = tk.BooleanVar(value=self.settings.get("check_updates", True))
-        self.var_autoupd = tk.BooleanVar(value=self.settings.get("auto_update", False))
 
         cb_auto = ttk.Checkbutton(sysbox, text="Starta automatiskt med datorn",
                                   style="Card.TCheckbutton",
@@ -5340,14 +5532,9 @@ class App:
                         style="Card.TCheckbutton",
                         variable=self.var_notify).grid(row=2, column=2, columnspan=2,
                                                        sticky="w", padx=8, pady=2)
-        ttk.Checkbutton(sysbox, text="Sök uppdateringar på GitHub vid start",
-                        style="Card.TCheckbutton",
-                        variable=self.var_checkupd).grid(row=3, column=0, columnspan=2,
-                                                         sticky="w", padx=8, pady=2)
-        ttk.Checkbutton(sysbox, text="Installera uppdateringar automatiskt",
-                        style="Card.TCheckbutton",
-                        variable=self.var_autoupd).grid(row=3, column=2, columnspan=2,
-                                                        sticky="w", padx=8, pady=2)
+        # Uppdateringarna har ett eget kort längre ned (2026-10-26).
+        # Kryssrutorna låg här förut, men de hörde inte ihop med
+        # autostart och systemfält - och de syntes bara om man rullade.
 
         # Minimering är en egen sak, skild från krysset. Standard är att
         # fönstret stannar i aktivitetsfältet - ingen ska tappa fönstret.
@@ -5426,6 +5613,46 @@ class App:
         ttk.Checkbutton(rad6, text="Slå upp okända avsändare via nätet (org.nr)",
                         style="Card.TCheckbutton",
                         variable=self.var_orglookup).pack(side="left")
+        # -- uppdateringar (2026-10-26) --
+        # Eget kort: två tysta sökningar per dygn och tyst omstart är
+        # inställningar man vill hitta, inte snubbla över.
+        updcard = T.card(g, "Uppdateringar")
+        updcard.grid(row=6, column=0, sticky="ew", padx=T.PAD,
+                     pady=(T.GAP, T.PAD))
+        updb = updcard.body
+        for c in range(4):
+            updb.columnconfigure(c, weight=1)
+        self.var_checkupd = tk.BooleanVar(
+            value=self.settings.get("check_updates", True))
+        self.var_autoupd = tk.BooleanVar(
+            value=self.settings.get("auto_update", True))
+        self.var_tystomstart = tk.BooleanVar(
+            value=self.settings.get("silent_restart", True))
+        ttk.Checkbutton(updb, text="Sök efter ny version automatiskt (tyst)",
+                        style="Card.TCheckbutton",
+                        variable=self.var_checkupd,
+                        command=self._refresh_update_status).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
+        ttk.Checkbutton(updb,
+                        text="Installera automatiskt när paketet är verifierat",
+                        style="Card.TCheckbutton",
+                        variable=self.var_autoupd).grid(
+            row=0, column=2, columnspan=2, sticky="w", padx=8, pady=(6, 2))
+        ttk.Checkbutton(updb,
+                        text="Starta om tyst när en ny version installerats",
+                        style="Card.TCheckbutton",
+                        variable=self.var_tystomstart).grid(
+            row=1, column=0, columnspan=4, sticky="w", padx=8, pady=2)
+        updrad = ttk.Frame(updb, style="CardInner.TFrame")
+        updrad.grid(row=2, column=0, columnspan=4, sticky="ew",
+                    padx=8, pady=(2, 6))
+        ttk.Button(updrad, text="Sök nu",
+                   command=lambda: self._check_updates_gui(manual=True)).pack(
+            side="right")
+        self.lbl_uppdatering = ttk.Label(
+            updrad, text=self._uppdatering_status_text(),
+            style="CardMuted.TLabel")
+        self.lbl_uppdatering.pack(side="left", padx=(0, 8))
         self._update_pills()
 
     def _update_stats(self, sorted_n: Optional[int] = None,
@@ -5859,6 +6086,7 @@ class App:
             "autostart": bool(self.var_autostart.get()),
             "check_updates": bool(self.var_checkupd.get()),
             "auto_update": bool(self.var_autoupd.get()),
+            "silent_restart": bool(self.var_tystomstart.get()),
         })
         if hasattr(self, "var_lang"):
             self.settings.update({
@@ -5883,6 +6111,7 @@ class App:
             TEXT_CACHE.clear()
         save_settings(self.settings)
         self._update_pills()
+        self._refresh_update_status()
         session_log("inställningar",
                     f"Sparade: strikthet={self.settings.get('strictness')}, "
                     f"min_keywords={self.settings.get('min_keywords')}, "
@@ -7826,23 +8055,120 @@ class App:
             pass
         return ""
 
+    # -- tyst versionsvakt (2 ggr/dygn) -----------------------------------
+    def _starta_uppdateringsvakt(self) -> None:
+        """Starta den tysta versionsvakten en gång per programkörning."""
+        if self._uppdateringsvakt:
+            return
+        self._uppdateringsvakt = True
+        # Första kontrollen strax efter start - men bara om det är dags.
+        try:
+            self.root.after(5000, self._uppdateringsvakt_tick)
+        except Exception:
+            pass
+
+    def _uppdateringsvakt_tick(self) -> None:
+        """Vaknar varje minut och söker bara när det är dags.
+
+        Tyst: ingen dialog, ingen statusrad - bara en rad i sessionsloggen.
+        """
+        try:
+            if (self.settings.get("check_updates", True)
+                    and self._uppdatering_dags()):
+                self._check_updates_gui(manual=False)
+        except Exception as exc:
+            session_error("uppdatering", exc)
+        finally:
+            try:
+                self.root.after(UPPDATERING_VAKT_SEKUNDER * 1000,
+                                self._uppdateringsvakt_tick)
+            except Exception:
+                pass
+
+    def _uppdatering_dags(self) -> bool:
+        """Är det dags för nästa tysta sökning (2 ggr/dygn)?"""
+        return uppdaterings_dags(
+            self.settings.get("last_update_check", ""),
+            per_dygn=uppdateringar_per_dygn(self.settings),
+            forra_lyckades=bool(self.settings.get("last_update_check_ok", True)))
+
+    def _uppdatering_nasta(self) -> str:
+        text = uppdaterings_nasta_text(
+            self.settings.get("last_update_check", ""),
+            per_dygn=uppdateringar_per_dygn(self.settings),
+            forra_lyckades=bool(self.settings.get("last_update_check_ok", True)))
+        return "nästa sökning nu" if text == "nu" else f"nästa sökning {text}"
+
     def _check_updates_gui(self, manual: bool = False) -> None:
-        """Sök uppdatering i bakgrunden (GitHub Releases först)."""
+        """Sök efter ny version i bakgrunden (enbart GitHub Releases).
+
+        ``manual`` är användarens egen knapp: då visas svaret i en dialog och
+        gränsen två gånger per dygn gäller inte. Den tysta sökningen sparar
+        alltid sin tid i inställningarna, så antalet gäller över omstarter.
+        """
+        if not manual and not self._uppdatering_dags():
+            self._h("uppdatering", "Tyst versionssökning hoppad - "
+                    f"{self._uppdatering_nasta()}")
+            return
+        self._h("uppdatering", "Söker efter ny version ("
+                + ("manuellt" if manual else "tyst, enligt schemat") + ")")
+
         def work():
             info = check_for_update()
             self.root.after(0, lambda: self._update_prompt(info, manual))
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=work, daemon=True,
+                         name="versionssok").start()
 
+    def _notera_uppdateringsforsok(self, info: dict) -> None:
+        """Kom ihåg när och hur sökningen gick - grunden för 2 ggr/dygn."""
+        try:
+            self.settings["last_update_check"] = datetime.now().isoformat(
+                timespec="seconds")
+            self.settings["last_update_check_ok"] = bool(info.get("ok"))
+            if info.get("remote"):
+                self.settings["last_update_seen"] = str(info["remote"])
+            save_settings(self.settings)
+        except Exception as exc:
+            self._h("uppdatering", f"Kunde inte spara söktiden: {exc}", "warn")
+        self._refresh_update_status()
+
+    def _uppdatering_status_text(self) -> str:
+        """Rad i inställningarna: när appen sökte och när den gör det igen."""
+        if not self.settings.get("check_updates", True):
+            return "Automatisk versionssökning är avstängd."
+        per_dygn = uppdateringar_per_dygn(self.settings)
+        lyckades = bool(self.settings.get("last_update_check_ok", True))
+        senast = self.settings.get("last_update_check", "")
+        nasta = uppdaterings_nasta_text(
+            senast, per_dygn=per_dygn, forra_lyckades=lyckades)
+        text = (f"Tyst sökning {per_dygn} ggr/dygn · senast "
+                f"{tid_kort(senast)} · nästa {nasta}")
+        if not lyckades:
+            text += " (förra försöket misslyckades)"
+        return text
+
+    def _refresh_update_status(self) -> None:
+        lbl = getattr(self, "lbl_uppdatering", None)
+        if lbl is None:
+            return
+        try:
+            lbl.configure(text=self._uppdatering_status_text())
+        except Exception:
+            pass
+
+    # -- uppdatering från Git (2026-10-16) ------------------------------
     def _update_prompt(self, info: dict, manual: bool) -> None:
-        if not info.get("ok"):
-            self._h("uppdatering", "Kunde inte söka uppdatering: "
-                    + str(info.get("error", "okänt fel")), "warn")
+        plan = uppdateringsplan(info, manual, self.settings)
+        self._notera_uppdateringsforsok(info)
+        steg = plan["steg"]
+        if steg == "fel":
+            fel = str(info.get("error", "okänt fel"))
+            self._h("uppdatering", "Kunde inte söka uppdatering: " + fel, "warn")
             if manual:
                 self.messagebox.showwarning(
-                    APP_NAME, "Kunde inte söka efter uppdateringar:\n"
-                    + str(info.get("error", "okänt fel")))
+                    APP_NAME, "Kunde inte söka efter uppdateringar:\n" + fel)
             return
-        if not info.get("available"):
+        if steg == "aktuell":
             self._h("uppdatering",
                     f"Ingen nyare version (kör {APP_VERSION}, "
                     f"GitHub: {info.get('remote')})")
@@ -7850,9 +8176,7 @@ class App:
                 self.messagebox.showinfo(
                     APP_NAME, f"Du har den senaste versionen ({APP_VERSION}).")
             return
-        kalla = "GitHub Releases"
-        verifierad = bool(info.get("sha256_url") or info.get("sha256"))
-        if not verifierad:
+        if steg == "osaker":
             self._h("uppdatering",
                     f"Releasen {info.get('remote')} saknar kontrollsumma - "
                     "uppdateringen kan inte verifieras", "warn")
@@ -7864,15 +8188,23 @@ class App:
                     "Appen installerar inte ett paket som inte kan "
                     "verifieras. Ladda ner den manuellt från releasesidan.")
             return
-        # Autouppdatering: installera tyst bara när paketet kan verifieras
-        # mot release-postens kontrollsumma. Utan kontrollsumma frågar vi.
-        tyst = (bool(self.settings.get("auto_update", False)) and not manual
-                and verifierad)
+        kalla = "GitHub Releases"
+        if steg == "erbjudande":
+            self._h("uppdatering",
+                    f"Ny version {info.get('remote')} finns (kör "
+                    f"{APP_VERSION}) - autouppdatering är avstängd, så "
+                    "appen installerar den inte själv", "ok")
+            self._notify(f"Ny version {info.get('remote')} finns. "
+                         "Hjälp → Sök efter uppdateringar installerar den.")
+            return
+        tyst = steg == "installera"
         if tyst:
             svar = True
             self._h("uppdatering",
-                    f"Autouppdatering: {info['remote']} hittad på {kalla} - "
+                    f"Tyst uppdatering: {info['remote']} hittad på {kalla} - "
                     "verifierar SHA-256 och installerar", "ok")
+            self._log(f"Ny version {info['remote']} hittad - installeras i "
+                      "bakgrunden.", "info")
         else:
             svar = self.messagebox.askyesno(
                 APP_NAME,
@@ -7880,7 +8212,7 @@ class App:
                 f"(du har {APP_VERSION}).\n\n"
                 f"Källa: {kalla}."
                 + ("\nPaketet verifieras med SHA-256 före installation."
-                   if verifierad else
+                   if info.get("sha256_url") else
                    "\nVarning: releasen saknar kontrollsumma.")
                 + "\n\nAppen uppdateras i sin egen mapp, dina "
                 "inställningar, regler och historik rörs inte. "
@@ -7893,37 +8225,154 @@ class App:
             ok, msg = perform_update()
             if ok:
                 update_python_packages()
+
             def done():
                 self._h("uppdatering", msg, "ok" if ok else "warn")
-                if ok:
-                    if self.messagebox.askyesno(
-                            APP_NAME, msg + "\n\nStarta om appen nu "
-                            "för att köra den nya versionen?"):
-                        self._restart_app()
-                else:
-                    self.messagebox.showwarning(APP_NAME, msg)
+                if not ok:
+                    if manual:
+                        self.messagebox.showwarning(APP_NAME, msg)
+                    else:
+                        self._log(f"Uppdateringen misslyckades: {msg}", "warn")
+                    return
+                self._log(msg, "ok")
+                if plan["omstart"] == "tyst":
+                    self._h("uppdatering",
+                            "Tyst omstart: den nya versionen börjar gälla nu",
+                            "ok")
+                    self._planera_omstart(tyst=True)
+                elif self.messagebox.askyesno(
+                        APP_NAME, msg + "\n\nStarta om appen nu "
+                        "för att köra den nya versionen?"):
+                    self._planera_omstart(tyst=False)
             self.root.after(0, done)
-        threading.Thread(target=install, daemon=True).start()
+        threading.Thread(target=install, daemon=True,
+                         name="uppdatering").start()
 
-    def _restart_app(self) -> None:
-        """Starta om appen efter uppdatering (samma startväg som vanligt)."""
+    # -- omstart ----------------------------------------------------------
+    def _kan_starta_om(self) -> Tuple[bool, str]:
+        """Får appen startas om nu utan att tappa något?"""
+        if self._quitting:
+            return False, "appen avslutas redan"
+        if self._busy:
+            return False, "en sortering pågår"
+        if self._review_is_open():
+            return False, "granskningsrutan är öppen"
+        if self.queue:
+            return False, f"{len(self.queue)} filer väntar på granskning"
+        return True, ""
+
+    def _planera_omstart(self, tyst: bool = True) -> None:
+        """Starta om nu, eller så snart appen är ledig.
+
+        En uppdatering får aldrig slita bort en pågående sortering eller en
+        granskningskö: då väntar omstarten och görs när arbetet är klart.
+        """
+        ok, orsak = self._kan_starta_om()
+        if ok:
+            self._restart_app(tyst=tyst)
+            return
+        if self._omstart_vantar:
+            return
+        self._omstart_vantar = True
+        self._h("uppdatering", f"Omstarten väntar: {orsak} - görs när appen "
+                "är ledig", "warn")
+        self._log(f"Den nya versionen är installerad, men appen är upptagen "
+                  f"({orsak}). Den startar om automatiskt när den är ledig - "
+                  "eller nästa gång du startar appen.", "info")
         try:
-            import subprocess as _sp
-            rot = Path(__file__).resolve().parent
-            pyw = rot / "pdfsorter.pyw"
-            exe = sys.executable or "python3"
-            if sys.platform.startswith("win") and pyw.is_file():
-                exe_w = Path(exe).with_name("pythonw.exe")
-                _sp.Popen([str(exe_w if exe_w.exists() else exe), str(pyw)],
-                          cwd=str(rot))
-            else:
-                _sp.Popen([exe, str(rot / "pdfsorter.py")], cwd=str(rot))
+            self.root.after(60000, self._omstart_nar_ledig)
         except Exception:
             pass
+
+    def _omstart_nar_ledig(self) -> None:
+        if not self._omstart_vantar:
+            return
+        ok, _orsak = self._kan_starta_om()
+        if ok:
+            self._omstart_vantar = False
+            self._restart_app(tyst=True)
+            return
+        try:
+            self.root.after(60000, self._omstart_nar_ledig)
+        except Exception:
+            pass
+
+    def _spara_fore_omstart(self) -> None:
+        """Spara det som annars bara finns i minnet när fönstret rivs."""
+        try:
+            self._collect_settings()
+        except Exception as exc:
+            session_error("uppdatering", exc)
+        try:
+            if self.watcher:
+                self.watcher.stop()
+            self.rules.save()
+            flush_history()
+        except Exception as exc:
+            session_error("uppdatering", exc)
+
+    def _restart_app(self, tyst: bool = False) -> bool:
+        """Starta om appen. ``tyst`` = inga frågor, ingen konsol, inget hopp.
+
+        Den nya processen startas innan den här stängs, och instanslåset
+        släpps först - annars skulle den nya instansen tro att appen redan
+        kör och bara be den döende processen visa fönstret.
+        """
+        dold = (not self.visible) or bool(
+            self.settings.get("start_minimized", False))
+        bevaka = bool(self.watcher and self.watcher.running)
+        rot = Path(__file__).resolve().parent
+        cmd = omstart_kommando(rot, sys.executable or "", dold=dold,
+                               bevaka_igen=bevaka)
+        self._spara_fore_omstart()
+        lås = self.instanslås
+        if lås is not None:
+            try:
+                lås.release()
+            except Exception:
+                pass
+        try:
+            popen_kw: Dict[str, Any] = {"cwd": str(rot)}
+            if sys.platform.startswith("win"):
+                popen_kw["creationflags"] = getattr(
+                    subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.Popen(cmd, **popen_kw)
+        except Exception as exc:
+            session_error("uppdatering", exc)
+            if lås is not None:                   # ta tillbaka låset
+                try:
+                    lås.acquire()
+                except Exception:
+                    pass
+            self._h("uppdatering", f"Kunde inte starta om appen: "
+                    f"{type(exc).__name__}: {exc} - den fortsätter som förut",
+                    "warn")
+            self._log("Omstarten gick inte att göra - appen fortsätter i den "
+                      "gamla versionen. Starta om den själv när det passar; "
+                      "den nya versionen ligger redan på plats.", "warn")
+            return False
+        self._h("uppdatering",
+                f"Appen startar om ({'tyst' if tyst else 'efter fråga'}) med "
+                f"{cmd[0]} - dold={dold}, bevakning={bevaka}", "ok")
+        # Stäng systemfältet och töm loggen innan processen lämnar: annars
+        # kan de sista raderna ligga kvar i bufferten när processen dör.
+        try:
+            if self.tray:
+                self.tray.stop()
+                self.tray = None
+        except Exception as exc:
+            session_error("uppdatering", exc)
+        try:
+            close_session()
+        except Exception:
+            pass
+        self._quitting = True
+        self._close_open_review()
         try:
             self.root.destroy()
-        except Exception:
-            pass
+        except Exception as exc:
+            session_error("uppdatering", exc)
+        return True
 
     # -- donationsvy (N15, ANVÄNDARORDER 2026-10-15) -------------------
     STOD_TEXT = {
@@ -8768,6 +9217,8 @@ def _diag_extra() -> List[str]:
                 f"{k}={s.get(k)}" for k in
                 ("strictness", "min_keywords", "action", "dry_run",
                  "ask_when_unsure", "check_updates", "auto_update",
+                 "update_checks_per_day", "silent_restart",
+                 "last_update_check", "last_update_seen",
                  "minimize_to_tray", "close_to_tray") if k in s))
         rader.append(f"Mappar: in={s.get('input_dir', '')} "
                      f"ut={s.get('output_dir', '')} "
@@ -9074,6 +9525,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Läs mer av loggarna i --ai-rapport (för envisa fel)")
     p.add_argument("--tray", action="store_true",
                    help="Starta minimerad i systemfältet (används vid autostart)")
+    p.add_argument("--resume-watch", action="store_true",
+                   help="Starta bevakningen direkt (används av appens egen "
+                        "omstart efter en uppdatering)")
     p.add_argument("--install-autostart", action="store_true",
                    help="Slå på autostart med operativsystemet och avsluta")
     p.add_argument("--remove-autostart", action="store_true",
@@ -9306,9 +9760,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     hjälpare = install_helpers()   # skapa .pyw / .command vid första start
     if hjälpare:
         session_log("start", f"Starthjälpfiler skapade: {', '.join(hjälpare)}")
-    session_log("start", f"GUI startar (startar gömd i systemfältet: {args.tray})")
+    session_log("start", f"GUI startar (startar gömd i systemfältet: "
+                f"{args.tray}, återupptar bevakningen: {args.resume_watch})")
     try:
-        App(start_hidden=args.tray).run()
+        App(start_hidden=args.tray, instanslås=lås,
+            resume_watch=args.resume_watch).run()
     finally:
         lås.release()
     session_log("avslut", "main() avslutas normalt")

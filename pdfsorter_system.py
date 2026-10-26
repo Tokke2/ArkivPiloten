@@ -1683,6 +1683,8 @@ class TrayIcon:
             Item(self._queue_label, lambda: self.app._post(self.app.show_review)),
             Menu.SEPARATOR,
             Item("Öppna utmappen", lambda: self.app._post(self.app.open_output)),
+            Item("Sök efter uppdatering…", lambda: self.app._post(
+                lambda: self.app._check_updates_gui(manual=True))),
             Item("Avsluta", lambda: self.app._post(self.app.quit_app)),
         )
 
@@ -2018,6 +2020,28 @@ HELP_CONTENT: List[Tuple[str, str]] = [
              "automatiskt med datorn\" och gärna även \"Starta minimerad\" "
              "och \"Starta bevakningen direkt\". Då sköter den sig helt själv."),
 
+    ("h2", "Uppdateringar sköter sig själva"),
+    ("body", "Appen letar efter en ny version två gånger per dygn — tyst, i "
+             "bakgrunden. Hittar den en nyare version som kan verifieras mot "
+             "releasens kontrollsumma installeras den direkt, och appen "
+             "startar om sig själv så att den nya versionen börjar gälla. Du "
+             "behöver inte göra något."),
+    ("body", "Omstarten väntar om appen är upptagen: mitt i en sortering, med "
+             "granskningsrutan öppen eller med filer kvar i granskningskön. "
+             "Då startar appen om så snart den är ledig — eller nästa gång du "
+             "startar den. Uteblir omstarten betyder det alltså bara att "
+             "appen väntar på dig, inte att uppdateringen misslyckades."),
+    ("bullet", "Fönstret låg i systemfältet?  Då startar appen om där också, "
+               "utan att hoppa upp."),
+    ("bullet", "Bevakningen var på?  Den slås på igen direkt efter "
+               "omstarten, så ingen fil missas."),
+    ("bullet", "Antalet sökningar gäller över omstarter — en app som startas "
+               "tio gånger om dagen frågar GitHub lika sällan ändå."),
+    ("note", "Allt styrs under Inställningar → Uppdateringar. Vill du "
+             "godkänna varje uppdatering själv: stäng av \"Installera "
+             "automatiskt\". Vill du slippa omstarten: stäng av \"Starta om "
+             "tyst\" — då frågar appen i stället."),
+
     ("h2", "Om något blir fel"),
     ("bullet", "Fil i fel mapp?  Gå till Historik, markera raden och klicka "
                "Ångra valda. Filen flyttas tillbaka."),
@@ -2044,7 +2068,9 @@ HELP_CONTENT: List[Tuple[str, str]] = [
              "innan du sparar, så du inte kan råka förstöra regelfilen."),
 
     ("h2", "Bra att veta"),
-    ("bullet", "Ingenting lämnar datorn. Inga nätverksanrop, ingen molntjänst."),
+    ("bullet", "Ingen information om dina filer lämnar datorn. Nätet används "
+               "bara till versionskontrollen mot GitHub och, om du slår på "
+               "det, uppslag av företagsnamn. Ingen molntjänst."),
     ("bullet", "Filer skrivs aldrig över. Krockar döps om till \"faktura (2).pdf\"."),
     ("bullet", "Trasiga och lösenordsskyddade PDF:er lämnas orörda och loggas."),
     ("bullet", "Filer som är öppna i Acrobat hoppas över och tas nästa svep."),

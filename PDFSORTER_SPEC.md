@@ -103,6 +103,45 @@
 > behövs, så de går i CI på alla tre OS. Versionen är INTE höjd och ingen
 > release är publicerad.
 >
+> **Ej publicerad än — tyst versionsvakt och tyst omstart (2026-10-26).**
+> Önskemål: "autosök efter ny version (tyst) 2 ggr per dygn" och "tyst
+> omstart vid uppdatering av version".
+> (a) Sökningen är inte längre knuten till starten: en vakt väcks varje
+> minut och söker när det är dags. Tiden sparas i `last_update_check`
+> (ISO) tillsammans med `last_update_check_ok`, så antalet gäller över
+> omstarter — en app som startas tio gånger om dagen frågar GitHub två
+> gånger. Inställningen `update_checks_per_day` (standard 2) ger
+> intervallet 86400/N sekunder; minst en gång per dygn, högst var 15:e
+> minut. Misslyckas sökningen (nätet svek) görs ett nytt försök efter
+> 30 minuter i stället för att vänta ett halvt dygn.
+> (b) Allt är tyst: ingen dialog, ingen statusruta — bara rader i
+> sessionsloggen, och raden i inställningskortet "Uppdateringar" som
+> visar "Tyst sökning 2 ggr/dygn · senast i går 21:14 · nästa om 3 t".
+> (c) `uppdateringsplan()` avgör utan Tk vad ett svar från GitHub leder
+> till (fel / aktuell / osäker / erbjudande / fråga / installera) och om
+> omstarten ska ske tyst. En automatisk sökning öppnar aldrig en dialog:
+> är autouppdateringen avstängd blir en ny version en notis i
+> systemfältet + en loggrad i stället, och en misslyckad tyst
+> installation hamnar i loggen. Dialogen finns bara när användaren själv
+> trycker på Sök.
+> (d) Tyst omstart: `_restart_app()` startar den nya processen och
+> stänger den gamla. Instanslåset släpps FÖRE start — annars nekar den
+> nya instansen och ber den döende processen visa fönstret. Låg fönstret
+> i systemfältet startas det med `--tray` (inget fönster som hoppar
+> upp), och `--resume-watch` slår på bevakningen igen, så en pågående
+> bevakning inte tystnar i natten. Misslyckas starten återtas låset och
+> fönstret är kvar — appen fortsätter i den gamla versionen.
+> (e) Omstarten väntar om appen är upptagen: sortering pågår,
+> granskningsrutan är öppen eller filer väntar i granskningskön. Den
+> försöker igen varje minut och faller tillbaka på nästa vanliga start.
+> Inställningen `silent_restart` (på som standard) styr om omstarten sker
+> utan fråga.
+> (f) 34 tester i tests/test_update_schedule.py: schemat, sparningen över
+> omstart, beslutsmatrisen, omstarts-kommandot per OS, hela flödet med
+> attrapper (tyst installation utan en enda dialog), att en upptagen app
+> väntar, och att låset släpps före start. Versionen är INTE höjd och
+> ingen release är publicerad.
+>
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
 > bara till `stderr`, som inte finns när appen startar med `pythonw`, och

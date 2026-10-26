@@ -555,6 +555,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # och installeras med backup + rollback. Saknas kontrollsumman frågar
     # appen i stället för att installera tyst.
     "auto_update": True,
+    # 2026-10-26: versionsvakten söker tyst två gånger per dygn i stället
+    # för vid varje start (en app som startas ofta frågade GitHub lika ofta).
+    "update_checks_per_day": 2,
+    "last_update_check": "",      # ISO-tid för senaste sökningen
+    "last_update_check_ok": True,  # falskt -> kortare omförsök (nätet svek)
+    "last_update_seen": "",       # senaste versionen GitHub svarade
+    "silent_restart": True,       # starta om tyst när en version installerats
     "ui_language": "sv",           # 1.1.0: gränssnittsspråk sv | en
     "tag_pdf_metadata": True,      # 1.1.0: skriv kategori som PDF-metadata
     "orgnr_lookup": False,         # 1.1.0: slå upp okända avsändare via nätet
