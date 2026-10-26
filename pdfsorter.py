@@ -6736,9 +6736,29 @@ class App:
                   style="Faint.TLabel").pack(side="right")
 
     # -- uppdatering från Git (2026-10-16) ------------------------------
+    # 2026-10-19: autosök tyst 2 ggr/dygn + tyst omstart vid version
+    def _should_auto_check_updates(self) -> bool:
+        """Ska en tyst autosökning köras nu? 2 ggr/dygn = var 12:e timme."""
+        if not self.settings.get("check_updates", True):
+            return False
+        if getattr(self, "_checking_updates", False):
+            return False
+        last = str(self.settings.get("last_update_check", "") or "").strip()
+        if not last:
+            return False  # första checken görs redan vid start (after 5s), spara tiden där
+        try:
+            last_dt = __import__("datetime").datetime.fromisoformat(last)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.astimezone()
+            now = __import__("datetime").datetime.now().astimezone()
+            return (now - last_dt).total_seconds() >= 43200  # 12h = 2 ggr/dygn
+        except Exception:
+            return True  # korrupt stämpel → försök igen
+
     def _schedule_tick(self) -> None:
         """1.1.0: schemalagd sortering - kör en sortering per dag vid
-        inställt klockslag medan appen är igång (även i systemfältet)."""
+        inställt klockslag medan appen är igång (även i systemfältet).
+        2026-10-19: här körs även tyst autosök efter ny version 2 ggr/dygn."""
         try:
             if self.settings.get("schedule_enabled", False) and not self._busy:
                 tid = str(self.settings.get("schedule_time", "07:00"))[:5]
@@ -6749,6 +6769,12 @@ class App:
                     save_settings(self.settings)
                     self._log(f"⏰ Schemalagd sortering (kl. {tid}) startar", "info")
                     self._sort_now()
+        except Exception:
+            pass
+        # Tyst autosök 2 ggr/dygn
+        try:
+            if self._should_auto_check_updates():
+                self._check_updates_gui(manual=False)
         except Exception:
             pass
         try:
@@ -6818,11 +6844,36 @@ class App:
             pass
         return ""
 
+    def _record_update_check(self) -> None:
+        """Spara tidpunkt för senaste tysta autosök (2 ggr/dygn)."""
+        try:
+            self.settings["last_update_check"] = __import__("datetime").datetime.now().astimezone().isoformat(timespec="seconds")
+            save_settings(self.settings)
+        except Exception:
+            pass
+
     def _check_updates_gui(self, manual: bool = False) -> None:
-        """Sök uppdatering i bakgrunden; fråga före installation."""
+        """Sök uppdatering i bakgrunden; fråga före installation.
+        2026-10-19: tyst autosök 2 ggr/dygn — sparar last_update_check."""
+        if getattr(self, "_checking_updates", False) and not manual:
+            return
+        self._checking_updates = True
         def work():
-            info = check_for_update()
-            self.root.after(0, lambda: self._update_prompt(info, manual))
+            try:
+                info = check_for_update()
+            except Exception as exc:
+                info = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            def _after():
+                try:
+                    if not manual:
+                        self._record_update_check()
+                    self._update_prompt(info, manual)
+                finally:
+                    self._checking_updates = False
+            try:
+                self.root.after(0, _after)
+            except Exception:
+                self._checking_updates = False
         threading.Thread(target=work, daemon=True).start()
 
     def _update_prompt(self, info: dict, manual: bool) -> None:
@@ -6831,15 +6882,34 @@ class App:
                 self.messagebox.showwarning(
                     APP_NAME, "Kunde inte söka efter uppdateringar:\n"
                     + str(info.get("error", "okänt fel")))
+            else:
+                try:
+                    session_log("uppdatering", f"Autosök misslyckades: {info.get('error', '?')}", "warn")
+                except Exception:
+                    pass
             return
         if not info.get("available"):
             if manual:
                 self.messagebox.showinfo(
                     APP_NAME, f"Du har den senaste versionen ({APP_VERSION}).")
+            else:
+                try:
+                    session_log("uppdatering", f"Autosök: ingen ny version (har {info.get('current')}, remote {info.get('remote')})", "info")
+                except Exception:
+                    pass
             return
+        try:
+            session_log("uppdatering", f"Ny version funnen: {info['remote']} (du har {info['current']}) — manual={manual} auto_update={self.settings.get('auto_update', False)}", "info")
+        except Exception:
+            pass
         if self.settings.get("auto_update", False) and not manual:
             svar = True
         else:
+            if not manual and not getattr(self, "visible", True) and self.tray:
+                try:
+                    self._notify(f"Ny version {info['remote']} finns (du har {info['current']}) — öppnar frågan…")
+                except Exception:
+                    pass
             svar = self.messagebox.askyesno(
                 APP_NAME,
                 f"En ny version finns: {info['remote']} "
@@ -6850,19 +6920,48 @@ class App:
         if not svar:
             return
 
+        silent_restart = (not manual and self.settings.get("auto_update", False)
+                          and self.settings.get("silent_restart", True))
+
         def install():
+            try:
+                session_log("uppdatering", f"Installerar {info['current']} -> {info['remote']} (silent_restart={silent_restart})", "info")
+            except Exception:
+                pass
             ok, msg = perform_update()
             if ok:
-                update_python_packages()
+                try:
+                    update_python_packages()
+                except Exception as exc:
+                    try:
+                        session_error("uppdatering", exc)
+                    except Exception:
+                        pass
             def done():
                 if ok:
-                    if self.messagebox.askyesno(
-                            APP_NAME, msg + "\n\nStarta om appen nu "
-                            "för att köra den nya versionen?"):
-                        self._restart_app()
+                    if silent_restart:
+                        try:
+                            session_log("uppdatering", f"Tyst omstart efter uppdatering {info['current']} -> {info['remote']}: {msg}", "ok")
+                            self._log(f"🔄 Uppdaterad {info['current']} → {info['remote']} — startar om tyst…", "ok")
+                            if self.tray:
+                                self._notify(f"Uppdaterad till {info['remote']} — startar om…")
+                        except Exception:
+                            pass
+                        try:
+                            self.root.after(1200, self._restart_app)
+                        except Exception:
+                            self._restart_app()
+                    else:
+                        if self.messagebox.askyesno(
+                                APP_NAME, msg + "\n\nStarta om appen nu "
+                                "för att köra den nya versionen?"):
+                            self._restart_app()
                 else:
                     self.messagebox.showwarning(APP_NAME, msg)
-            self.root.after(0, done)
+            try:
+                self.root.after(0, done)
+            except Exception:
+                pass
         threading.Thread(target=install, daemon=True).start()
 
     def _restart_app(self) -> None:

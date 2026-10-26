@@ -533,8 +533,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "tesseract_path": "",        # manuell sökväg till tesseract.exe
     "learned_matching": True,    # N14: lärande klassificerare (kan stängas av)
     "swish_number": "0721817177",  # Swish-nummer för donations-QR (N15)
-    "check_updates": True,       # 2026-10-16: sök Git-uppdatering vid start
+    "check_updates": True,       # 2026-10-16: sök Git-uppdatering vid start + 2x/dygn tyst (2026-10-19)
     "auto_update": False,        # 2026-10-16: installera utan att fråga först
+    "last_update_check": "",     # 2026-10-19: ISO-tid för senaste tysta autosök (2 ggr/dygn)
+    "silent_restart": True,      # 2026-10-19: tyst omstart efter lyckad auto-uppdatering
     "ui_language": "sv",           # 1.1.0: gränssnittsspråk sv | en
     "tag_pdf_metadata": True,      # 1.1.0: skriv kategori som PDF-metadata
     "orgnr_lookup": False,         # 1.1.0: slå upp okända avsändare via nätet
