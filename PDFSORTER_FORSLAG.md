@@ -46,3 +46,23 @@ Allt förblir **VÄNTAR** tills du säger till. Version stannar på **v1.0.0** t
 
 ---
 *Genererad 2026-10-19 från kodgranskning (7731 rader huvudmodul, polling-watcher, TextCache 800/24 MB, mypy/CI saknas, native watcher saknas, 200+ VÄNTAR i kön).*
+## Omgång 10 (2026-10-19) — 10 nya förslag: uppdatering, Regeltestare, robusthet
+
+| # | Titel | Klass | Beskrivning (1–2 meningar + nytta) |
+|---|---|---|---|
+| 227 | Uppdateringshistorik med 1-klicks återställning | Robusthet | Ny vy (Hjälp → Uppdateringar) listar alla `updates/last_update.json` + `backups/update_*`: tid, från→till, filer. Knapp ”Återställ denna” kopierar tillbaka backupen atomärt och loggar — trygg ångra vid felaktig release. |
+| 228 | Tray-badge ”↑” när uppdatering finns | Design | När `check_for_update` hittar ny version visas gul ↑-badge på tray-ikonen (som köbrickan) + tooltip ”Ny version X finns”. Syns även när fönstret är gömt — ingen missad uppdatering. |
+| 229 | Tyst-fönster för auto-omstart | Robusthet | `silent_restart` sker bara inom ”tyst fönster” (t.ex. 02–04, ställbart) annars skjuts omstart till nästa fönster + tray-notis ”Omstart planerad 03:00”. Undviker att avbryta pågående granskning mitt i dagen. |
+| 230 | Spara Regeltest som regressionstest | Kod / Kvalitet | I Regeltestaren: knapp ”Spara som testfall” → skriver `tests/regression_*.json` med inklistrad text + förväntad vinnare + threshold. Nästa `--check` kör alla sparade fall — din trim blir permanent skyddad. |
+| 231 | Batch-test i Regeltestaren | Snabbhet | Klistra flera texter (avgränsade med `---` eller tom rad) → kör alla i ett svep och visa tabell: rad 1→ Pilkington 2.3 (auto), rad 2→ fråga (Pilkington/KundAB nära). Ser mönster direkt vid 20 filtyper. |
+| 232 | Konfidens-heatmap i Regeltest-inmatningen | Design / Matchning | Markerad text färgas live efter zonvikt: brevhuvud/sender = mörkblå, sidfot = blå, löptext = grå, mottagare = ljusgrå/röd. Du ser omedelbart varför ”Pilkington i mottagarblocket” bara ger 0.30 i vikt. |
+| 233 | Quick-fix direkt från Regeltestaren | Enkelhet | När testet visar ”fråga p.g.a. inget bevis” → knapp ”Lägg till ‘556033-9086’ som stödord till Pilkington (vikt 1.0, helt ord)” som skapar regeln direkt via `Rules.add_keywords` + sparar + visar ny poäng live utan att lämna dialogen. |
+| 234 | Stor-fil-vakt för jätte-PDF:er | Minne / Robusthet | Innan `read_pdf`: om >500 sidor eller >200 MB → avbryt med tydligt fel ”För stor fil”, lägg i `_StoraFiler` och tipsa om att dela. Hindrar Tesseract-minnesläcka som fryser hela watchern på en enda A0-ritning. |
+| 235 | OCR-kö för missad Tesseract | Robusthet | Filer som fick `error: skannad PDF utan OCR` köas i `json/ocr_retry.json`. När Tesseract installeras (via dialogen) körs kön automatiskt om + notis ”12 filer i kö kunde nu läsas”. Ingen fil glöms efter tilläggsinstall. |
+| 236 | Globalt kortkommando Ctrl+Skift+R | Enkelhet | Öppnar Regeltestaren omedelbart oavsett flik — även när fönstret är gömt i tray (via `root.bind_all` + tray-menu). Power-user når verktyget på <1s utan mus. |
+
+
+---
+*Omgång 10 genererad 2026-10-19 efter leverans av 207 + autosök 2×/dygn tyst med tyst omstart. Fokus: göra uppdatering synlig/ångerbar och göra Regeltestaren till permanent verktygslåda.*
+
+Omgång 9: 202–226 | Omgång 10: 227–236 | Totalt VÄNTAR nu: 227–236 nya + tidigare 1–226 i kön.
