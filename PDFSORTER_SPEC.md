@@ -174,6 +174,26 @@
 > sker innan GUI-initialisering. Versionen är INTE höjd och ingen release
 > är publicerad.
 >
+> **Ej publicerad än — smart cacherensning dagligen (2026-10-27).**
+> Önskemål: kunna rensa cache med smartfilter och låta det rensa automatiskt
+> en gång per dygn.
+> (a) Inställningar → **Cache och lagring** har ett påslag för automatisk
+> rensning (på som standard), status över senaste körningen och knappen
+> **Rensa cache nu**. Manuellt kör samma filter även om schemat är av.
+> (b) `DiskTextCache.cleanup()` tar bara filer med cache-nyckelns SHA-1-namn;
+> andra filer och undermappar lämnas orörda. Oanvända poster äldre än 30
+> dagar tas bort. Därefter trimmas äldsta använda poster vid 1 500 filer
+> eller 512 MiB. En lyckad cacheträff uppdaterar aktivitets-mtime; skadad
+> JSON tas bort när den upptäcks. Cachen innehåller bara återskapbar PDF-text.
+> (c) `last_cache_cleanup` sparas och vaktas med 24-timmarsintervall. Vakten
+> går vid start och därefter varje timme, så appen som står öppen rensar
+> ändå dagligen. Själva städningen körs i bakgrundstråd och låses mot läsning/
+> skrivning i cacheklassen.
+> (d) 11 tester i `tests/test_cache_cleanup.py` täcker ålder, LRU-tak,
+> storlekstak, skydd av andra cachefiler, aktivitetsuppdatering, korrupt post,
+> 24-timmarsgränsen, schematick och GUI-/inställningskoppling. Versionen är INTE höjd
+> och ingen release är publicerad.
+>
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
 > bara till `stderr`, som inte finns när appen startar med `pythonw`, och

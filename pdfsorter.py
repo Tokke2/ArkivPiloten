@@ -1909,10 +1909,14 @@ class DiskTextCache:
     """
 
     MAX_ENTRIES = 1500
+    MAX_BYTES = 512 * 1024 * 1024
+    MAX_AGE_DAYS = 30
+    _KEY_RE = re.compile(r"^[0-9a-f]{40}\.json$")
 
     def __init__(self) -> None:
         self.dir = config_dir() / "cache"
         self._puts = 0
+        self._lock = threading.RLock()
 
     @staticmethod
     def _hash(path: Path) -> Optional[str]:
@@ -1922,42 +1926,144 @@ class DiskTextCache:
         import hashlib
         return hashlib.sha1(repr(key).encode("utf-8")).hexdigest()
 
+    def _discard(self, path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def get(self, path: Path) -> Optional[Extraction]:
         kh = self._hash(path)
         if kh is None:
             return None
-        try:
-            with open(self.dir / (kh + ".json"), "r", encoding="utf-8") as fh:
-                d = json.load(fh)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            return None
-        if not d.get("text"):
-            return None
-        return Extraction.from_cache_dict(path, d)
+        cache_file = self.dir / (kh + ".json")
+        with self._lock:
+            try:
+                with open(cache_file, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if not isinstance(data, dict) or not data.get("text"):
+                    self._discard(cache_file)
+                    return None
+                extraction = Extraction.from_cache_dict(path, data)
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError,
+                    TypeError, ValueError, KeyError):
+                self._discard(cache_file)
+                return None
+            # mtime används som senaste-aktivitet i smartfiltret. En cache
+            # som faktiskt träffar ska inte rensas bara för att den skrevs
+            # för länge sedan.
+            try:
+                os.utime(cache_file, None)
+            except OSError:
+                pass
+            return extraction
 
     def put(self, path: Path, ext: Extraction) -> None:
         kh = self._hash(path)
         if kh is None or not ext.text:
             return
-        try:
-            self.dir.mkdir(parents=True, exist_ok=True)
-            with open(self.dir / (kh + ".json"), "w", encoding="utf-8") as fh:
-                json.dump(ext.to_cache_dict(), fh, ensure_ascii=False)
-        except OSError:
-            return
-        # Enkel städning var hundrade skrivning: behåll de nyaste.
-        self._puts += 1
-        if self._puts % 100 == 0:
+        with self._lock:
             try:
-                filer = sorted(self.dir.glob("*.json"),
-                               key=lambda p: p.stat().st_mtime)
-                while len(filer) > self.MAX_ENTRIES:
-                    filer.pop(0).unlink(missing_ok=True)
+                self.dir.mkdir(parents=True, exist_ok=True)
+                with open(self.dir / (kh + ".json"), "w", encoding="utf-8") as fh:
+                    json.dump(ext.to_cache_dict(), fh, ensure_ascii=False)
             except OSError:
-                pass
+                return
+            # Kapaciteten hålls även mellan de dagliga rensningarna.
+            self._puts += 1
+            if self._puts % 100 == 0:
+                self.cleanup()
+
+    def cleanup(self, now: Optional[float] = None) -> Dict[str, int]:
+        """Smart rensning: gammal/oanvänd cache först, aldrig annat än cache.
+
+        Poster som inte använts på 30 dagar tas bort. Därefter begränsas
+        kvarvarande data till 1 500 poster och 512 MiB genom att äldst
+        använda poster ryker först. Andra filer i cachemappen lämnas orörda.
+        """
+        now = time.time() if now is None else float(now)
+        cutoff = now - self.MAX_AGE_DAYS * 86400
+        removed_age = 0
+        removed_limit = 0
+        removed_bytes = 0
+        errors = 0
+        with self._lock:
+            entries = []
+            try:
+                self.dir.mkdir(parents=True, exist_ok=True)
+                for path in self.dir.iterdir():
+                    if not path.is_file() or not self._KEY_RE.fullmatch(path.name):
+                        continue
+                    try:
+                        stat = path.stat()
+                        if stat.st_mtime < cutoff:
+                            try:
+                                path.unlink()
+                                removed_age += 1
+                                removed_bytes += stat.st_size
+                            except FileNotFoundError:
+                                continue
+                            except OSError:
+                                errors += 1
+                                entries.append((path, stat.st_mtime, stat.st_size))
+                        else:
+                            entries.append((path, stat.st_mtime, stat.st_size))
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        errors += 1
+            except OSError:
+                return {"removed_age": 0, "removed_limit": 0,
+                        "removed_bytes": 0, "remaining": 0,
+                        "remaining_bytes": 0, "errors": 1}
+
+            entries.sort(key=lambda item: (item[1], item[0].name))
+            total_bytes = sum(item[2] for item in entries)
+            kunde_inte_tas_bort = []
+            while (len(entries) > self.MAX_ENTRIES
+                   or total_bytes > self.MAX_BYTES):
+                item = entries.pop(0)
+                path, _mtime, size = item
+                try:
+                    path.unlink()
+                    removed_limit += 1
+                    removed_bytes += size
+                    total_bytes -= size
+                except FileNotFoundError:
+                    total_bytes -= size
+                except OSError:
+                    errors += 1
+                    # Försök trimma nästa äldsta; rapportera denna som kvar.
+                    kunde_inte_tas_bort.append(item)
+                    total_bytes -= size
+            entries.extend(kunde_inte_tas_bort)
+            return {"removed_age": removed_age,
+                    "removed_limit": removed_limit,
+                    "removed_bytes": removed_bytes,
+                    "remaining": len(entries),
+                    "remaining_bytes": sum(item[2] for item in entries),
+                    "errors": errors}
 
 
 DISK_CACHE = DiskTextCache()
+
+
+def disk_cache_cleanup_due(last_cleanup: str,
+                           now: Optional[datetime] = None) -> bool:
+    """True när den beständiga cachen inte har smart-rensats på 24 timmar."""
+    if not last_cleanup:
+        return True
+    try:
+        senast = datetime.fromisoformat(str(last_cleanup))
+        nu = now or datetime.now()
+        if senast.tzinfo is not None:
+            senast = senast.astimezone().replace(tzinfo=None)
+        if nu.tzinfo is not None:
+            nu = nu.astimezone().replace(tzinfo=None)
+        elapsed = (nu - senast).total_seconds()
+        return elapsed < 0 or elapsed >= 86400
+    except (TypeError, ValueError, OverflowError):
+        return True
 
 
 def read_pdf(path: Path, settings: Dict[str, Any],
@@ -4029,6 +4135,17 @@ _UI_EN = {
     "Installera Python-paket": "Install Python packages",
     "Uppdatera Python-paket": "Update Python packages",
     "Starta automatiskt med datorn": "Start automatically with the computer",
+    "Cache och lagring": "Cache and storage",
+    "återställs automatiskt om appen behöver texten igen":
+        "recreated automatically if the app needs the text again",
+    "Rensa cache automatiskt en gång per dygn": "Smart-clean cache once a day",
+    "Smartfilter: tar bort cache som inte använts på 30 dagar, skadade poster vid läsning och äldsta poster över 1 500 filer / 512 MB.":
+        "Smart filter: removes cache unused for 30 days, damaged entries "
+        "when read, and oldest entries above 1,500 files / 512 MB.",
+    "Rensa cache nu": "Clean cache now",
+    "Automatisk smart rensning är avstängd.": "Automatic smart cleanup is off.",
+    "Ingen smart rensning ännu · körs automatiskt dagligen.":
+        "No smart cleanup yet · runs every 24 hours.",
     "Starta bevakningen direkt": "Start watching immediately",
     "Starta minimerad i systemfältet": "Start minimized to tray",
     "Visa ikon i systemfältet": "Show tray icon",
@@ -4512,6 +4629,8 @@ class App:
         self._resume_watch = bool(resume_watch)
         #: Vakten för tyst versionssökning (startas en gång).
         self._uppdateringsvakt = False
+        #: En smart diskcache-rensning kör just nu.
+        self._cache_cleanup_running = False
         #: En omstart väntar på att appen blir ledig.
         self._omstart_vantar = False
         self.visible = True
@@ -4605,6 +4724,9 @@ class App:
             except Exception:
                 pass
         self.root.after(30000, self._schedule_tick)
+        # Kontrollera dygnsintervallet när GUI:t hunnit visas, och därefter
+        # en gång i timmen så en app som står öppen också rensar dagligen.
+        self.root.after(3000, self._cache_cleanup_tick)
 
         # Självläkande autostart (bättre autostart): OS-posten och
         # inställningen synkas vid varje start - och resultatet loggas,
@@ -5772,6 +5894,38 @@ class App:
         self.lbl_uppdatering.pack(side="left", padx=(0, 8))
         self._update_pills()
 
+        # -- smart diskcache-rensning: gammal/oanvänd cache först ---------
+        cachecard = T.card(g, "Cache och lagring",
+                           "återställs automatiskt om appen behöver texten igen")
+        cachecard.grid(row=7, column=0, sticky="ew", padx=T.PAD,
+                       pady=(T.GAP, T.PAD))
+        cacheb = cachecard.body
+        cacheb.columnconfigure(0, weight=1)
+        self.var_cache_cleanup = tk.BooleanVar(
+            value=self.settings.get("cache_cleanup_enabled", True))
+        ttk.Checkbutton(
+            cacheb, text="Rensa cache automatiskt en gång per dygn",
+            style="Card.TCheckbutton", variable=self.var_cache_cleanup,
+            command=self._toggle_cache_cleanup).grid(
+                row=0, column=0, columnspan=2, sticky="w",
+                padx=8, pady=(6, 2))
+        ttk.Label(
+            cacheb,
+            text="Smartfilter: tar bort cache som inte använts på 30 dagar, "
+                 "skadade poster vid läsning och äldsta poster över "
+                 "1 500 filer / 512 MB.",
+            style="CardMuted.TLabel", wraplength=760, justify="left").grid(
+                row=1, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+        cacherad = ttk.Frame(cacheb, style="CardInner.TFrame")
+        cacherad.grid(row=2, column=0, columnspan=2, sticky="ew",
+                      padx=8, pady=(4, 6))
+        self.lbl_cache_cleanup = ttk.Label(
+            cacherad, text=self._cache_cleanup_status_text(),
+            style="CardMuted.TLabel")
+        self.lbl_cache_cleanup.pack(side="left", fill="x", expand=True)
+        ttk.Button(cacherad, text="Rensa cache nu",
+                   command=self._rensa_cache).pack(side="right")
+
     def _update_stats(self, sorted_n: Optional[int] = None,
                       errors: Optional[int] = None) -> None:
         """Håll de tre siffrorna i handlingsraden aktuella."""
@@ -6204,6 +6358,7 @@ class App:
             "check_updates": bool(self.var_checkupd.get()),
             "auto_update": bool(self.var_autoupd.get()),
             "silent_restart": bool(self.var_tystomstart.get()),
+            "cache_cleanup_enabled": bool(self.var_cache_cleanup.get()),
         })
         if hasattr(self, "var_lang"):
             self.settings.update({
@@ -8013,6 +8168,9 @@ class App:
             self.var_startmin.set(self.settings.get("start_minimized", False))
             self.var_autowatch.set(self.settings.get("autowatch_on_start", False))
             self.var_notify.set(self.settings.get("notify", True))
+            if hasattr(self, "var_cache_cleanup"):
+                self.var_cache_cleanup.set(
+                    self.settings.get("cache_cleanup_enabled", True))
             self.var_date_on.set(self.settings.get("date_enabled", False))
             self.var_date_fb.set(self.settings.get("date_fallback", "none"))
             mallar = [t for t, _ in SUBFOLDER_TEMPLATES if t]
@@ -8272,6 +8430,119 @@ class App:
             lbl.configure(text=self._uppdatering_status_text())
         except Exception:
             pass
+
+    def _cache_cleanup_status_text(self) -> str:
+        engelska = self.settings.get("ui_language", "sv") == "en"
+        if not self.settings.get("cache_cleanup_enabled", True):
+            return ("Automatic smart cleanup is off." if engelska else
+                    "Automatisk smart rensning är avstängd.")
+        senast = str(self.settings.get("last_cache_cleanup", "") or "")
+        if not senast:
+            return ("No smart cleanup yet · runs every 24 hours." if engelska
+                    else "Ingen smart rensning ännu · körs automatiskt dagligen.")
+        if engelska:
+            try:
+                visning = datetime.fromisoformat(senast).strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                visning = senast
+            return (f"Last smart cleanup: {visning} · "
+                    "automatic cleanup every 24 hours.")
+        return (f"Senast smart rensad: {tid_kort(senast)} · "
+                "automatisk rensning var 24:e timme.")
+
+    def _refresh_cache_cleanup_status(self) -> None:
+        lbl = getattr(self, "lbl_cache_cleanup", None)
+        if lbl is not None:
+            try:
+                lbl.configure(text=self._cache_cleanup_status_text())
+            except Exception:
+                pass
+
+    def _toggle_cache_cleanup(self) -> None:
+        self._collect_settings()
+        self._refresh_cache_cleanup_status()
+        self._log("Automatisk smart cache-rensning "
+                  + ("påslagen" if self.var_cache_cleanup.get() else "avstängd"),
+                  "info")
+
+    def _cache_cleanup_tick(self) -> None:
+        """Starta max en smart rensning per 24 timmar även vid lång drift."""
+        try:
+            if (not self._quitting
+                    and self.settings.get("cache_cleanup_enabled", True)
+                    and disk_cache_cleanup_due(
+                        self.settings.get("last_cache_cleanup", ""))):
+                self._rensa_cache(manual=False)
+        except Exception as exc:
+            self._h("cache", f"Kunde inte kontrollera rensningsschemat: {exc}",
+                    "warn")
+        if not self._quitting:
+            try:
+                self.root.after(3600000, self._cache_cleanup_tick)
+            except Exception:
+                pass
+
+    def _rensa_cache(self, manual: bool = True) -> None:
+        """Kör smartfiltret i bakgrunden; cachen innehåller bara återskapbar data."""
+        if manual:
+            self._collect_settings()
+        if self._cache_cleanup_running:
+            self._h("cache", "Smart cache-rensning pågår redan", "warn")
+            return
+        self._cache_cleanup_running = True
+        self._h("cache", "Smart cache-rensning startar" +
+                (" (manuell)" if manual else " (daglig)"))
+        self._refresh_cache_cleanup_status()
+
+        def work():
+            try:
+                result = DISK_CACHE.cleanup()
+                error = ""
+            except Exception as exc:
+                result = {}
+                error = f"{type(exc).__name__}: {exc}"
+            self._post(lambda: self._cache_cleanup_finished(result, error))
+
+        threading.Thread(target=work, daemon=True,
+                         name="cache-cleanup").start()
+
+    def _cache_cleanup_finished(self, result: Dict[str, int], error: str) -> None:
+        self._cache_cleanup_running = False
+        if error:
+            self._h("cache", f"Smart cache-rensning misslyckades: {error}",
+                    "warn")
+            self._refresh_cache_cleanup_status()
+            return
+        self.settings["last_cache_cleanup"] = now_iso()
+        try:
+            save_settings(self.settings)
+        except Exception as exc:
+            self._h("cache", f"Kunde inte spara rensningstiden: {exc}", "warn")
+        removed = result.get("removed_age", 0) + result.get("removed_limit", 0)
+        mb = result.get("removed_bytes", 0) / (1024 * 1024)
+        kvar = result.get("remaining", 0)
+        fel = result.get("errors", 0)
+        msg = (f"Smart rensning klar: {removed} poster / {mb:.1f} MB bort, "
+               f"{kvar} cacheposter kvar")
+        if fel:
+            msg += f" ({fel} kunde inte tas bort)"
+        self._h("cache", msg, "warn" if fel else "ok")
+        self._refresh_cache_cleanup_status()
+        lbl = getattr(self, "lbl_cache_cleanup", None)
+        if lbl is not None:
+            try:
+                if self.settings.get("ui_language", "sv") == "en":
+                    last = datetime.fromisoformat(
+                        self.settings["last_cache_cleanup"]).strftime("%Y-%m-%d %H:%M")
+                    text = (f"Last cleanup: {last} · {removed} entries / "
+                            f"{mb:.1f} MB removed · {kvar} kept")
+                else:
+                    text = (f"Senast rensad: "
+                            f"{tid_kort(self.settings['last_cache_cleanup'])} · "
+                            f"{removed} poster / {mb:.1f} MB bort · {kvar} kvar")
+                lbl.configure(text=text)
+            except Exception:
+                pass
 
     # -- uppdatering från Git (2026-10-16) ------------------------------
     def _update_prompt(self, info: dict, manual: bool) -> None:
