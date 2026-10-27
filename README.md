@@ -66,7 +66,7 @@ pip install -r requirements.txt
 pythonw pdfsorter.pyw
 ```
 
-Or start the GUI directly with `python pdfsorter.py` (no arguments opens the graphical interface).
+Or start the GUI directly with `python pdfsorter.py` (no arguments opens the graphical interface). On Windows, if this starts with `python.exe`, the GUI automatically hands off to `pythonw.exe` (or uses `CREATE_NO_WINDOW` as a fallback), so no console window is left behind. CLI commands such as `--check` continue to use the console.
 
 ### Upgrading from the old 1.0.0 / 1.1.0
 

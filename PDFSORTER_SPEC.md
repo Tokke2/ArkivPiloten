@@ -160,6 +160,20 @@
 > hoppas över. Ingen Tk-session behövs. Versionen är INTE höjd och ingen
 > release är publicerad.
 >
+> **Ej publicerad än — konsolfri start av GUI (2026-10-27).**
+> Önskemål: inget konsolfönster när appens GUI startar, även om Windows
+> startar `pdfsorter.py` med `python.exe` i stället för via `.pyw`.
+> (a) En vanlig GUI-start (utan CLI-argument, eller enbart `--tray` /
+> `--resume-watch`) lämnar tidigt över till `pythonw.exe`; om den saknas
+> startas samma interpreter med `CREATE_NO_WINDOW`. Handoff-markören
+> förhindrar startloop. CLI-kommandon som `--check` påverkas inte.
+> (b) Ett misslyckat processanrop faller tillbaka till nuvarande process,
+> så ett startfel aldrig hindrar GUI:t från att öppnas.
+> (c) 6 tester i `tests/test_console_free_gui.py` täcker pythonw,
+> reservstart, CLI-undantag, loopskydd, felreserv och att överlämningen
+> sker innan GUI-initialisering. Versionen är INTE höjd och ingen release
+> är publicerad.
+>
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
 > bara till `stderr`, som inte finns när appen startar med `pythonw`, och

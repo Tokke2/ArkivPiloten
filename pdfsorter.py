@@ -9578,7 +9578,52 @@ def run_cli(args: argparse.Namespace) -> int:
     return 0
 
 
+_GUI_CONSOLE_HANDOFF_ENV = "ARKIVPILOTEN_GUI_HANDOFF"
+
+
+def _start_gui_without_console(argv: List[str]) -> bool:
+    """Starta GUI:t utan konsol även om pdfsorter.py körs med python.exe.
+
+    Windows dubbelklick på en .py-fil kan starta python.exe och lämna en
+    svart konsol bakom GUI:t. Vanlig GUI-start flyttas därför tidigt till
+    pythonw.exe (eller CREATE_NO_WINDOW som reserv). CLI-kommandon påverkas
+    inte, och markörvariabeln skyddar mot en eventuell startloop.
+    """
+    if (not sys.platform.startswith("win")
+            or os.environ.get(_GUI_CONSOLE_HANDOFF_ENV)
+            or any(arg not in ("--tray", "--resume-watch") for arg in argv)):
+        return False
+    exe = Path(sys.executable or "python.exe")
+    if exe.name.lower() == "pythonw.exe":
+        return False
+    pythonw = exe.with_name("pythonw.exe")
+    use_pythonw = pythonw.is_file()
+    interpreter = str(pythonw if use_pythonw else exe)
+    command = [interpreter, str(Path(__file__).resolve()), *argv]
+    env = os.environ.copy()
+    env[_GUI_CONSOLE_HANDOFF_ENV] = "1"
+    kwargs: Dict[str, Any] = {
+        "cwd": str(Path(__file__).resolve().parent),
+        "env": env,
+    }
+    if not use_pythonw:
+        # Alla normala Windows-Python-installationer har pythonw.exe, men
+        # CREATE_NO_WINDOW håller även reservvägen konsolfri.
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.Popen(command, **kwargs)
+        return True
+    except Exception:
+        # Om handoffen misslyckas fortsätter vi i processen som anropades;
+        # bättre ett fungerande GUI än att appen inte startar alls.
+        return False
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    args_for_handoff = list(sys.argv[1:] if argv is None else argv)
+    if _start_gui_without_console(args_for_handoff):
+        return 0
+
     # Sätts före första fönstret så att Windows visar vår egen ikon i
     # aktivitetsfältet i stället för Pythons fjäder - även vid autostart
     # (pythonw ... --tray), som inte går via pdfsorter.pyw. Ofarligt no-op

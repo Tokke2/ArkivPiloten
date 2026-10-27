@@ -457,6 +457,9 @@ def test_watchdog_skips_a_check_that_is_not_due(tmp_path, monkeypatch):
     monkeypatch.setenv("PDFSORTER_HOME", str(tmp_path / "data"))
     app = _Sken()
     app.settings["last_update_check"] = _tid(2)     # sökte för två timmar sen
+    # Klockan styrs inte av den historiska testkonstanten NU i den här
+    # integrationen; fixera beslutet så testet inte blir tidsberoende.
+    monkeypatch.setattr(app, "_uppdatering_dags", lambda: False)
 
     def _nej(*a, **k):
         raise AssertionError("GitHub ska inte kontaktas före tolv timmar")
