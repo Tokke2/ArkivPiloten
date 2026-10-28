@@ -45,7 +45,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 - 🔍 **OCR for scanned PDFs** (Tesseract), including logos in letterheads of otherwise text-based files
 - 💡 **10 keyword suggestions per uncertain file** — tick the right ones in the review dialog and the file (and future lookalikes) sort themselves
 - ↩️ **Never destructive** — files are never overwritten (name clashes become `invoice (2).pdf`), and every move can be undone
-- 🧰 **Tray icon, autostart, single instance**, dark / light / high-contrast themes, HiDPI-aware
+- 🧰 **Tray icon, autostart, single instance** — closing or minimizing hides the app in the system tray by default; dark / light / high-contrast themes, HiDPI-aware
 - 🪵 **Session logging** in `logs/` and a one-click diagnostics bundle (*Copy diagnostics*) for support
 - 🎒 **Portable by default** — settings, rules, history, logs, cache, icons, backups, updates and temp files live in subfolders of the app folder (`json/`, `logs/`, …). If the app folder is read-only (e.g. `/Applications` or `/opt`), data moves to the standard per-user folder instead; override with `PDFSORTER_HOME`
 - 🧹 **Smart cache cleanup** — runs every 24 hours; removes cache unused for 30 days and the oldest entries above 1,500 files / 512 MB. Corrupt entries are discarded when read. A manual “Clean cache now” action is available under Settings → Cache and storage. Only regenerable PDF text-cache files are touched.
@@ -249,7 +249,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 - 🔍 **OCR för skannade PDF:er** (Tesseract), inklusive logotyper i brevhuvuden på i övrigt textbaserade filer
 - 💡 **10 stödordsförslag per osäker fil** — bocka i rätt ord i granskningsrutan så sorterar sig filen (och framtida liknande filer) själva
 - ↩️ **Aldrig destruktiv** — filer skrivs aldrig över (namnkrockar blir `faktura (2).pdf`), och varje flytt går att ångra
-- 🧰 **Tray-ikon, autostart, enkelinstans**, mörkt/ljust/högkontrast-tema, HiDPI-medveten
+- 🧰 **Tray-ikon, autostart, enkelinstans** — stäng eller minimera så göms appen i systemfältet som standard; mörkt/ljust/högkontrast-tema, HiDPI-medveten
 - 🪵 **Sessionsloggning** i `logs/` och ett diagnostikpaket med ett klick (*Kopiera diagnostik*) för support
 - 🎒 **Portabelt som standard** — inställningar, regler, historik, loggar, cache, ikoner, säkerhetskopior, uppdateringar och tempfiler bor i appmappens undermappar (`json/`, `logs/`, …). Är appmappen skrivskyddad (t.ex. `/Applications` eller `/opt`) flyttas datan till användarens ordinarie datamapp i stället; `PDFSORTER_HOME` styr om
 - 🧹 **Smart cacherensning** — körs var 24:e timme och tar bort cache som inte använts på 30 dagar samt äldsta poster över 1 500 filer / 512 MB. Skadade poster rensas när de läses. Manuell knapp finns under Inställningar → Cache och lagring. Bara återskapbar PDF-textcache påverkas.

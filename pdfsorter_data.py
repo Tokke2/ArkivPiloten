@@ -601,9 +601,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "autostart": False,          # starta med operativsystemet
     "start_minimized": False,    # göm fönstret direkt, ligg i systemfältet
     "tray_enabled": True,        # visa ikon i systemfältet
-    "close_to_tray": True,       # krysset minimerar i stället för att avsluta
-    "minimize_to_tray": False,   # minimering göms i systemfältet (annars kvar
-                                 # i aktivitetsfältet - krysset styr sitt eget)
+    "close_to_tray": True,       # krysset gömmer appen i systemfältet
+    "minimize_to_tray": True,    # minimering gömmer också appen i systemfältet
+    "tray_minimize_migrated_v1": False,  # intern engångsmigrering av äldre val
     "autowatch_on_start": False, # slå på bevakning direkt vid start
     "notify": True,              # popup-notis när filer sorterats
     "rescan_after_learn": True,  # skanna om allt när ett nytt stödord lärts in
@@ -621,6 +621,17 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 }
 
 
+def _migrate_tray_behavior(settings: Dict[str, Any]) -> bool:
+    """Engångsvis: stäng och minimera till systemfältet enligt användarönskemål."""
+    if settings.get("tray_minimize_migrated_v1", False):
+        return False
+    settings["tray_enabled"] = True
+    settings["close_to_tray"] = True
+    settings["minimize_to_tray"] = True
+    settings["tray_minimize_migrated_v1"] = True
+    return True
+
+
 def load_settings() -> Dict[str, Any]:
     with _io_lock():
         data = _read_json(settings_path(), {})
@@ -629,6 +640,11 @@ def load_settings() -> Dict[str, Any]:
         for k, v in data.items():
             if k in s:
                 s[k] = v
+    if _migrate_tray_behavior(s):
+        try:
+            save_settings(s)
+        except Exception:
+            pass
     # Engångsmigrering (ANVÄNDARORDER 2026-09-28: "ska även skanna
     # undermapparna i vald mapp"): gamla installationer har recursive=false
     # sparad som standardvärde. Slå på undermappar en gång, och logga-

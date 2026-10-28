@@ -4247,15 +4247,16 @@ def _minimize_action(state: str, settings: Dict[str, Any],
     igen, och kön fortsatte skapa dialoger i en död Tk.
 
     Minimering och krysset är två olika saker: close_to_tray styr bara
-    krysset (som det står i inställningen), medan minimize_to_tray styr
-    vad som händer när fönstret minimeras. Standard är att minimera
-    normalt - ingen ska bli av med fönstret av misstag.
+    krysset, medan minimize_to_tray styr vad som händer när fönstret
+    minimeras. Båda går till systemfältet som standard. Med en öppen
+    granskningsdialog stannar fönstret ändå i aktivitetsfältet för att
+    dialogen inte ska bli frikopplad från sitt huvudfönster.
     """
     if str(state or "") != "iconic":
         return "none"
     if modal_open:
         return "taskbar"
-    if not has_tray or not settings.get("minimize_to_tray", False):
+    if not has_tray or not settings.get("minimize_to_tray", True):
         return "taskbar"
     return "tray"
 
@@ -5740,7 +5741,7 @@ class App:
         self.var_tray = tk.BooleanVar(value=self.settings.get("tray_enabled", True))
         self.var_close_tray = tk.BooleanVar(value=self.settings.get("close_to_tray", True))
         self.var_min_tray = tk.BooleanVar(
-            value=self.settings.get("minimize_to_tray", False))
+            value=self.settings.get("minimize_to_tray", True))
         self.var_autowatch = tk.BooleanVar(value=self.settings.get("autowatch_on_start", False))
         self.var_notify = tk.BooleanVar(value=self.settings.get("notify", True))
 
@@ -8164,7 +8165,7 @@ class App:
             self.var_tray.set(self.settings.get("tray_enabled", True))
             self.var_close_tray.set(self.settings.get("close_to_tray", True))
             self.var_min_tray.set(
-                self.settings.get("minimize_to_tray", False))
+                self.settings.get("minimize_to_tray", True))
             self.var_startmin.set(self.settings.get("start_minimized", False))
             self.var_autowatch.set(self.settings.get("autowatch_on_start", False))
             self.var_notify.set(self.settings.get("notify", True))

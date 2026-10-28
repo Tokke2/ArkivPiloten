@@ -194,6 +194,19 @@
 > 24-timmarsgränsen, schematick och GUI-/inställningskoppling. Versionen är INTE höjd
 > och ingen release är publicerad.
 >
+> **Ej publicerad än — stäng och minimera till systemfältet (2026-10-28).**
+> Önskemål: både krysset och minimera-knappen ska gömma appen vid klockan.
+> (a) `close_to_tray`, `minimize_to_tray` och `tray_enabled` är på som
+> standard. Befintliga inställningar migreras en gång till detta beteende
+> (`tray_minimize_migrated_v1`); användaren kan därefter ändra valen separat.
+> (b) Utan tillgänglig systemfältsikon minimeras fönstret till aktivitetsfältet
+> i stället, och stängning följer sin befintliga säkra reservväg. Med en öppen
+> granskningsdialog stannar huvudfönstret i aktivitetsfältet tills dialogen
+> är stängd, så att den inte blir frikopplad från sitt huvudfönster.
+> (c) 10 tester i `tests/test_window_behavior.py` täcker standardvärden,
+> migrering, val efter migrering, tray-krav och dialogskydd. Versionen är
+> INTE höjd och ingen release är publicerad.
+>
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
 > bara till `stderr`, som inte finns när appen startar med `pythonw`, och

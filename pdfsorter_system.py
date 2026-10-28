@@ -2007,10 +2007,11 @@ HELP_CONTENT: List[Tuple[str, str]] = [
              "klickar på krysset. Högerklicka på ikonen för snabbmenyn: visa "
              "fönstret, sortera nu, slå på bevakning, öppna granskningskön "
              "eller avsluta."),
-    ("body", "Att minimera fönstret är en egen sak: det stannar i "
-             "aktivitetsfältet som vanliga program. Vill du hellre att även "
-             "minimering ska gömma fönstret vid klockan, kryssa i "
-             "\"Minimera till systemfältet\" under Inställningar."),
+    ("body", "Att stänga med krysset och att minimera fönstret gömmer båda "
+             "appen vid klockan som standard. Under Inställningar kan du "
+             "ändra beteendet var för sig. Om en granskningsdialog är öppen "
+             "stannar huvudfönstret i aktivitetsfältet tills dialogen är klar, "
+             "så att den inte blir frikopplad från appen."),
     ("body", "Ikonen visar ett dokument som delas upp i tre färgade mappar — "
              "precis vad appen gör. En grön prick betyder att bevakningen är "
              "igång, så du ser det även när fönstret är gömt."),
