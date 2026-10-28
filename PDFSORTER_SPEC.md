@@ -203,9 +203,25 @@
 > i stället, och stängning följer sin befintliga säkra reservväg. Med en öppen
 > granskningsdialog stannar huvudfönstret i aktivitetsfältet tills dialogen
 > är stängd, så att den inte blir frikopplad från sitt huvudfönster.
-> (c) 10 tester i `tests/test_window_behavior.py` täcker standardvärden,
+> (c) 12 tester i `tests/test_window_behavior.py` täcker standardvärden,
 > migrering, val efter migrering, tray-krav och dialogskydd. Versionen är
 > INTE höjd och ingen release är publicerad.
+>
+> **Ej publicerad än — starta med operativsystemet, minimerad (2026-10-28).**
+> Önskemål: starta automatiskt vid inloggning och göm fönstret i systemfältet.
+> (a) `autostart` och `start_minimized` är på som standard. En ny
+> engångsmigrering (`autostart_minimized_migrated_v1`) aktiverar båda på
+> befintliga installationer och synkar autostarten till operativsystemet.
+> Autostart kan senare stängas av under Inställningar. OS-startposten använder
+> `--tray`; `start_minimized` styr dessutom en vanlig manuell start.
+> (b) `tray_enabled` slås på i migreringen. Om systemfältet inte finns eller
+> ikonen inte kan startas visas huvudfönstret i stället; ingen app blir
+> osynlig. Windows- och macOS/Linux-installationsflöden aktiverar autostart
+> som standard, med ett uttryckligt avval på Windows och `--no-autostart`.
+> (c) `App.__init__` synkar OS-posten vid start och uppdaterar kryssrutan
+> efter resultatet. 12 tester i `tests/test_window_behavior.py` täcker
+> standard, migrering, att användarval efter migrering bevaras och
+> persistent settings. Versionen är INTE höjd och ingen release är publicerad.
 >
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs

@@ -2,11 +2,18 @@
 """Stäng och minimera till systemfältet, med dialogskydd."""
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pdfsorter as P
 import pdfsorter_data as D
 
+ROOT = Path(__file__).resolve().parents[1]
 
-def test_defaults_send_close_and_minimize_to_tray():
+
+def test_defaults_start_with_os_minimized_to_tray():
+    assert D.DEFAULT_SETTINGS["autostart"] is True
+    assert D.DEFAULT_SETTINGS["start_minimized"] is True
     assert D.DEFAULT_SETTINGS["tray_enabled"] is True
     assert D.DEFAULT_SETTINGS["close_to_tray"] is True
     assert D.DEFAULT_SETTINGS["minimize_to_tray"] is True
@@ -73,15 +80,32 @@ def test_user_can_change_tray_choices_after_one_time_migration():
     assert settings["minimize_to_tray"] is False
 
 
-def test_load_settings_persists_one_time_tray_migration(tmp_path, monkeypatch):
+def test_autostart_minimized_migration_is_one_time():
+    settings = {"autostart": False, "start_minimized": False,
+                "tray_enabled": False}
+    assert D._migrate_autostart_minimized(settings)
+    assert settings["autostart"] is True
+    assert settings["start_minimized"] is True
+    assert settings["tray_enabled"] is True
+    assert settings["autostart_minimized_migrated_v1"] is True
+    settings["autostart"] = False
+    settings["start_minimized"] = False
+    assert not D._migrate_autostart_minimized(settings)
+    assert settings["autostart"] is False
+    assert settings["start_minimized"] is False
+
+
+def test_load_settings_persists_one_time_startup_migrations(tmp_path, monkeypatch):
     monkeypatch.setenv("PDFSORTER_HOME", str(tmp_path / "data"))
     D._CONFIG_DIR_CACHE.clear()
     monkeypatch.setattr(D, "_JSON_DIR_CACHE", None)
     monkeypatch.setattr(D, "_JSON_FLYTTAD", False)
     old = dict(D.DEFAULT_SETTINGS)
     old.update({"tray_enabled": False, "close_to_tray": False,
-                "minimize_to_tray": False,
-                "tray_minimize_migrated_v1": False})
+                "minimize_to_tray": False, "autostart": False,
+                "start_minimized": False,
+                "tray_minimize_migrated_v1": False,
+                "autostart_minimized_migrated_v1": False})
     D.save_settings(old)
 
     migrated = D.load_settings()
@@ -89,9 +113,29 @@ def test_load_settings_persists_one_time_tray_migration(tmp_path, monkeypatch):
     assert migrated["close_to_tray"] is True
     assert migrated["minimize_to_tray"] is True
     assert migrated["tray_minimize_migrated_v1"] is True
+    assert migrated["autostart"] is True
+    assert migrated["start_minimized"] is True
+    assert migrated["autostart_minimized_migrated_v1"] is True
 
-    migrated.update({"close_to_tray": False, "minimize_to_tray": False})
+    migrated.update({"close_to_tray": False, "minimize_to_tray": False,
+                     "autostart": False, "start_minimized": False})
     D.save_settings(migrated)
     later = D.load_settings()
     assert later["close_to_tray"] is False
     assert later["minimize_to_tray"] is False
+    assert later["autostart"] is False
+    assert later["start_minimized"] is False
+
+
+def test_app_wires_autostart_sync_and_minimized_start():
+    source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    app = next(node for node in tree.body
+               if isinstance(node, ast.ClassDef) and node.name == "App")
+    init = next(node for node in app.body
+                if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    text = ast.unparse(init)
+    assert "sync_autostart(vill)" in text
+    assert "start_minimized" in text
+    assert "get('start_minimized', True)" in text
+    assert "hide_window" in text

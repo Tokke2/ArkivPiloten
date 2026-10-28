@@ -45,7 +45,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 - 🔍 **OCR for scanned PDFs** (Tesseract), including logos in letterheads of otherwise text-based files
 - 💡 **10 keyword suggestions per uncertain file** — tick the right ones in the review dialog and the file (and future lookalikes) sort themselves
 - ↩️ **Never destructive** — files are never overwritten (name clashes become `invoice (2).pdf`), and every move can be undone
-- 🧰 **Tray icon, autostart, single instance** — closing or minimizing hides the app in the system tray by default; dark / light / high-contrast themes, HiDPI-aware
+- 🧰 **Tray icon, autostart, single instance** — starts with the OS and minimized to the tray by default; closing or minimizing also hides it in the tray. Change both choices under Settings.
 - 🪵 **Session logging** in `logs/` and a one-click diagnostics bundle (*Copy diagnostics*) for support
 - 🎒 **Portable by default** — settings, rules, history, logs, cache, icons, backups, updates and temp files live in subfolders of the app folder (`json/`, `logs/`, …). If the app folder is read-only (e.g. `/Applications` or `/opt`), data moves to the standard per-user folder instead; override with `PDFSORTER_HOME`
 - 🧹 **Smart cache cleanup** — runs every 24 hours; removes cache unused for 30 days and the oldest entries above 1,500 files / 512 MB. Corrupt entries are discarded when read. A manual “Clean cache now” action is available under Settings → Cache and storage. Only regenerable PDF text-cache files are touched.
@@ -57,8 +57,8 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 ## Quick start (Windows)
 
 1. Double-click **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — it installs the latest stable Python if needed (per-user, no admin required), upgrades pip, installs **all** Python add-ons from `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) with retry and import verification, installs Tesseract OCR with Swedish + English via winget (best effort), runs the app's own `--status` check, and then starts the app.
-2. Done. The app starts without a console window, and everything is saved in the app folder.
+   — it installs the latest stable Python if needed (per-user, no admin required), upgrades pip, installs **all** Python add-ons from `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) with retry and import verification, installs Tesseract OCR with Swedish + English via winget (best effort), runs the app's own `--status` check, and then starts the app. Autostart is enabled by default (press N to opt out; timeout defaults to yes).
+2. Done. The app starts without a console window, and will start with Windows minimized to the tray on future logins.
 
 ### Manual install
 
@@ -87,8 +87,8 @@ Download the launcher anywhere and double-click it — it finds the app folder o
 ## Quick start (macOS & Linux)
 
 ```bash
-./install.sh              # venv + requirements.txt, asks about autostart
-./install.sh --autostart  # ...or turn autostart on/off non-interactively
+./install.sh              # venv + requirements.txt, autostart on by default
+./install.sh --no-autostart # explicitly turn autostart off
 ./install.sh --uninstall  # remove autostart + shortcuts, keep your data
 ```
 
@@ -249,7 +249,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 - 🔍 **OCR för skannade PDF:er** (Tesseract), inklusive logotyper i brevhuvuden på i övrigt textbaserade filer
 - 💡 **10 stödordsförslag per osäker fil** — bocka i rätt ord i granskningsrutan så sorterar sig filen (och framtida liknande filer) själva
 - ↩️ **Aldrig destruktiv** — filer skrivs aldrig över (namnkrockar blir `faktura (2).pdf`), och varje flytt går att ångra
-- 🧰 **Tray-ikon, autostart, enkelinstans** — stäng eller minimera så göms appen i systemfältet som standard; mörkt/ljust/högkontrast-tema, HiDPI-medveten
+- 🧰 **Tray-ikon, autostart, enkelinstans** — startar med operativsystemet och minimerad i systemfältet som standard; både stäng och minimera gömmer appen. Ändra valen separat under Inställningar.
 - 🪵 **Sessionsloggning** i `logs/` och ett diagnostikpaket med ett klick (*Kopiera diagnostik*) för support
 - 🎒 **Portabelt som standard** — inställningar, regler, historik, loggar, cache, ikoner, säkerhetskopior, uppdateringar och tempfiler bor i appmappens undermappar (`json/`, `logs/`, …). Är appmappen skrivskyddad (t.ex. `/Applications` eller `/opt`) flyttas datan till användarens ordinarie datamapp i stället; `PDFSORTER_HOME` styr om
 - 🧹 **Smart cacherensning** — körs var 24:e timme och tar bort cache som inte använts på 30 dagar samt äldsta poster över 1 500 filer / 512 MB. Skadade poster rensas när de läses. Manuell knapp finns under Inställningar → Cache och lagring. Bara återskapbar PDF-textcache påverkas.
@@ -261,8 +261,8 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 ## Kom igång (Windows)
 
 1. Dubbelklicka på **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — den installerar senaste stabila Python vid behov (per användare, ingen admin krävs), uppgraderar pip, installerar **alla** Python-tillägg från `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) med retry och importkontroll, installerar Tesseract OCR med svenska + engelska via winget (bästa försök), kör appens egen `--status`-kontroll och startar sedan appen.
-2. Klart. Appen startar utan konsolfönster, och allt sparas i appmappen.
+   — den installerar senaste stabila Python vid behov (per användare, ingen admin krävs), uppgraderar pip, installerar **alla** Python-tillägg från `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) med retry och importkontroll, installerar Tesseract OCR med svenska + engelska via winget (bästa försök), kör appens egen `--status`-kontroll och startar sedan appen. Autostart är på som standard (tryck N för att välja bort; vid tidsgräns blir svaret ja).
+2. Klart. Appen startar utan konsolfönster, och startar vid framtida inloggningar minimerad i systemfältet.
 
 ### Uppgradera från gamla 1.0.0 / 1.1.0
 
@@ -291,8 +291,8 @@ Eller starta gränssnittet direkt med `python pdfsorter.py` (utan argument öppn
 ## Kom igång (macOS & Linux)
 
 ```bash
-./install.sh              # venv + requirements.txt, frågar om autostart
-./install.sh --autostart  # ...eller slå på/av autostart utan frågor
+./install.sh              # venv + requirements.txt, autostart på som standard
+./install.sh --no-autostart # stäng av autostart uttryckligen
 ./install.sh --uninstall  # ta bort autostart + genvägar, behåll din data
 ```
 

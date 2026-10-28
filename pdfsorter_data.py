@@ -598,8 +598,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "dry_run": False,
     # -- nytt --
     "theme": "ljus",             # ljus | mork - växlas live i Inställningar
-    "autostart": False,          # starta med operativsystemet
-    "start_minimized": False,    # göm fönstret direkt, ligg i systemfältet
+    "autostart": True,           # starta med operativsystemet
+    "start_minimized": True,     # starta gömd i systemfältet
+    "autostart_minimized_migrated_v1": False,  # intern engångsmigrering
     "tray_enabled": True,        # visa ikon i systemfältet
     "close_to_tray": True,       # krysset gömmer appen i systemfältet
     "minimize_to_tray": True,    # minimering gömmer också appen i systemfältet
@@ -632,6 +633,17 @@ def _migrate_tray_behavior(settings: Dict[str, Any]) -> bool:
     return True
 
 
+def _migrate_autostart_minimized(settings: Dict[str, Any]) -> bool:
+    """Engångsvis: autostart på och starta minimerad till systemfältet."""
+    if settings.get("autostart_minimized_migrated_v1", False):
+        return False
+    settings["tray_enabled"] = True
+    settings["autostart"] = True
+    settings["start_minimized"] = True
+    settings["autostart_minimized_migrated_v1"] = True
+    return True
+
+
 def load_settings() -> Dict[str, Any]:
     with _io_lock():
         data = _read_json(settings_path(), {})
@@ -641,6 +653,11 @@ def load_settings() -> Dict[str, Any]:
             if k in s:
                 s[k] = v
     if _migrate_tray_behavior(s):
+        try:
+            save_settings(s)
+        except Exception:
+            pass
+    if _migrate_autostart_minimized(s):
         try:
             save_settings(s)
         except Exception:

@@ -4,12 +4,12 @@
 # ==========================================================================
 # Skapar en isolerad Python-miljö (.venv) i appmappen, installerar de
 # pinnade paketen från requirements.txt, kontrollerar Tesseract/Tkinter
-# och kan slå på autostart. Inget installeras systembrett och inga
-# sudo-kommandon körs utan att du själv klistrar in dem.
+# och aktiverar autostart som standard. Inget installeras systembrett
+# och inga sudo-kommandon körs utan att du själv klistrar in dem.
 #
-#   ./install.sh                  frågar om autostart
+#   ./install.sh                  aktiverar autostart
 #   ./install.sh --autostart      slår på autostart
-#   ./install.sh --no-autostart   rör inte autostart
+#   ./install.sh --no-autostart   stänger av autostart
 #   ./install.sh --uninstall      tar bort autostart + genvägar (data kvar)
 #
 # Windows: använd "ArkivPiloten - Installera senaste Python och starta.bat".
@@ -18,7 +18,7 @@ set -euo pipefail
 
 APPDIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PYTHON="${PYTHON:-python3}"
-AUTOSTART="ask"
+AUTOSTART="yes"
 MAKE_BUNDLE=1
 MAKE_SHORTCUT=1
 UNINSTALL=0
@@ -32,14 +32,14 @@ Skapar en isolerad Python-miljö (.venv), installerar requirements.txt,
 kontrollerar Tesseract/Tkinter och kan slå på autostart. Inget installeras
 systembrett och inga sudo-kommandon körs.
 
-  ./install.sh                  frågar om autostart
+  ./install.sh                  aktiverar autostart som standard
   ./install.sh --autostart      slår på autostart
-  ./install.sh --no-autostart   rör inte autostart
+  ./install.sh --no-autostart   stänger av autostart
   ./install.sh --uninstall      tar bort autostart + genvägar (data kvar)
 EOF
     echo
     echo "Flaggor:"
-    echo "  --autostart / --no-autostart   slå på/av autostart (annars frågas du)"
+    echo "  --autostart / --no-autostart   slå på/av autostart (standard: på)"
     echo "  --no-app-bundle                skapa ingen .app på macOS"
     echo "  --no-shortcut                  skapa inga skrivbords-/menyikoner"
     echo "  --no-deps                      hoppa över pip-installationen"
@@ -212,21 +212,12 @@ PY
 make_app_bundle
 
 # -- autostart -------------------------------------------------------------
-if [ "$AUTOSTART" = "ask" ]; then
-    if [ -t 0 ]; then
-        printf 'Starta ArkivPiloten automatiskt vid inloggning? [j/N] '
-        read -r svar || svar=""
-        case "$svar" in j|J|ja|Ja|JA|y|Y|yes|Yes) AUTOSTART="yes" ;; *) AUTOSTART="no" ;; esac
-    else
-        AUTOSTART="no"
-    fi
-fi
-
 if [ "$AUTOSTART" = "yes" ]; then
     say "Slår på autostart ..."
     "$PYBIN" "$APPDIR/pdfsorter.py" --install-autostart || warn "Autostarten kunde inte slås på. Öppna appen och kryssa i Inställningar i stället."
 else
-    say "Autostart lämnas avstängt (slå på i appen under Inställningar)."
+    say "Stänger av autostart enligt --no-autostart ..."
+    "$PYBIN" "$APPDIR/pdfsorter.py" --remove-autostart || warn "Autostarten kunde inte stängas av."
 fi
 
 say "Klart!"

@@ -4748,6 +4748,10 @@ class App:
                         "inställningen uppdaterades i stället för att "
                         "posten togs bort", "warn")
             ok, msg = sync_autostart(vill)
+            try:
+                self.var_autostart.set(bool(autostart_enabled()))
+            except Exception:
+                pass
             self._h("autostart", f"Startsynk: {msg}",
                     "ok" if ok else "warn")
         except Exception as exc:
@@ -4800,7 +4804,7 @@ class App:
         # På Linux/GNOME utan AppIndicator blev appen tidigare helt osynlig
         # (inget fönster, ingen ikon) när autostarten körde --tray.
         vill_dold = bool(start_hidden
-                         or self.settings.get("start_minimized", False))
+                         or self.settings.get("start_minimized", True))
         if vill_dold:
             varför = ("--tray" if start_hidden
                       else "inställningen 'starta minimerad'")
@@ -5736,7 +5740,9 @@ class App:
         for c in range(4):
             sysbox.columnconfigure(c, weight=1)
 
-        self.var_autostart = tk.BooleanVar(value=autostart_enabled())
+        self.var_autostart = tk.BooleanVar(
+            value=bool(self.settings.get("autostart", False)
+                      or autostart_enabled()))
         self.var_startmin = tk.BooleanVar(value=self.settings.get("start_minimized", False))
         self.var_tray = tk.BooleanVar(value=self.settings.get("tray_enabled", True))
         self.var_close_tray = tk.BooleanVar(value=self.settings.get("close_to_tray", True))

@@ -2017,9 +2017,11 @@ HELP_CONTENT: List[Tuple[str, str]] = [
              "igång, så du ser det även när fönstret är gömt."),
     ("note", "Under Inställningar finns knappen Spara ikonfil, om du vill "
              "använda ikonen till en egen genväg."),
-    ("body", "Vill du att appen ska starta med datorn: kryssa i \"Starta "
-             "automatiskt med datorn\" och gärna även \"Starta minimerad\" "
-             "och \"Starta bevakningen direkt\". Då sköter den sig helt själv."),
+    ("body", "Som standard startar appen med datorn och minimerad i "
+             "systemfältet. Ändra valen under Inställningar → Start och "
+             "systemfält. Om systemfältet saknas visas fönstret i stället. "
+             "Slå även på \"Starta bevakningen direkt\" om mapparna ska "
+             "bevakas utan att du öppnar appen."),
 
     ("h2", "Uppdateringar sköter sig själva"),
     ("body", "Appen letar efter en ny version två gånger per dygn — tyst, i "
