@@ -5,7 +5,7 @@ name: release
 # senaste releasen - därför måste releasen alltid spegla senaste koden.
 on:
   push:
-    branches: [main, arena/8202c21b-arkivpiloten]
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
