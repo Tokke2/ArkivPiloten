@@ -223,6 +223,21 @@
 > standard, migrering, att användarval efter migrering bevaras och
 > persistent settings. Versionen är INTE höjd och ingen release är publicerad.
 >
+> **Korrigering (2026-10-28) — manuell start synlig och sortering får inte gömmas.**
+> Loggen visade att en vanlig start (utan `--tray`) ändå gömdes av den
+> sparade `start_minimized=true`-inställningen. Samtidigt kunde minimering
+> under en batchsortering gömma `ConflictDialog`; bakgrundstråden väntade då
+> 120 sekunder per dubblett och appen såg ut att ha låst sig.
+> (a) Nya och befintliga inställningar får `start_minimized=false` en gång;
+> vanlig manuell start visar fönstret. OS-autostartens `--tray` fortsätter
+> starta gömt enligt tidigare önskemål. Användaren kan ändra manuell start
+> under Inställningar.
+> (b) Minimering och gömning avvisas medan batchsortering körs; fönstret
+> återställs så att dubblettdialoger går att se och svara på. Idle-minimering
+> och stäng-till-systemfältet behålls.
+> (c) Tester täcker migreringen, batchminimering och dialogskydd.
+> Versionsnumret höjs inte och releasen uppdateras med samma versionsnummer.
+>
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
 > bara till `stderr`, som inte finns när appen startar med `pythonw`, och

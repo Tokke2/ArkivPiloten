@@ -599,8 +599,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # -- nytt --
     "theme": "ljus",             # ljus | mork - växlas live i Inställningar
     "autostart": True,           # starta med operativsystemet
-    "start_minimized": True,     # starta gömd i systemfältet
+    "start_minimized": False,    # manuell start visas normalt som standard
     "autostart_minimized_migrated_v1": False,  # intern engångsmigrering
+    "manual_start_visible_migrated_v1": False,  # intern engångsmigrering
     "tray_enabled": True,        # visa ikon i systemfältet
     "close_to_tray": True,       # krysset gömmer appen i systemfältet
     "minimize_to_tray": True,    # minimering gömmer också appen i systemfältet
@@ -634,13 +635,22 @@ def _migrate_tray_behavior(settings: Dict[str, Any]) -> bool:
 
 
 def _migrate_autostart_minimized(settings: Dict[str, Any]) -> bool:
-    """Engångsvis: autostart på och starta minimerad till systemfältet."""
+    """Engångsvis: autostart på och OS-start till systemfältet."""
     if settings.get("autostart_minimized_migrated_v1", False):
         return False
     settings["tray_enabled"] = True
     settings["autostart"] = True
     settings["start_minimized"] = True
     settings["autostart_minimized_migrated_v1"] = True
+    return True
+
+
+def _migrate_manual_start_visible(settings: Dict[str, Any]) -> bool:
+    """Visa manuella starter som standard; OS-autostart använder fortfarande --tray."""
+    if settings.get("manual_start_visible_migrated_v1", False):
+        return False
+    settings["start_minimized"] = False
+    settings["manual_start_visible_migrated_v1"] = True
     return True
 
 
@@ -658,6 +668,11 @@ def load_settings() -> Dict[str, Any]:
         except Exception:
             pass
     if _migrate_autostart_minimized(s):
+        try:
+            save_settings(s)
+        except Exception:
+            pass
+    if _migrate_manual_start_visible(s):
         try:
             save_settings(s)
         except Exception:

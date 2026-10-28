@@ -4088,6 +4088,8 @@ class ConflictDialog:
         self.win.bind("<Escape>", lambda e: self._avbryt())
         self.win.update_idletasks()
         try:
+            self.win.lift()
+            self.win.focus_force()
             self.win.grab_set()
         except Exception:
             pass
@@ -4233,13 +4235,15 @@ def _translate_ui_tree(widget, mapping) -> int:
 
 
 def _minimize_action(state: str, settings: Dict[str, Any],
-                     has_tray: bool, modal_open: bool = False) -> str:
+                     has_tray: bool, modal_open: bool = False,
+                     busy: bool = False) -> str:
     """Vad ska hända när fönstret minimeras?
 
     "none"    - inte en minimering (t.ex. withdraw, eller <Unmap> av annat
                 skäl som att byta virtuellt skrivbord)
     "tray"    - göm fönstret i systemfältet
     "taskbar" - låt det ligga kvar minimerat i aktivitetsfältet
+    "restore" - återställ det medan en batchsortering pågår
 
     Är en modal dialog öppen (matchningsdialogen) går minimeringen ALLTID
     till aktivitetsfältet. Att withdrawa huvudfönstret då lämnar en
@@ -4256,6 +4260,8 @@ def _minimize_action(state: str, settings: Dict[str, Any],
         return "none"
     if modal_open:
         return "taskbar"
+    if busy:
+        return "restore"
     if not has_tray or not settings.get("minimize_to_tray", True):
         return "taskbar"
     return "tray"
@@ -4800,11 +4806,11 @@ class App:
         # det som inte är pip (Tesseract/svenska). Aldrig blockerande.
         self.root.after(900, self._autoinstallera_tillagg)
 
-        # Starta minimerad - men bara om ikonen garanterat går att se.
-        # På Linux/GNOME utan AppIndicator blev appen tidigare helt osynlig
-        # (inget fönster, ingen ikon) när autostarten körde --tray.
+        # En vanlig manuell start visas normalt. OS-autostarten använder
+        # --tray och startar fortfarande gömd; användarens val kan även
+        # begära dold manuell start. Dölj bara om ikonen kan visas säkert.
         vill_dold = bool(start_hidden
-                         or self.settings.get("start_minimized", True))
+                         or self.settings.get("start_minimized", False))
         if vill_dold:
             varför = ("--tray" if start_hidden
                       else "inställningen 'starta minimerad'")
@@ -9384,8 +9390,28 @@ class App:
         if self.queue and self.settings.get("ask_when_unsure", True):
             self.root.after(250, self._process_queue)
 
+    def _restore_for_active_run(self) -> None:
+        """Håll huvudfönstret synligt medan en batchsortering pågår."""
+        if not getattr(self, "_busy", False):
+            return
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.focus_force()
+            self.visible = True
+            self._sync_tray()
+        except Exception as exc:
+            self._fel(exc, "återställ fönster under sortering")
+
     def hide_window(self, reason: str = "") -> None:
         """Göm fönstret - appen fortsätter i systemfältet."""
+        if getattr(self, "_busy", False):
+            self._h("fönster", "Gömning/minimering avböjd medan "
+                    "sortering pågår - fönstret hålls synligt så att "
+                    "dubblettfrågor kan besvaras")
+            self._restore_for_active_run()
+            return
         if self._review_is_open():
             # En modal dialog väntar på svar. Withdrawar vi huvudfönstret
             # blir dialogen kvar utan förälder och går inte att få fram.
@@ -9431,8 +9457,12 @@ class App:
             return
         modal = self._review_is_open()
         action = _minimize_action(state, self.settings, bool(self.tray),
-                                  modal)
-        if action == "tray":
+                                  modal, busy=bool(getattr(self, "_busy", False)))
+        if action == "restore":
+            self._h("fönster", "Minimering ignoreras medan sortering pågår "
+                    "så att dubblettfrågor inte hamnar bakom systemfältet")
+            self.root.after(10, self._restore_for_active_run)
+        elif action == "tray":
             if getattr(self, "_hiding_for_minimize", False):
                 return
             self._hiding_for_minimize = True
