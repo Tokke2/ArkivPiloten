@@ -22,6 +22,7 @@ import hashlib
 import json
 import pathlib
 import re
+import subprocess
 import sys
 import zipfile
 
@@ -31,7 +32,9 @@ if str(ROOT) not in sys.path:
 
 from pdfsorter_system import (  # noqa: E402
     UPDATE_ASSET_NAME,
+    UPDATE_CONTENT_FILES,
     UPDATE_FILES,
+    UPDATE_MANIFEST_NAME,
     UPDATE_SUMS_NAME,
 )
 
@@ -94,13 +97,38 @@ def build(outdir: pathlib.Path = ROOT / "dist",
     version = app_version(root)
     outdir.mkdir(parents=True, exist_ok=True)
     zip_path = outdir / UPDATE_ASSET_NAME
-    saknade = [n for n in UPDATE_FILES if not (root / n).is_file()]
+    saknade = [n for n in UPDATE_CONTENT_FILES if not (root / n).is_file()]
     if saknade:
         raise SystemExit("Saknade filer: " + ", ".join(saknade))
 
+    file_hashes = {
+        name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+        for name in UPDATE_CONTENT_FILES
+    }
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = ""
+    manifest = {
+        "schema": 1,
+        "version": version,
+        "tag": f"v{version}",
+        "commit": commit,
+        "files": file_hashes,
+    }
+    manifest_path = outdir / UPDATE_MANIFEST_NAME
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for namn in UPDATE_FILES:
+        for namn in UPDATE_CONTENT_FILES:
             zf.write(root / namn, arcname=namn)
+        zf.write(manifest_path, arcname=UPDATE_MANIFEST_NAME)
 
     digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
     sums = outdir / UPDATE_SUMS_NAME
@@ -112,6 +140,9 @@ def build(outdir: pathlib.Path = ROOT / "dist",
         "zip": str(zip_path),
         "sums": str(sums),
         "sha256": digest,
+        "commit": commit,
+        "manifest": str(manifest_path),
+        "manifest_data": manifest,
         "files": list(UPDATE_FILES),
     }
     (outdir / "release.json").write_text(

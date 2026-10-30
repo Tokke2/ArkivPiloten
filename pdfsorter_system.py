@@ -783,7 +783,10 @@ def _launch_argv() -> Tuple[List[str], str]:
     exe = sys.executable or ("python.exe" if sys.platform.startswith("win")
                              else "python3")
     if sys.platform.startswith("win"):
-        # pythonw.exe kör helt utan konsolfönster
+        # Autostart kör huvudskriptet direkt med pythonw.exe - aldrig via
+        # .pyw-filassociationen, som kan ge Python-ikon i Startmenyn.
+        # AppUserModelID + ArkivPiloten.ico sätter vår identitet i fönster/
+        # aktivitetsfält, medan pythonw håller starten konsolfri.
         exe_w = Path(exe).with_name("pythonw.exe")
         if exe_w.exists():
             exe = str(exe_w)
@@ -3016,6 +3019,7 @@ UPDATE_REPO = "Tokke2/ArkivPiloten"
 UPDATE_RELEASES_LATEST = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_ASSET_NAME = "ArkivPiloten.zip"
 UPDATE_SUMS_NAME = "SHA256SUMS.txt"
+UPDATE_MANIFEST_NAME = "BUILD-MANIFEST.json"
 
 #: Bara dessa filer får ersättas av en uppdatering - allt i appmappen.
 #: Användardata (json/, logs/, cache/, backups/, updates/) rörs ALDRIG,
@@ -3030,8 +3034,9 @@ UPDATE_FILES = (
     "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
     "ArkivPiloten - Installera senaste Python och starta.bat",
     "README.md", "PDFSORTER_SPEC.md", "Stöd ArkivPiloten.html",
-    "swish_qr.png", "desktop.ini",
+    "swish_qr.png", "desktop.ini", UPDATE_MANIFEST_NAME,
 )
+UPDATE_CONTENT_FILES = tuple(n for n in UPDATE_FILES if n != UPDATE_MANIFEST_NAME)
 
 _PIP_PAKET_NAMN = ("PyMuPDF", "pypdf", "pdfminer.six", "Pillow",
                    "pystray", "pytesseract")
@@ -3073,10 +3078,13 @@ def _latest_release(timeout: float = 15.0) -> Optional[dict]:
     if not re.match(r"^[0-9][0-9A-Za-z.\-]*$", version):
         return None
     assets: Dict[str, str] = {}
+    asset_digests: Dict[str, str] = {}
     for a in data.get("assets") or []:
         if (isinstance(a, dict) and a.get("name")
                 and a.get("browser_download_url")):
-            assets[str(a["name"])] = str(a["browser_download_url"])
+            name = str(a["name"])
+            assets[name] = str(a["browser_download_url"])
+            asset_digests[name] = str(a.get("digest") or "")
     zip_url = assets.get(UPDATE_ASSET_NAME)
     if not zip_url:
         # Tillåt versionsnamngivna paket (ArkivPiloten-1.4.0.zip).
@@ -3098,41 +3106,104 @@ def _latest_release(timeout: float = 15.0) -> Optional[dict]:
     # Kroppens summa gäller ENDAST tagg-arkivet. Finns ett bifogat
     # paket måste summan komma från dess SHA256SUMS.txt - annars skulle
     # fel fil kunna verifieras mot fel hash.
+    build_manifest = None
+    marker = re.search(
+        r"<!--\s*ARKIVPILOTEN_BUILD_MANIFEST_BEGIN\s*(\{.*?\})\s*"
+        r"ARKIVPILOTEN_BUILD_MANIFEST_END\s*-->", notes, re.DOTALL)
+    if marker:
+        try:
+            candidate = json.loads(marker.group(1))
+            files = candidate.get("files", {})
+            if (candidate.get("schema") == 1
+                    and candidate.get("version") == version
+                    and isinstance(files, dict)
+                    and all(re.fullmatch(r"[0-9a-fA-F]{64}", str(v))
+                            for v in files.values())):
+                build_manifest = candidate
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            pass
+    commit_match = re.search(
+        r"Paket byggt från [`']?([0-9a-fA-F]{7,40})", notes)
+    release_commit = (str(build_manifest.get("commit") or "")
+                      if build_manifest else "")
+    if not release_commit and commit_match:
+        release_commit = commit_match.group(1).lower()
     return {
         "tag": tag,
         "version": version,
         "zip_url": zip_url or "",
         "sums_url": sums_url or "",
         "sha256": body_sha if (body_sha and not har_paketfil) else "",
+        "zip_digest": asset_digests.get(UPDATE_ASSET_NAME, ""),
+        "build_manifest": build_manifest,
+        "release_commit": release_commit,
         "release_url": str(data.get("html_url") or ""),
         "notes": notes[:4000],
     }
 
 
 def check_for_update(timeout: int = 15) -> dict:
-    """Finns en nyare version? Läser ENDAST GitHub Releases.
+    """Check version, build commit and packaged-file hashes from Releases only.
 
-    Ingen reserv mot någon gren: appen uppdaterar sig från releaser,
-    aldrig från main. Svarar API:t inte returneras ok=False med felet,
-    inget erbjuds, och nästa försök görs vid nästa start. Inget laddas
-    ner och inget ändras här - bara versionsjämförelse.
+    Same-version releases are offered when their commit or any shipped file
+    differs. No branch endpoint is ever used. A legacy release without a
+    build manifest is compared as a checksum-verified ZIP, then cached.
     """
     try:
         rel = _latest_release(timeout)
-    except Exception as exc:          # _latest_release fångar själv, men
-        rel = None                    # ett oväntat fel ska inte krascha
+    except Exception as exc:
+        rel = None
         fel = f"{type(exc).__name__}: {exc}"
     else:
         fel = "GitHub Releases svarade inte - försök igen senare"
     if not rel:
         return {"ok": False, "current": APP_VERSION, "remote": None,
                 "available": False, "source": "release", "error": fel}
+
+    remote = str(rel["version"])
+    is_newer = _version_tuple(remote) > _version_tuple(APP_VERSION)
+    is_same = _version_tuple(remote) == _version_tuple(APP_VERSION)
+    build_update = False
+    changed_files: List[str] = []
+    local_commit = ""
+    manifest = _valid_build_manifest(rel.get("build_manifest"))
+    comparison_error = ""
+    if is_same:
+        root = Path(_main_script).resolve().parent
+        local_manifest = _read_build_manifest(root / UPDATE_MANIFEST_NAME)
+        local_commit = str((local_manifest or {}).get("commit") or "")
+        local_hashes = _local_content_hashes(root)
+        if manifest:
+            changed_files, commit_changed = _compare_manifest_to_local(
+                manifest, local_hashes, local_manifest)
+            build_update = bool(changed_files or commit_changed)
+        else:
+            try:
+                changed_files, commit_changed, comparison_error = (
+                    _legacy_same_version_compare(
+                        rel, root, local_hashes, local_manifest, float(timeout)))
+                build_update = bool(changed_files or commit_changed)
+            except Exception as exc:
+                comparison_error = f"{type(exc).__name__}: {exc}"
+        if comparison_error:
+            return {
+                "ok": False, "current": APP_VERSION, "remote": remote,
+                "available": False, "source": "release", "tag": rel["tag"],
+                "error": "Kunde inte jämföra filer/commit i samma versions release: "
+                         + comparison_error,
+                "comparison_error": comparison_error,
+            }
+
     return {
         "ok": True,
         "current": APP_VERSION,
-        "remote": rel["version"],
-        "available": (_version_tuple(rel["version"])
-                      > _version_tuple(APP_VERSION)),
+        "remote": remote,
+        "available": is_newer or (is_same and build_update),
+        "build_update": is_same and build_update,
+        "changed_files": changed_files,
+        "local_commit": local_commit,
+        "release_commit": rel.get("release_commit", ""),
+        "build_manifest": manifest,
         "source": "release",
         "tag": rel["tag"],
         "zip_url": rel["zip_url"] or (
@@ -3166,6 +3237,155 @@ def _sha_from_sums(text: str, names) -> Optional[str]:
             if delar[-1].split("/")[-1] in wanted:
                 return delar[0].lower()
     return None
+
+
+def _valid_build_manifest(value: Any) -> Optional[dict]:
+    if not isinstance(value, dict) or value.get("schema") != 1:
+        return None
+    version = str(value.get("version") or "")
+    tag = str(value.get("tag") or "")
+    commit = str(value.get("commit") or "")
+    if (not re.fullmatch(r"[0-9][0-9A-Za-z.-]*", version)
+            or tag != f"v{version}"
+            or (commit and not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit))):
+        return None
+    files = value.get("files")
+    if not isinstance(files, dict) or set(files) != set(UPDATE_CONTENT_FILES):
+        return None
+    if not all(re.fullmatch(r"[0-9a-fA-F]{64}", str(digest))
+               for digest in files.values()):
+        return None
+    return value
+
+
+def _read_build_manifest(path: Path) -> Optional[dict]:
+    try:
+        return _valid_build_manifest(json.loads(
+            Path(path).read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _local_content_hashes(root: Path) -> Dict[str, str]:
+    hashes = {}
+    for name in UPDATE_CONTENT_FILES:
+        path = Path(root) / name
+        if path.is_file():
+            try:
+                hashes[name] = _sha256_file(path)
+            except OSError:
+                pass
+    return hashes
+
+
+def _compare_manifest_to_local(manifest: dict, local_hashes: dict,
+                               local_manifest: Optional[dict]) -> Tuple[List[str], bool]:
+    remote_hashes = manifest["files"]
+    changed = sorted(name for name in UPDATE_CONTENT_FILES
+                     if local_hashes.get(name) != remote_hashes.get(name))
+    local_commit = str((local_manifest or {}).get("commit") or "").lower()
+    remote_commit = str(manifest.get("commit") or "").lower()
+    commit_changed = bool(local_commit and remote_commit and
+                          not (local_commit == remote_commit
+                               or local_commit.startswith(remote_commit)
+                               or remote_commit.startswith(local_commit)))
+    return changed, commit_changed
+
+
+def _legacy_same_version_compare(rel: dict, root: Path,
+                                 local_hashes: dict,
+                                 local_manifest: Optional[dict],
+                                 timeout: float) -> Tuple[List[str], bool, str]:
+    """Compare older releases without a manifest by verified package bytes."""
+    import hashlib
+    import zipfile
+
+    url = str(rel.get("zip_url") or "")
+    digest = str(rel.get("zip_digest") or "")
+    if digest.startswith("sha256:"):
+        digest = digest.split(":", 1)[1]
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        digest = str(rel.get("sha256") or "")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", digest) and rel.get("sums_url"):
+        sums = _http_get(str(rel["sums_url"]), timeout,
+                         "text/plain", limit=1_000_000).decode("utf-8", "ignore")
+        from urllib.parse import urlparse
+        digest = _sha_from_sums(
+            sums, [Path(urlparse(url).path).name, UPDATE_ASSET_NAME]) or ""
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        return [], False, "Releasen saknar verifierbar checksumma för jämförelse."
+    digest = digest.lower()
+
+    fingerprint_data = {
+        "files": local_hashes,
+        "commit": str((local_manifest or {}).get("commit") or ""),
+    }
+    fingerprint = hashlib.sha256(json.dumps(
+        fingerprint_data, sort_keys=True).encode("utf-8")).hexdigest()
+    cache_path = config_dir() / "updates" / "same_version_probe.json"
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        if (cached.get("tag") == rel.get("tag")
+                and cached.get("zip_sha256") == digest
+                and cached.get("local_fingerprint") == fingerprint):
+            return (list(cached.get("changed_files", [])),
+                    bool(cached.get("commit_changed", False)), "")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    raw = _http_get(url, timeout, limit=64 * 1024 * 1024)
+    if hashlib.sha256(raw).hexdigest() != digest:
+        return [], False, "Releasepaketets SHA-256 stämmer inte."
+
+    changed = set()
+    remote_manifest = None
+    total_size = 0
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            members = [item for item in archive.infolist() if not item.is_dir()]
+            total_size = sum(max(0, int(item.file_size or 0)) for item in members)
+            if total_size > 300 * 1024 * 1024:
+                return [], False, "Releasepaketet är för stort för versionsjämförelse."
+            for name in UPDATE_CONTENT_FILES:
+                matches = [item for item in members
+                           if item.filename == name
+                           or item.filename.endswith("/" + name)]
+                if len(matches) != 1:
+                    changed.add(name)
+                    continue
+                data = archive.read(matches[0])
+                if hashlib.sha256(data).hexdigest() != local_hashes.get(name):
+                    changed.add(name)
+            manifests = [item for item in members
+                         if item.filename == UPDATE_MANIFEST_NAME
+                         or item.filename.endswith("/" + UPDATE_MANIFEST_NAME)]
+            if len(manifests) == 1:
+                try:
+                    remote_manifest = _valid_build_manifest(json.loads(
+                        archive.read(manifests[0]).decode("utf-8")))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    remote_manifest = None
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        return [], False, f"Releasepaketet gick inte att jämföra: {exc}"
+
+    local_commit = str((local_manifest or {}).get("commit") or "").lower()
+    remote_commit = str((remote_manifest or {}).get("commit")
+                        or rel.get("release_commit") or "").lower()
+    commit_changed = bool(local_commit and remote_commit and
+                          not (local_commit == remote_commit
+                               or local_commit.startswith(remote_commit)
+                               or remote_commit.startswith(local_commit)))
+    changed_files = sorted(changed)
+    try:
+        _atomic_text(cache_path, json.dumps({
+            "tag": rel.get("tag"), "zip_sha256": digest,
+            "local_fingerprint": fingerprint,
+            "changed_files": changed_files,
+            "commit_changed": commit_changed,
+        }, ensure_ascii=False, indent=1))
+    except OSError:
+        pass
+    return changed_files, commit_changed, ""
 
 
 def _safe_extract(zippath: Path, dest: Path) -> Tuple[bool, str]:
@@ -3218,7 +3438,8 @@ def _restore_files(backup: Path, root: Path, installerade: List[str],
 
 
 def _install_from_folder(staged: Path, root: Path,
-                         expected: Optional[str] = None) -> Tuple[bool, str]:
+                         expected: Optional[str] = None,
+                         allow_same_version: bool = False) -> Tuple[bool, str]:
     """Installera UPDATE_FILES från en uppackad staging-mapp till root.
 
     Säkerhet: alla .py valideras med compile() FÖRE något rörs, staged
@@ -3229,6 +3450,7 @@ def _install_from_folder(staged: Path, root: Path,
     """
     import shutil as _sh
     staged = Path(staged); root = Path(root)
+    old_manifest = _read_build_manifest(root / UPDATE_MANIFEST_NAME)
     src_root = staged
     if not (src_root / "pdfsorter.py").is_file():
         under = [d for d in staged.iterdir() if d.is_dir()
@@ -3245,17 +3467,25 @@ def _install_from_folder(staged: Path, root: Path,
     if expected and staged_version != expected:
         return False, (f"versionerna stämmer inte (väntade {expected}, "
                        f"fick {staged_version}) - avbryter")
-    if staged_version and _version_tuple(staged_version) <= _version_tuple(APP_VERSION):
-        return False, f"staged version {staged_version} är inte nyare än {APP_VERSION}"
+    if staged_version:
+        staged_tuple = _version_tuple(staged_version)
+        current_tuple = _version_tuple(APP_VERSION)
+        if staged_tuple < current_tuple or (
+                staged_tuple == current_tuple and not allow_same_version):
+            return False, (f"staged version {staged_version} är inte nyare än "
+                           f"{APP_VERSION} och bygget skiljer inte verifierat")
     # Även mot versionen som faktiskt ligger i root just nu - så att ett
     # andra anrop i samma process (före omstart) inte installerar igen.
     try:
         aktuell = (root / "pdfsorter.py").read_text(encoding="utf-8")
         m2 = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', aktuell)
-        if (staged_version and m2
-                and _version_tuple(staged_version) <= _version_tuple(m2.group(1))):
-            return False, (f"version {staged_version} är redan installerad "
-                           f"i appmappen (starta om appen i stället)")
+        if staged_version and m2:
+            staged_tuple = _version_tuple(staged_version)
+            installed_tuple = _version_tuple(m2.group(1))
+            if (staged_tuple < installed_tuple
+                    or (staged_tuple == installed_tuple and not allow_same_version)):
+                return False, (f"version {staged_version} är redan installerad "
+                               f"i appmappen (starta om appen i stället)")
     except OSError:
         pass
     for namn in UPDATE_FILES:
@@ -3265,7 +3495,7 @@ def _install_from_folder(staged: Path, root: Path,
                 compile(kalla.read_bytes(), namn, "exec")
             except SyntaxError as exc:
                 return False, f"{namn} i uppdateringen kompilerar inte: {exc}"
-    stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+    stamp = _dt.now().strftime("%Y%m%d_%H%M%S_%f")
     backup = root / "backups" / f"update_{stamp}"
     installerade: List[str] = []
     fanns_innan = set()
@@ -3290,7 +3520,10 @@ def _install_from_folder(staged: Path, root: Path,
         if staged_version and (not m3 or m3.group(1) != staged_version):
             raise OSError(f"pdfsorter.py visar {m3.group(1) if m3 else '?'} "
                           f"efter uppdateringen")
+        new_manifest = _read_build_manifest(root / UPDATE_MANIFEST_NAME)
         info = {"time": now_iso(), "from": APP_VERSION, "to": staged_version,
+                "from_commit": (old_manifest or {}).get("commit", ""),
+                "to_commit": (new_manifest or {}).get("commit", ""),
                 "files": installerade, "backup": str(backup)}
         upd = root / "updates"
         upd.mkdir(parents=True, exist_ok=True)
@@ -3307,9 +3540,18 @@ def _install_from_folder(staged: Path, root: Path,
                  else f" KUNDE INTE ÅTERSTÄLLA: {', '.join(kvar)}.")
         return False, (f"installationen avbröts ({type(exc).__name__}: {exc})."
                        f"{extra} Säkerhetskopia: {backup}")
+    same_version = (_version_tuple(str(staged_version or ""))
+                    == _version_tuple(APP_VERSION))
+    commit_note = ((new_manifest or {}).get("commit") or "")[:12]
     session_log("uppdatering",
-                f"{APP_VERSION} -> {staged_version}: "
-                f"{len(installerade)} filer, backup {backup}", "ok")
+                f"{APP_VERSION} -> {staged_version}"
+                + (f" (nytt bygge {commit_note})" if same_version else "")
+                + f": {len(installerade)} filer, backup {backup}", "ok")
+    if same_version:
+        return True, (f"Uppdaterat bygge av version {APP_VERSION}"
+                      + (f" ({commit_note})" if commit_note else "")
+                      + f" ({len(installerade)} filer). Säkerhetskopia: {backup}. "
+                      "Starta om appen för att köra de nya filerna.")
     return True, (f"Uppdaterad {APP_VERSION} -> {staged_version} "
                   f"({len(installerade)} filer). Säkerhetskopia: {backup}. "
                   f"Starta om appen för att köra den nya versionen.")
@@ -3375,7 +3617,16 @@ def perform_update(timeout: int = 180,
         ok, fel = _safe_extract(zippath, staging)
         if not ok:
             return False, fel
-        ok, msg = _install_from_folder(staging, root, expected=info["remote"])
+        expected_manifest = info.get("build_manifest")
+        if expected_manifest:
+            staged_manifest = _read_build_manifest(
+                staging / UPDATE_MANIFEST_NAME)
+            if not staged_manifest or staged_manifest != expected_manifest:
+                return False, ("Releasepaketets byggmanifest matchar inte "
+                               "releaseinformationen - inget installerades.")
+        ok, msg = _install_from_folder(
+            staging, root, expected=info["remote"],
+            allow_same_version=bool(info.get("build_update")))
         return ok, msg
     except Exception as exc:
         session_error("uppdatering", exc)

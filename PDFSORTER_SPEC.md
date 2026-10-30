@@ -2129,10 +2129,11 @@ sve/eng i appen".)
 senast ändrat/skapat datum, sker automatiskt" + "bättre avläsning av
 skannade pdf:er, mer matchningsord".)
 **AC-16:**
-- AC-16.1 `year_subfolder` (standard PÅ): filer utan egen datummall
-  läggs automatiskt i `<kategori>/<år>` där året = äldsta av
-  ändrat/skapat datum (kopia bevarar ursprungligt ändringsdatum).
-  Kryssruta i Datum-kortet; verifierat e2e (2022-fil → Pilkington/2022).
+- AC-16.1 `year_subfolder` (standard PÅ): alla sorterade filer läggs i
+  `<vald mapp>/<år>`, inklusive `_Osorterat`; dokumentdatum styr året när
+  det finns, annars används filens datum. En anpassad datummall behålls
+  innanför årsmappen (och ett år som redan ingår dupliceras inte).
+  Kryssruta i Datum-kortet; verifierat med egen datum- och unmatched-test.
 - AC-16.2 Bättre avläsning: `ocr_max_pages` 3→6 (engångsmigrering för
   gamla inställningar) + extra OCR-pass (psm 4) i läget "high".
 - AC-16.3 Fler matchningsord: `keywords_per_file` 10→15 (gransknings-
@@ -2140,6 +2141,68 @@ skannade pdf:er, mer matchningsord".)
 - AC-16.4 Donationsidan: belöpssektionen ("Välj hur du vill hjälpa")
   borttagen ur HTML-sidan på beställning; hjältenivåer nås via hero-knappar
   och slutkort.
+
+### REQ-N17 (B) — Robust, förklarbar självinlärning (IMPLEMENTERAS 2026-10-30)
+(ANVÄNDARVAL: förslag 1, 2, 5, 6, 8, 9 och 10. Modellen är lokal,
+regelstödd och får inte försvaga sorteringens säkerhetsgränser.)
+**AC-17:**
+- AC-17.1 Lärsignaler byggs per zon: generell text samt prefixade
+  avsändar-/brevhuvud-, sidfots-, mottagar- och filnamnsord. Korrigering
+  lagrar fel kategori och endast träffade ord i deras zon (plus den
+  generella ordsignalen), inte samtliga dokumentord som felbevis.
+- AC-17.2 Kategoriprofilen kalibreras med valda respektive korrigerade
+  beslut. Enskilda signaler klingar av med två års halveringstid; den
+  senaste träffen per signal sparas för drifthantering. Modellen är
+  fortfarande bara en svag rangordningssignal.
+- AC-17.3 Granskningsdialogen förklarar förslaget med matchade stödord,
+  deras dokumentzoner och eventuell lärd/historisk förstärkning.
+- AC-17.4 Walk-forward-testet poängsätter varje historikpost innan den
+  tränas in (ingen framtida läcka), visar träffsäkerhet totalt och per
+  kategori. Historiken kan återuppspelas; en enskild kategoriprofil kan
+  inspekteras, nollställas eller återställas från positiva och negativa
+  historiksignaler.
+- AC-17.5 Modellen sparas lokalt i konfigkatalogen med befintlig atomisk
+  JSON-skrivning, säkerhetskopia och korruptionsåterställning. Synkroniserad
+  åtkomst skyddar samtidiga sorteringstrådar. Befintlig UI-konfigurerbar
+  autostart på Windows, macOS och Linux lämnas intakt; uppdateringar tas
+  fortfarande enbart från GitHub Releases.
+- AC-17.6 `year_subfolder` standard PÅ appliceras även när datumsmall
+  används och i `_Osorterat`: årsmappen ligger direkt under vald mapp,
+  eventuell datummallsökväg följer innanför.
+
+### REQ-N18 (B) — Ny gemensam ArkivPiloten-ikon och autostart utan pyw-filassociation
+(ANVÄNDARORDER 2026-10-30: ny passande ikon överallt; om autostart väljs
+ska den inte använda en `.pyw`-fil som kan visa Pythons ikon.)
+**AC-18:**
+- AC-18.1 `ArkivPiloten.png` är 512×512 RGBA med transparenta hörn och är
+  den gemensamma mastern för fönster, dialoger, aktivitetsfält, tray,
+  genvägar, macOS-app och dokumentationsbilder. `ArkivPiloten.ico` byggs
+  från samma master med lager från 16 till 256 px.
+- AC-18.2 Windows autostart startar `pythonw.exe pdfsorter.py --tray`
+  direkt, aldrig `pdfsorter.pyw` via filassociation. AppUserModelID och
+  den gemensamma `.ico`-filen används för att undvika Python-standardikon;
+  `pythonw.exe` väljs för att undvika konsolfönster.
+- AC-18.3 Autostartens plattformsstöd och UI-val för Windows/macOS/Linux
+  bevaras. Test täcker att Windows autostart inte pekar på `.pyw`.
+
+### REQ-N19 (B) — Autouppdatering jämför releasebyggen även vid samma versionsnummer
+(ANVÄNDARORDER 2026-10-30: jämför releasefiler och commit, och erbjud
+uppdatering när något skiljer även om versionsnumret är oförändrat.)
+**AC-19:**
+- AC-19.1 Releasepaketet innehåller `BUILD-MANIFEST.json` med versions-
+  nummer, Git-commit och SHA-256 per distribuerad fil. Release-noterna
+  bär samma manifest i en maskinläsbar, dold markör.
+- AC-19.2 Vid samma versionsnummer jämför appen installerade filer och
+  lokal commit mot manifestet. Olika filhash eller commit ger
+  `available=True`; samma version, commit och filer ger ingen onödig
+  ominstallation.
+- AC-19.3 Äldre releaser utan manifest jämförs från ZIP-filen efter
+  SHA-256-verifiering; resultatet cachelagras mot releasehash och lokal
+  filfingeravtryck. Endast publicerade GitHub Releases används.
+- AC-19.4 Samma versionsnummer får installeras endast när jämförelsen
+  bekräftat ett nytt bygge. Paketets release-manifest måste stämma med
+  releaseinformationen; appfiler säkerhetskopieras och rollback gäller
+  som vid versionsbyte. Versionen bumpas inte automatiskt.
 
 ### REQ-W1 (M) — Workspace-hygien var 10:e chatt
 (ANVÄNDARORDER 2026-10-06: "rensa ws och endast aktiva filer + spec

@@ -6,6 +6,7 @@ Inga nätverksanrop görs - _http_get/_ladda_ner byts ut mot fixturer.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import pathlib
 import zipfile
@@ -48,6 +49,158 @@ def test_check_for_update_uses_releases(monkeypatch):
     assert info["source"] == "release"
     assert info["zip_url"].endswith(S.UPDATE_ASSET_NAME)
     assert info["sha256_url"].endswith(S.UPDATE_SUMS_NAME)
+
+
+def _same_version_manifest(tmp_path, monkeypatch, commit="a" * 40):
+    import hashlib
+
+    root = tmp_path / "same-version-app"
+    root.mkdir()
+    main = root / "pdfsorter.py"
+    monkeypatch.setattr(S, "_main_script", main)
+    hashes = {}
+    for name in S.UPDATE_CONTENT_FILES:
+        path = root / name
+        if name == "pdfsorter.py":
+            data = f'APP_VERSION = "{S.APP_VERSION}"\nOLD = True\n'.encode()
+        elif name.endswith(".py"):
+            data = f"# local test content: {name}\n".encode()
+        else:
+            data = f"local test content: {name}\n".encode()
+        path.write_bytes(data)
+        hashes[name] = hashlib.sha256(data).hexdigest()
+    manifest = {"schema": 1, "version": S.APP_VERSION,
+                "tag": f"v{S.APP_VERSION}", "commit": commit,
+                "files": hashes}
+    (root / S.UPDATE_MANIFEST_NAME).write_text(
+        json.dumps(manifest), encoding="utf-8")
+    return manifest
+
+
+def _payload_with_manifest(manifest):
+    payload = _release_payload(version=manifest["version"])
+    payload["body"] = (
+        "Paket byggt från `" + manifest["commit"][:12] + "`.\n"
+        "<!-- ARKIVPILOTEN_BUILD_MANIFEST_BEGIN\n"
+        + json.dumps(manifest)
+        + "\nARKIVPILOTEN_BUILD_MANIFEST_END -->")
+    return payload
+
+
+def test_same_version_release_with_identical_commit_and_files_is_current(
+        tmp_path, monkeypatch):
+    manifest = _same_version_manifest(tmp_path, monkeypatch)
+    payload = json.dumps(_payload_with_manifest(manifest)).encode()
+    monkeypatch.setattr(S, "_http_get", lambda *a, **k: payload)
+
+    info = S.check_for_update()
+    assert info["ok"]
+    assert info["remote"] == S.APP_VERSION
+    assert info["available"] is False
+    assert info["changed_files"] == []
+
+
+def test_same_version_release_detects_changed_files_and_commit(
+        tmp_path, monkeypatch):
+    manifest = _same_version_manifest(tmp_path, monkeypatch)
+    remote = json.loads(json.dumps(manifest))
+    remote["commit"] = "b" * 40
+    remote["files"]["README.md"] = hashlib.sha256(
+        b"changed on release\n").hexdigest()
+    payload = json.dumps(_payload_with_manifest(remote)).encode()
+    monkeypatch.setattr(S, "_http_get", lambda *a, **k: payload)
+
+    info = S.check_for_update()
+    assert info["ok"]
+    assert info["available"]
+    assert info["build_update"]
+    assert info["changed_files"] == ["README.md"]
+    assert info["release_commit"] == "b" * 40
+
+
+def test_legacy_same_version_release_is_compared_from_verified_zip(
+        tmp_path, monkeypatch):
+    _same_version_manifest(tmp_path, monkeypatch)
+    root = tmp_path / "same-version-app"
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in S.UPDATE_CONTENT_FILES:
+            zf.write(root / name, arcname=name)
+    package = archive_bytes.getvalue()
+    digest = hashlib.sha256(package).hexdigest()
+    payload = _release_payload(version=S.APP_VERSION)
+    payload["body"] = "Paket byggt från `" + ("b" * 12) + "`."
+    payload["assets"][0]["digest"] = "sha256:" + digest
+    payload_bytes = json.dumps(payload).encode()
+    calls = []
+    monkeypatch.setattr(S, "_config_dir_fn", lambda: tmp_path / "config")
+
+    def fake_get(url, *args, **kwargs):
+        calls.append(url)
+        if url == S.UPDATE_RELEASES_LATEST:
+            return payload_bytes
+        if url.endswith(S.UPDATE_ASSET_NAME):
+            return package
+        raise AssertionError(f"unexpected URL {url}")
+
+    monkeypatch.setattr(S, "_http_get", fake_get)
+    first = S.check_for_update()
+    assert first["ok"] and first["available"]
+    assert first["build_update"]
+    assert first["changed_files"] == []
+    assert first["release_commit"] == "b" * 12
+
+    second = S.check_for_update()
+    assert second["available"]
+    assert calls.count(payload["assets"][0]["browser_download_url"]) == 1
+
+
+def test_same_version_build_is_installed_when_file_hashes_change(
+        tmp_path, monkeypatch):
+    local_manifest = _same_version_manifest(tmp_path, monkeypatch)
+    root = tmp_path / "same-version-app"
+    remote_manifest = json.loads(json.dumps(local_manifest))
+    remote_manifest["commit"] = "c" * 40
+    files = dict(remote_manifest["files"])
+    contents = {}
+    for name in S.UPDATE_CONTENT_FILES:
+        data = (root / name).read_bytes()
+        if name == "README.md":
+            data = b"updated README on same version\n"
+        contents[name] = data
+        files[name] = hashlib.sha256(data).hexdigest()
+    remote_manifest["files"] = files
+
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in contents.items():
+            zf.writestr(name, data)
+        zf.writestr(S.UPDATE_MANIFEST_NAME, json.dumps(remote_manifest))
+    package = archive_bytes.getvalue()
+    digest = hashlib.sha256(package).hexdigest()
+    payload = _payload_with_manifest(remote_manifest)
+    payload["assets"][0]["digest"] = "sha256:" + digest
+    payload_bytes = json.dumps(payload).encode()
+    sums_text = f"{digest}  {S.UPDATE_ASSET_NAME}\n".encode()
+
+    def fake_get(url, *args, **kwargs):
+        if url == S.UPDATE_RELEASES_LATEST:
+            return payload_bytes
+        if url.endswith(S.UPDATE_SUMS_NAME):
+            return sums_text
+        if url.endswith(S.UPDATE_ASSET_NAME):
+            return package
+        raise AssertionError(f"unexpected URL {url}")
+
+    monkeypatch.setattr(S, "_http_get", fake_get)
+    monkeypatch.setattr(
+        S, "_ladda_ner", lambda url, dest, timeout=180: pathlib.Path(dest).write_bytes(package))
+    ok, msg = S.perform_update(root=root)
+    assert ok, msg
+    assert "Uppdaterat bygge" in msg
+    assert (root / "README.md").read_bytes() == contents["README.md"]
+    installed = json.loads((root / S.UPDATE_MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert installed["commit"] == "c" * 40
 
 
 def test_release_without_checksum_is_reported(monkeypatch):
@@ -245,6 +398,28 @@ def test_failed_install_rolls_back(monkeypatch, tmp_path):
     assert not list(root.glob("*.update-tmp"))
 
 
+def test_installer_allows_same_version_only_when_build_change_is_verified(tmp_path):
+    root = tmp_path / "app"
+    staging = tmp_path / "staging"
+    root.mkdir(); staging.mkdir()
+    (root / "pdfsorter.py").write_text(
+        f'APP_VERSION = "{S.APP_VERSION}"\nOLD = True\n', encoding="utf-8")
+    (staging / "pdfsorter.py").write_text(
+        f'APP_VERSION = "{S.APP_VERSION}"\nNEW = True\n', encoding="utf-8")
+    (staging / "README.md").write_text("new build\n", encoding="utf-8")
+
+    ok, msg = S._install_from_folder(staging, root, expected=S.APP_VERSION)
+    assert not ok
+    assert "inte nyare" in msg
+
+    ok, msg = S._install_from_folder(
+        staging, root, expected=S.APP_VERSION, allow_same_version=True)
+    assert ok, msg
+    assert "Uppdaterat bygge" in msg
+    assert "NEW = True" in (root / "pdfsorter.py").read_text(encoding="utf-8")
+    assert (root / "README.md").read_text(encoding="utf-8") == "new build\n"
+
+
 def test_build_release_matches_zip(tmp_path, monkeypatch):
     from tools import build_release
 
@@ -255,6 +430,10 @@ def test_build_release_matches_zip(tmp_path, monkeypatch):
     with zipfile.ZipFile(zippath) as zf:
         namn = set(zf.namelist())
         assert set(S.UPDATE_FILES) <= namn
+        manifest = json.loads(zf.read(S.UPDATE_MANIFEST_NAME))
+        assert manifest["version"] == ver
+        assert manifest["commit"]
+        assert set(manifest["files"]) == set(S.UPDATE_CONTENT_FILES)
         assert zf.read("pdfsorter.py").decode("utf-8").count(
             f'APP_VERSION = "{ver}"') == 1
     digest = hashlib.sha256(zippath.read_bytes()).hexdigest()

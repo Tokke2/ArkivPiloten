@@ -511,6 +511,32 @@ class Decision:
         return self.scores[1] if len(self.scores) > 1 else None
 
 
+def category_explanation(score: Optional[CategoryScore],
+                         learned_hint: Optional[Tuple[str, int]] = None) -> str:
+    if score is None:
+        return ""
+    labels = {
+        "sender": "avsändarblocket", "header": "brevhuvudet",
+        "identity": "avsändarens identifierare", "pagehead": "sidhuvudet",
+        "pagefoot": "sidfoten", "filename": "filnamnet",
+        "recipient": "mottagarblocket", "body": "brödtexten",
+    }
+    grouped: Dict[str, List[str]] = {}
+    for word in score.matched:
+        grouped.setdefault(labels.get(score.zone_of(word), "dokumentet"), []).append(word)
+    if grouped:
+        evidence = "; ".join(
+            f"{', '.join(words[:3])} i {zone}" for zone, words in grouped.items())
+        text = f"{score.name} föreslås utifrån {evidence}."
+    else:
+        text = f"{score.name} har högst regelpoäng ({score.score:g})."
+    if score.bonus:
+        text += " Den lärda modellen stödjer rangordningen."
+    elif learned_hint and learned_hint[0] == score.name:
+        text += f" Historiken känner igen {learned_hint[1]} liknande filer."
+    return text
+
+
 def _kw_pattern(kw: Dict[str, Any]) -> re.Pattern:
     """Bygg sökmönstret för ett stödord.
 
@@ -1286,6 +1312,8 @@ _LEARNED_NEG_BETA = 0.5
 _LEARNED_BONUS = 0.2
 
 _LEARNED: Optional["LearnedMatcher"] = None
+_LEARNED_LOCK = threading.RLock()
+_LEARNED_HALF_LIFE_DAYS = 730.0
 
 
 def learned_model_path() -> Path:
@@ -1306,15 +1334,52 @@ def learn_tokens(text: str) -> List[str]:
     return [t for t, _ in topp[:_LEARNED_MAX_TOKENS]]
 
 
+def learn_features(extraction: "Extraction") -> List[str]:
+    """Build broad and zone-specific features from an extraction."""
+    body = extraction.text or extraction.combined or ""
+    lines = body.splitlines()
+    zones = (
+        ("body", body, 30),
+        ("header", getattr(extraction, "page_header", "") or _header_zone(body), 20),
+        ("footer", getattr(extraction, "page_footer", "") or "\n".join(lines[-12:]), 15),
+        ("recipient", _recipient_zone(body), 20),
+        ("filename", getattr(extraction, "filename_text", "") or "", 15),
+    )
+    features = list(learn_tokens(body))
+    for zone, text, limit in zones:
+        features.extend(f"{zone}:{token}" for token in learn_tokens(text)[:limit])
+    return list(dict.fromkeys(features))
+
+
+def rejected_learning_features(score: "CategoryScore") -> List[str]:
+    """Target negative feedback at words from the user's identified error zone."""
+    words = getattr(score, "matched", ()) or ()
+    if isinstance(words, str):
+        words = (words,)
+    zone_map = {
+        "sender": "header", "header": "header", "identity": "header",
+        "pagehead": "header", "pagefoot": "footer", "recipient": "recipient",
+        "filename": "filename",
+    }
+    features = []
+    for word in words:
+        zone = zone_map.get(score.zone_of(str(word)), "body")
+        for token in learn_tokens(str(word)):
+            features.extend((token, f"{zone}:{token}"))
+    return list(dict.fromkeys(features))
+
+
 class LearnedMatcher:
     """Ordvikter per kategori, tränad på historikens beslut."""
 
-    def __init__(self, path: Optional[Path] = None):
+    def __init__(self, path: Optional[Path] = None, load: bool = True):
         self.path = Path(path) if path else learned_model_path()
         self.cats: Dict[str, Dict[str, Any]] = {}
         self._sig: Optional[Any] = None
         self._dirty = False
-        self._load()
+        self._load_enabled = load
+        if load:
+            self._load()
 
     def _sig_now(self):
         try:
@@ -1324,6 +1389,8 @@ class LearnedMatcher:
             return None
 
     def _load(self) -> None:
+        if not self._load_enabled or self._dirty:
+            return
         sig = self._sig_now()
         if sig == self._sig and (self.cats or sig is None):
             return
@@ -1333,7 +1400,10 @@ class LearnedMatcher:
         self._sig = sig
 
     def train(self, category: str, tokens: List[str],
-              rejected_for: Optional[str] = None) -> None:
+              rejected_for: Optional[str] = None,
+              rejected_tokens: Optional[List[str]] = None,
+              incorrect_for: Optional[str] = None,
+              timestamp: Optional[str] = None) -> None:
         """Träna på ett beslut.
 
         `rejected_for` = kategorin som gissade fel. Då räknas filens ord
@@ -1342,24 +1412,38 @@ class LearnedMatcher:
         """
         if not category or not tokens:
             return
+        timestamp = timestamp or now_iso()
         c = self.cats.setdefault(category, {"n": 0, "tot": 0, "w": {}})
+        c["updated"] = timestamp
         c["n"] = int(c.get("n", 0)) + 1
+        c["calibration"] = c.get("calibration", {"correct": 0, "incorrect": 0})
+        c["calibration"]["correct"] = int(c["calibration"].get("correct", 0)) + 1
         w = c.setdefault("w", {})
+        seen = c.setdefault("last_seen", {})
         for t in dict.fromkeys(tokens):          # en gång per fil
             w[t] = int(w.get(t, 0)) + 1
+            seen[t] = timestamp
             c["tot"] = int(c.get("tot", 0)) + 1
         if len(w) > _LEARNED_CAP_TOKENS:         # minnestak
             c["w"] = dict(sorted(w.items(), key=lambda kv: -kv[1])
                           [:_LEARNED_CAP_TOKENS])
-        if rejected_for and rejected_for != category:
-            neg = self.cats.setdefault(rejected_for, {"n": 0, "tot": 0, "w": {}})
+        wrong_category = incorrect_for or rejected_for
+        if wrong_category and wrong_category != category:
+            rejected = rejected_tokens if rejected_tokens is not None else tokens
+            neg = self.cats.setdefault(wrong_category, {"n": 0, "tot": 0, "w": {}})
+            neg["updated"] = timestamp
+            calibration = neg.setdefault("calibration", {"correct": 0, "incorrect": 0})
+            calibration["incorrect"] = int(calibration.get("incorrect", 0)) + 1
             nw = neg.setdefault("neg", {})
-            for t in dict.fromkeys(tokens):
+            neg_seen = neg.setdefault("neg_last_seen", {})
+            for t in dict.fromkeys(rejected):
                 nw[t] = int(nw.get(t, 0)) + 1
+                neg_seen[t] = timestamp
                 neg["neg_tot"] = int(neg.get("neg_tot", 0)) + 1
             if len(nw) > _LEARNED_CAP_TOKENS:
                 neg["neg"] = dict(sorted(nw.items(), key=lambda kv: -kv[1])
                                   [:_LEARNED_CAP_TOKENS])
+                neg["neg_last_seen"] = {t: neg_seen[t] for t in neg["neg"] if t in neg_seen}
         self._dirty = True
 
     def flush(self) -> None:
@@ -1389,23 +1473,55 @@ class LearnedMatcher:
         vocab = sum(len(c.get("w", {})) for c in kval.values()) or 1
         tk = Counter(tokens)
         ntk = sum(tk.values()) or 1
+        decay_cache: Dict[str, float] = {}
+        current = datetime.now().astimezone()
+
+        def decay(stamp: Any) -> float:
+            if not stamp:
+                return 1.0
+            key = str(stamp)
+            if key in decay_cache:
+                return decay_cache[key]
+            try:
+                seen_at = datetime.fromisoformat(key)
+                if seen_at.tzinfo is None:
+                    seen_at = seen_at.replace(tzinfo=current.tzinfo)
+                age = max(0.0, (current - seen_at).total_seconds() / 86400.0)
+                value = 0.5 ** (age / _LEARNED_HALF_LIFE_DAYS)
+            except (TypeError, ValueError, OverflowError):
+                value = 1.0
+            decay_cache[key] = value
+            return value
+
         res = []
         for namn, c in kval.items():
-            tot = int(c.get("tot", 0)) or 1
-            s = math.log(int(c["n"]) / total)              # prior
             w = c.get("w", {})
+            seen = c.get("last_seen", {}) or {}
+            weights = {token: float(count) * decay(seen.get(token))
+                       for token, count in w.items()}
+            tot = sum(weights.values()) or 1.0
+            s = math.log(int(c["n"]) / total)              # prior
+            calibration = c.get("calibration", {}) or {}
+            right = int(calibration.get("correct", 0))
+            wrong = int(calibration.get("incorrect", 0))
+            reliability = (right + 1) / (right + wrong + 2)
+            s += 0.2 * math.log(reliability / 0.5)
             neg = c.get("neg", {}) or {}
-            neg_tot = int(c.get("neg_tot", 0) or 0)
+            neg_seen = c.get("neg_last_seen", {}) or {}
+            neg_total = sum(float(count) * decay(neg_seen.get(token))
+                            for token, count in neg.items())
+            neg_tot = neg_total or float(c.get("neg_tot", 0) or 0)
             for t, k in tk.items():
-                s += k * math.log((w.get(t, 0) + 1) / (tot + vocab))
+                count = weights.get(t, 0.0)
+                s += k * math.log((count + 1) / (tot + vocab))
                 # Negativ inlärning: jämför hur vanligt ordet är i
                 # kategorins RÄTTA filer med hur vanligt det är i de filer
                 # där kategorin gissade fel. Är det vanligare bland
                 # misstagen straffas det - annars inte alls.
                 if neg_tot:
-                    nw = int(neg.get(t, 0) or 0)
+                    nw = float(neg.get(t, 0) or 0) * decay(neg_seen.get(t))
                     if nw:
-                        pos = (int(w.get(t, 0)) + 1) / (tot + vocab)
+                        pos = (count + 1) / (tot + vocab)
                         negr = (nw + 1) / (neg_tot + vocab)
                         if negr > pos:
                             s -= (k * min(math.log(negr / pos), 2.0)
@@ -1419,17 +1535,111 @@ class LearnedMatcher:
 
 def _learned() -> LearnedMatcher:
     global _LEARNED
-    if _LEARNED is None:
-        _LEARNED = LearnedMatcher()
-    return _LEARNED
+    with _LEARNED_LOCK:
+        if _LEARNED is None:
+            _LEARNED = LearnedMatcher()
+        return _LEARNED
 
 
 def flush_learned() -> None:
     """Skriv modellen till disk (anropas vid batchslut/avslut)."""
     try:
-        _learned().flush()
+        with _LEARNED_LOCK:
+            _learned().flush()
     except Exception:
         pass
+
+
+def _history_features(event: Dict[str, Any]) -> List[str]:
+    stored = event.get("features") or event.get("tokens") or []
+    return [str(value) for value in stored if value]
+
+
+def replay_learned_history(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Walk-forward backtest: each event is tested before it is learned."""
+    replay = LearnedMatcher(load=False)
+    ordered = sorted(events, key=lambda e: str(e.get("time", "")))
+    tested = correct = 0
+    per_category: Dict[str, Dict[str, int]] = {}
+    for event in ordered:
+        category = str(event.get("category", "") or "")
+        features = _history_features(event)
+        if not category or not features or event.get("decided_by") == "unmatched":
+            continue
+        prediction = replay.predict(features)
+        if prediction is not None:
+            tested += 1
+            is_correct = prediction[0] == category
+            correct += int(is_correct)
+            stats = per_category.setdefault(category, {"tested": 0, "correct": 0})
+            stats["tested"] += 1
+            stats["correct"] += int(is_correct)
+        replay.train(category, features, timestamp=str(event.get("time") or now_iso()))
+    return {"tested": tested, "correct": correct,
+            "accuracy": (correct / tested) if tested else None,
+            "categories": per_category}
+
+
+def reset_learned_category(category: str,
+                           matcher: Optional[LearnedMatcher] = None) -> None:
+    learner = matcher or _learned()
+    learner.cats.pop(category, None)
+    learner._dirty = True
+    learner.flush()
+
+
+def restore_learned_category(category: str, events: List[Dict[str, Any]],
+                             matcher: Optional[LearnedMatcher] = None) -> int:
+    """Restore one profile from historical positive and correction signals."""
+    learner = matcher or _learned()
+    learner.cats.pop(category, None)
+    learner._dirty = True
+    count = 0
+    for event in sorted(events, key=lambda e: str(e.get("time", ""))):
+        chosen = str(event.get("category", "") or "")
+        features = _history_features(event)
+        timestamp = str(event.get("time") or now_iso())
+        if chosen == category and features and event.get("decided_by") != "unmatched":
+            learner.train(category, features, timestamp=timestamp)
+            count += 1
+        if event.get("corrected_from") == category:
+            rejected = [str(token) for token in event.get("rejected_features", [])]
+            profile = learner.cats.setdefault(
+                category, {"n": 0, "tot": 0, "w": {}, "neg": {}})
+            calibration = profile.setdefault("calibration", {"correct": 0, "incorrect": 0})
+            calibration["incorrect"] = int(calibration.get("incorrect", 0)) + 1
+            neg = profile.setdefault("neg", {})
+            seen = profile.setdefault("neg_last_seen", {})
+            for token in rejected:
+                neg[token] = int(neg.get(token, 0)) + 1
+                seen[token] = timestamp
+                profile["neg_tot"] = int(profile.get("neg_tot", 0)) + 1
+            profile["updated"] = timestamp
+    learner.flush()
+    return count
+
+
+def rebuild_learned_from_history(events: List[Dict[str, Any]],
+                                 matcher: Optional[LearnedMatcher] = None) -> int:
+    """Replace the saved learner with chronological, replayable history."""
+    learner = matcher or _learned()
+    learner.cats = {}
+    learner._dirty = True
+    count = 0
+    for event in sorted(events, key=lambda e: str(e.get("time", ""))):
+        category = str(event.get("category", "") or "")
+        features = _history_features(event)
+        if not category or not features or event.get("decided_by") == "unmatched":
+            continue
+        learner.train(
+            category, features,
+            incorrect_for=str(event.get("corrected_from") or "") or None,
+            rejected_tokens=[str(token) for token in event.get("rejected_features", [])],
+            timestamp=str(event.get("time") or now_iso()),
+        )
+        count += 1
+    learner.flush()
+    return count
 
 
 #: Hårt golv för automatisk sortering, oavsett strikthetsnivå: har färre
@@ -1563,8 +1773,8 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
     lm_pred = None
     if settings.get("learned_matching", True):
         try:
-            lm_pred = _learned().predict(
-                learn_tokens(extraction.text or extraction.combined))
+            with _LEARNED_LOCK:
+                lm_pred = _learned().predict(learn_features(extraction))
         except Exception:
             lm_pred = None
 
@@ -2174,8 +2384,8 @@ class SortEngine:
                       template: str = "") -> Tuple[str, Optional[date], str]:
         """Räkna ut undermappen för en fil.
 
-        Returnerar (relativ sökväg, använt datum, källa). Allt tomt när
-        datumsorteringen är avstängd - då beter sig appen exakt som förut.
+        Returnerar (relativ sökväg, använt datum, källa). Årsmappen
+        används som standard även när datummall saknas eller är avstängd.
         """
         s = self.settings
         sub, when, källa = "", None, ""
@@ -2187,32 +2397,34 @@ class SortEngine:
                 if when is None:
                     reserv = s.get("date_fallback", "none")
                     if reserv == "unknown":
-                        return "Utan datum", None, "saknas"
-                    if reserv == "filedate":
+                        sub, källa = "Utan datum", "saknas"
+                    elif reserv == "filedate":
                         try:
-                            when = date.fromtimestamp(
-                                extraction.path.stat().st_mtime)
+                            when = date.fromtimestamp(extraction.path.stat().st_mtime)
                             källa = "filens tid"
-                        except OSError:
-                            return "", None, ""
-                    else:
-                        when = None
+                        except (OSError, ValueError, OverflowError):
+                            pass
                 if when is not None:
                     sub = render_subfolder(mall, when)
-        # N16 (ANVÄNDARORDER 2026-10-15): årsmapp från filens eget
-        # datum, automatiskt. Året tas från det ÄLDSTA av ändrat/skapat
-        # (kopian bevarar ursprungligt ändringsdatum men får nytt
-        # skapelsedatum - min av dem är året användaren menar).
-        if not sub and s.get("year_subfolder", True):
-            try:
-                st = extraction.path.stat()
-                ts = min(st.st_mtime,
-                         getattr(st, "st_ctime", st.st_mtime))
-                when = date.fromtimestamp(ts)
-                sub = str(when.year)
-                källa = "fil-datum"
-            except (OSError, ValueError, OverflowError):
-                pass
+
+        # The selected destination always gets a year directory, including
+        # custom date templates and the explicit "Utan datum" fallback.
+        if s.get("year_subfolder", True):
+            year = when.year if when is not None else None
+            if year is None:
+                try:
+                    st = extraction.path.stat()
+                    timestamp = min(st.st_mtime, getattr(st, "st_ctime", st.st_mtime))
+                    when = date.fromtimestamp(timestamp)
+                    year = when.year
+                    if not källa:
+                        källa = "fil-datum"
+                except (OSError, ValueError, OverflowError):
+                    pass
+            if year is not None:
+                levels = [level for level in sub.split("/")
+                          if level and level != str(year)]
+                sub = "/".join([str(year), *levels])
         return sub, when, källa
 
     def _fil_ändrad(self, decision: Decision) -> bool:
@@ -2340,14 +2552,24 @@ class SortEngine:
                 # det slutgiltiga valet.
                 toks = learn_tokens(decision.extraction.text
                                     or decision.extraction.combined)
+                features = learn_features(decision.extraction)
+                rejected_features = (rejected_learning_features(best)
+                                     if wrong and best else [])
                 if s.get("learned_matching", True):
                     try:
-                        _learned().train(category, toks,
-                                         rejected_for=wrong or None)
+                        with _LEARNED_LOCK:
+                            _learned().train(
+                                category, features, incorrect_for=wrong or None,
+                                rejected_tokens=rejected_features,
+                            )
                     except Exception:
                         pass
                 append_history({
                     "tokens": toks,
+                    "features": features,
+                    "rejected_features": rejected_features,
+                    "match_zones": ({w: best.zone_of(w) for w in best.matched}
+                                    if best else {}),
                     "time": now_iso(),
                     "action": s.get("action", "move"),
                     "source": str(decision.path),
@@ -2382,11 +2604,13 @@ class SortEngine:
             if not folder:
                 self.stats["left"] += 1
                 return False, "Lämnad i inmappen"
+            subfolder, _when, _source = self.subfolder_for(decision.extraction)
             ok, msg, target = place_file(
                 decision.path, Path(self.settings["output_dir"]), folder,
                 action=self.settings.get("action", "move"),
                 on_conflict=self.settings.get("on_conflict", "rename"),
                 dry_run=bool(self.settings.get("dry_run", False)),
+                subfolder=subfolder,
             )
             if ok and not self.settings.get("dry_run", False):
                 append_history({
@@ -2399,6 +2623,7 @@ class SortEngine:
                     "matched": [],
                     "used_ocr": decision.extraction.used_ocr,
                     "decided_by": "unmatched",
+                    "subfolder": subfolder,
                     "learned": [],
                 })
             self.stats["unmatched"] += 1
@@ -3239,6 +3464,11 @@ class ReviewDialog:
             ttk.Label(head, text="→ " + decision.reason,
                       style="CardMuted.TLabel").grid(row=3, column=0,
                                                      sticky="w", padx=16)
+        explanation = category_explanation(best, getattr(decision, "learned_hint", None))
+        if explanation:
+            ttk.Label(head, text=explanation, style="CardMuted.TLabel",
+                      wraplength=840, justify="left").grid(
+                          row=5, column=0, sticky="w", padx=16, pady=(2, 10))
 
         ttk.Separator(self._all).grid(row=1, column=0, sticky="ew", padx=14, pady=(10, 0))
 
@@ -5534,8 +5764,20 @@ class App:
                         style="Card.TRadiobutton",
                         variable=self.var_action).pack(side="left", padx=(8, 0))
 
+        learning_actions = ttk.Frame(opt, style="CardInner.TFrame")
+        learning_actions.grid(row=4, column=0, columnspan=4, sticky="w",
+                              padx=8, pady=(4, 2))
+        ttk.Button(learning_actions, text="Testa inlärningen mot historik…",
+                   command=self._learned_backtest).pack(side="left", padx=(0, 6))
+        ttk.Button(learning_actions, text="Återbygg från historik",
+                   command=self._rebuild_learned).pack(side="left", padx=6)
+        ttk.Button(learning_actions, text="Återställ inlärning",
+                   command=self._reset_learned).pack(side="left", padx=6)
+        ttk.Button(learning_actions, text="Hantera per kategori…",
+                   command=self._manage_learned).pack(side="left", padx=6)
+
         adv = ttk.Frame(opt, style="CardInner.TFrame")
-        adv.grid(row=4, column=0, columnspan=4, sticky="w",
+        adv.grid(row=5, column=0, columnspan=4, sticky="w",
                  padx=8, pady=(8, T.INNER))
         self.var_unmatched = tk.StringVar(value=self.settings.get("unmatched_folder", ""))
         ttk.Label(adv, text="Osorterat-mapp:", style="Card.TLabel").pack(side="left")
@@ -8430,6 +8672,8 @@ class App:
             self.settings["last_update_check_ok"] = bool(info.get("ok"))
             if info.get("remote"):
                 self.settings["last_update_seen"] = str(info["remote"])
+            if info.get("release_commit"):
+                self.settings["last_update_seen_commit"] = str(info["release_commit"])
             save_settings(self.settings)
         except Exception as exc:
             self._h("uppdatering", f"Kunde inte spara söktiden: {exc}", "warn")
@@ -8492,6 +8736,141 @@ class App:
         self._log("Automatisk smart cache-rensning "
                   + ("påslagen" if self.var_cache_cleanup.get() else "avstängd"),
                   "info")
+
+    def _learned_backtest(self) -> None:
+        events = load_history()
+        result = replay_learned_history(events)
+        if not result["tested"]:
+            self.messagebox.showinfo(
+                APP_NAME, "Historiken innehåller ännu inte tillräckligt många "
+                "tidigare beslut för ett walk-forward-test.", parent=self.root)
+            return
+        percent = 100 * result["accuracy"]
+        by_category = "\n".join(
+            f"• {name}: {values['correct']}/{values['tested']}"
+            for name, values in sorted(result["categories"].items()))
+        self.messagebox.showinfo(
+            APP_NAME,
+            f"Walk-forward-test av inlärningen:\n\n"
+            f"Rätt: {result['correct']} av {result['tested']} "
+            f"({percent:.1f} %).\n\n"
+            f"Per kategori:\n{by_category or '—'}\n\n"
+            "Varje historikrad testades innan just den raden tränades in.",
+            parent=self.root)
+
+    def _rebuild_learned(self) -> None:
+        events = load_history()
+        if not events:
+            self.messagebox.showinfo(APP_NAME, "Historiken är tom.", parent=self.root)
+            return
+        if not self.messagebox.askyesno(
+                APP_NAME, "Ersätt den nuvarande inlärningen med en kronologisk "
+                "återuppspelning av historiken? Den nuvarande modellen sparas "
+                "som säkerhetskopia.", parent=self.root):
+            return
+        try:
+            with _LEARNED_LOCK:
+                count = rebuild_learned_from_history(events)
+            self.messagebox.showinfo(
+                APP_NAME, f"Inlärningen byggdes om från {count} historikbeslut.",
+                parent=self.root)
+        except Exception as exc:
+            self.messagebox.showerror(APP_NAME, f"Kunde inte bygga om modellen: {exc}",
+                                      parent=self.root)
+
+    def _reset_learned(self) -> None:
+        if not self.messagebox.askyesno(
+                APP_NAME, "Nollställ all kategoriinlärning? Historik och regler "
+                "påverkas inte. Den nuvarande modellen sparas som säkerhetskopia.",
+                parent=self.root):
+            return
+        try:
+            with _LEARNED_LOCK:
+                learner = _learned()
+                learner.cats = {}
+                learner._dirty = True
+                learner.flush()
+            self.messagebox.showinfo(APP_NAME, "Kategorinlärningen har återställts.",
+                                     parent=self.root)
+        except Exception as exc:
+            self.messagebox.showerror(APP_NAME, f"Kunde inte återställa modellen: {exc}",
+                                      parent=self.root)
+
+    def _manage_learned(self) -> None:
+        tk, ttk = self.tk, self.ttk
+        win = tk.Toplevel(self.root)
+        win.title("Inlärning per kategori")
+        win.transient(self.root)
+        win.geometry("720x390")
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(win, columns=("category", "files", "features", "accuracy", "updated"),
+                            show="headings", selectmode="browse")
+        for key, title, width in (("category", "KATEGORI", 190),
+                                  ("files", "EXEMPEL", 90),
+                                  ("features", "SIGNALER", 90),
+                                  ("accuracy", "KALIBRERING", 110),
+                                  ("updated", "SENAST UPPDATERAD", 180)):
+            tree.heading(key, text=title)
+            tree.column(key, width=width, anchor="w")
+        tree.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=10, pady=10)
+
+        def refresh() -> None:
+            tree.delete(*tree.get_children())
+            with _LEARNED_LOCK:
+                profiles = [(name, dict(profile))
+                            for name, profile in _learned().cats.items()]
+            for name, profile in sorted(profiles):
+                calibration = profile.get("calibration", {}) or {}
+                total = int(calibration.get("correct", 0)) + int(
+                    calibration.get("incorrect", 0))
+                accuracy = (f"{100 * int(calibration.get('correct', 0)) / total:.0f}%"
+                            if total else "—")
+                updated = str(profile.get("updated", "—"))[:16].replace("T", " ")
+                tree.insert("", "end", values=(
+                    name, int(profile.get("n", 0)),
+                    len(profile.get("w", {})), accuracy, updated))
+
+        def selected_category() -> str:
+            selection = tree.selection()
+            return str(tree.item(selection[0], "values")[0]) if selection else ""
+
+        def reset_selected() -> None:
+            category = selected_category()
+            if not category:
+                return
+            if not self.messagebox.askyesno(
+                    APP_NAME, f"Nollställ bara inlärningen för {category!r}?",
+                    parent=win):
+                return
+            with _LEARNED_LOCK:
+                reset_learned_category(category)
+            refresh()
+
+        def restore_selected() -> None:
+            category = selected_category()
+            if not category:
+                return
+            if not self.messagebox.askyesno(
+                    APP_NAME, f"Ersätt {category!r} med dess beslut och korrigeringar "
+                    "från historiken?", parent=win):
+                return
+            with _LEARNED_LOCK:
+                count = restore_learned_category(category, load_history())
+            refresh()
+            self.messagebox.showinfo(
+                APP_NAME, f"{category}: {count} positiva historikbeslut återställda.",
+                parent=win)
+
+        refresh()
+        ttk.Button(win, text="Återställ kategori",
+                   command=reset_selected).grid(row=1, column=0, sticky="w",
+                                                 padx=10, pady=(0, 10))
+        ttk.Button(win, text="Återställ från historik",
+                   command=restore_selected).grid(row=1, column=1, sticky="w",
+                                                   padx=4, pady=(0, 10))
+        ttk.Button(win, text="Stäng", command=win.destroy).grid(
+            row=1, column=2, sticky="e", padx=10, pady=(0, 10))
 
     def _cache_cleanup_tick(self) -> None:
         """Starta max en smart rensning per 24 timmar även vid lång drift."""
@@ -8608,28 +8987,44 @@ class App:
                     parent=self.root)
             return
         kalla = "GitHub Releases"
+        build_label = (f"Ett nytt bygge av version {info.get('remote')}"
+                       if info.get("build_update") else
+                       f"Ny version {info.get('remote')}")
+        changed_files = list(info.get("changed_files") or [])
+        build_details = ""
+        if info.get("build_update"):
+            if changed_files:
+                listed = ", ".join(changed_files[:8])
+                suffix = " …" if len(changed_files) > 8 else ""
+                build_details += f"\nFiler som skiljer: {listed}{suffix}"
+            local_commit = str(info.get("local_commit") or "")[:12]
+            release_commit = str(info.get("release_commit") or "")[:12]
+            if local_commit and release_commit and local_commit != release_commit:
+                build_details += (f"\nCommit: {local_commit} → "
+                                  f"{release_commit}")
         if steg == "erbjudande":
             self._h("uppdatering",
-                    f"Ny version {info.get('remote')} finns (kör "
-                    f"{APP_VERSION}) - autouppdatering är avstängd, så "
-                    "appen installerar den inte själv", "ok")
-            self._notify(f"Ny version {info.get('remote')} finns. "
+                    f"{build_label} finns (kör {APP_VERSION}) - "
+                    "autouppdatering är avstängd, så appen installerar "
+                    "det inte själv" + build_details, "ok")
+            self._notify(f"Uppdatering finns: {build_label}. "
                          "Hjälp → Sök efter uppdateringar installerar den.")
             return
         tyst = steg == "installera"
         if tyst:
             svar = True
             self._h("uppdatering",
-                    f"Tyst uppdatering: {info['remote']} hittad på {kalla} - "
+                    f"Tyst uppdatering: {build_label} hittades på {kalla} - "
                     "verifierar SHA-256 och installerar", "ok")
-            self._log(f"Ny version {info['remote']} hittad - installeras i "
+            self._log(f"Uppdatering hittad: {build_label} - installeras i "
                       "bakgrunden.", "info")
         else:
             svar = self.messagebox.askyesno(
                 APP_NAME,
-                f"En ny version finns: {info['remote']} "
-                f"(du har {APP_VERSION}).\n\n"
+                f"En uppdatering finns: {build_label} "
+                f"(installerad version {APP_VERSION}).\n\n"
                 f"Källa: {kalla}."
+                + build_details
                 + ("\nPaketet verifieras med SHA-256 före installation."
                    if info.get("sha256_url") else
                    "\nVarning: releasen saknar kontrollsumma.")
@@ -10109,6 +10504,14 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"Senaste på GitHub: {info['remote']}  ({kalla})")
         if info.get("release_url"):
             print(f"Release: {info['release_url']}")
+        if info.get("build_update"):
+            if info.get("local_commit") or info.get("release_commit"):
+                print("Release-commit: "
+                      f"{str(info.get('local_commit') or 'okänd')[:12]} -> "
+                      f"{str(info.get('release_commit') or 'okänd')[:12]}")
+            changed = info.get("changed_files") or []
+            if changed:
+                print("Filer som skiljer: " + ", ".join(changed))
         print("Kontrollsumma: "
               + ("ja (verifieras före installation)"
                  if info.get("sha256_url") else "SAKNAS - frågar i GUI"))
@@ -10116,7 +10519,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("Du har redan den senaste versionen.")
             return 0
         if not args.update:
-            print("En uppdatering finns! Kör med --update för att installera den.")
+            if info.get("build_update"):
+                print("Ett nytt bygge av samma versionsnummer finns "
+                      "(release-commit eller release-filer skiljer sig). "
+                      "Kör med --update för att installera det.")
+            else:
+                print("En nyare version finns! Kör med --update för att installera den.")
             return 0
         ok, msg = perform_update()
         print(msg)

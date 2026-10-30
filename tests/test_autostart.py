@@ -250,6 +250,25 @@ def test_windows_registry_removes_duplicate_startup_lnk(
     assert state["values"]["ArkivPiloten"].endswith("--tray")
 
 
+def test_windows_autostart_skips_pyw_file_association(app, monkeypatch):
+    S, tmp, main = app
+    monkeypatch.setattr(S.sys, "platform", "win32")
+    python = tmp / "Python" / "python.exe"
+    python.parent.mkdir()
+    python.write_text("", encoding="utf-8")
+    pythonw = python.with_name("pythonw.exe")
+    pythonw.write_text("", encoding="utf-8")
+    monkeypatch.setattr(S.sys, "executable", str(python))
+
+    argv, workdir = S._launch_argv()
+    assert argv[0] == str(pythonw)
+    assert argv[1] == str(main)
+    assert argv[1].endswith("pdfsorter.py")
+    assert not argv[1].endswith(".pyw")
+    assert argv[2] == "--tray"
+    assert workdir == str(main.parent)
+
+
 def test_windows_failed_disable_is_not_reported_as_success(
         app, monkeypatch, fake_winreg):
     """Att säga 'av' medan posten är kvar är ett consent-problem."""

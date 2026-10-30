@@ -59,7 +59,7 @@ FILES = (
     "ArkivPiloten.png", "ArkivPiloten.ico",
     "ArkivPiloten - Installera senaste Python och starta.bat",
     "README.md", "PDFSORTER_SPEC.md", "Stöd ArkivPiloten.html",
-    "swish_qr.png", "desktop.ini",
+    "swish_qr.png", "desktop.ini", "BUILD-MANIFEST.json",
 )
 
 _VERSION_RE = re.compile(r'(?:APP_)?VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"')

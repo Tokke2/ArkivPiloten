@@ -72,6 +72,15 @@ jobs:
             echo
             echo "Autouppdateringen verifierar paketet mot \`SHA256SUMS.txt\` innan något installeras."
             echo
+            echo "### Om du redan har version 1.4.13"
+            echo
+            echo "Den äldre uppdateraren jämförde bara versionsnummer och kan därför inte upptäcka den här ombyggda releasen automatiskt. Installera om paketet manuellt en gång för att få den nya uppdateraren; därefter jämförs både commit och filhashar även när versionsnumret är samma."
+            echo
+            echo "<!-- ARKIVPILOTEN_BUILD_MANIFEST_BEGIN"
+            cat dist/BUILD-MANIFEST.json
+            echo "ARKIVPILOTEN_BUILD_MANIFEST_END -->"
+            echo
+            echo
             if [ -n "$PREV" ]; then
               echo "### Ändringar sedan $PREV"
               echo
