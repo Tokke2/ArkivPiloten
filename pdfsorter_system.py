@@ -2355,8 +2355,15 @@ def crash_report(exc: BaseException) -> None:
     text = (f"{APP_NAME} {APP_VERSION} | Python {sys.version.split()[0]} | "
             f"{_mod_versions_line()}\n" + text)
     # Även i den löpande sessionsloggen, om en körning redan pågår -
-    # då syns kraschen i sitt sammanhang (vad hände precis innan).
-    session_log("krasch", text.rstrip(), level="err")
+    # då syns kraschen i sitt sammanhang (vad hände precis innan). Om felet
+    # inträffar före sessionsstart skrivs det ändå till samlingsloggen.
+    felrad = f"{type(exc).__name__}: {exc}"
+    nu = _dt.now()
+    ts = nu.strftime("%H:%M:%S.") + f"{nu.microsecond // 1000:03d}"
+    session_log("krasch", felrad + "\n" + text.rstrip(), level="err")
+    if _SESSION_FH is None:
+        _append_consolidated_error(
+            ts, "krasch".ljust(10), [felrad, *text.rstrip().splitlines()])
     if _diag is not None:
         _diag.note("krasch", f"{type(exc).__name__}: {exc}", tb_text=text,
                    logg=False)
@@ -2867,6 +2874,8 @@ def session_log(category: str, message: str, level: str = "info") -> None:
 
     Radformat: HH:MM:SS.mmm  NIVÅ   kategori   meddelande
     Flerradiga meddelanden indenteras så att varje rad syns i klistret.
+    Alla FEL speglas dessutom till logs/fel-samlat.log, som är en enda
+    lättfunnen felsökningslogg över flera sessioner.
     """
     if _SESSION_FH is None:
         return
@@ -2883,7 +2892,24 @@ def session_log(category: str, message: str, level: str = "info") -> None:
             _SESSION_FH.write(f"{ts}  {lvl} {cat} {lines[0]}\n")
             for ln in lines[1:]:
                 _SESSION_FH.write(f"{'':22}{ln}\n")
+            if lvl.strip() == "FEL":
+                _append_consolidated_error(ts, cat, lines)
     except Exception:
+        pass
+
+
+def _append_consolidated_error(ts: str, category: str,
+                               lines: List[str]) -> None:
+    """Lägg alla fångade FEL-rader i den gemensamma felsökningsloggen."""
+    try:
+        target = session_dir() / "fel-samlat.log"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8", buffering=1) as fh:
+            fh.write(f"{ts}  FEL   {category} {lines[0]}\n")
+            for line in lines[1:]:
+                fh.write(f"{'':22}{line}\n")
+    except Exception:
+        # Fel i felsökningsloggen får aldrig hindra appens normala loggning.
         pass
 
 

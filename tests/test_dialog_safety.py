@@ -19,6 +19,7 @@ länge.
 """
 from __future__ import annotations
 
+import io
 import os
 import time
 from pathlib import Path
@@ -144,6 +145,90 @@ def test_process_queue_returns_when_root_is_destroyed(monkeypatch, tmp_path):
     app._process_queue()
 
 
+def test_process_queue_ignores_reentrant_request_while_dialog_is_open(
+        monkeypatch, tmp_path):
+    fil = tmp_path / "dokument.pdf"
+    fil.write_bytes(b"%PDF-1.4")
+    app = _app()
+    app.queue = [SimpleNamespace(path=fil,
+                                 extraction=SimpleNamespace(combined=""),
+                                 reason="test")]
+    app.root = SimpleNamespace(winfo_exists=lambda: True)
+    app._queued_paths = set()
+    app.settings = {"keywords_per_file": 10, "orgnr_lookup": False}
+    app.rules = SimpleNamespace(all_keyword_texts=lambda: set())
+    app.theme = None
+    app._refresh_queue = lambda: None
+    app._refresh_categories = lambda: None
+    app._refresh_history = lambda: None
+    app._sync_tray = lambda: None
+    app._update_stats = lambda: None
+    app.tk = SimpleNamespace(TclError=type("TclError", (Exception,), {}))
+    app._review_dialog = None
+    öppnade = []
+
+    class Dialog:
+        def __init__(self, *a, **k):
+            öppnade.append(1)
+
+        def show(self):
+            app._process_queue()  # Simulerar återinträde under nested event loop
+            return None
+
+    monkeypatch.setattr(P, "suggest_keywords", lambda *a, **k: [])
+    monkeypatch.setattr(P, "session_log", lambda *a, **k: None)
+    monkeypatch.setattr(P, "ReviewDialog", Dialog)
+    app._process_queue()
+    assert öppnade == [1]
+    assert app._processing_queue is False
+
+
+def test_listbox_typeahead_ignores_widget_path_strings():
+    P._ta_listbox(SimpleNamespace(widget=".!combobox.popdown.f.l",
+                                  keysym="a", char="a", state=0))
+
+
+def test_watcher_callback_does_not_sort_after_watcher_stops(monkeypatch, tmp_path):
+    app = _app()
+    app.watcher = SimpleNamespace(running=False)
+    app.engine = SimpleNamespace(
+        analyze=lambda *_: (_ for _ in ()).throw(
+            AssertionError("ingen analys efter stoppad bevakning")))
+    monkeypatch.setattr(P, "session_log", lambda *a, **k: None)
+    app._on_watched_file(tmp_path / "sent.pdf")
+
+
+def test_schedule_does_not_start_a_sort_without_active_watching(monkeypatch):
+    app = _app()
+    app.settings = {"schedule_enabled": True, "schedule_time": "00:00",
+                    "schedule_last_run": ""}
+    app.watcher = None
+    app._busy = False
+    app.root = SimpleNamespace(after=lambda *a, **k: None)
+    starts = []
+    app._sort_now = lambda: starts.append("sort")
+    app._log = lambda *a, **k: None
+    monkeypatch.setattr(P, "session_log", lambda *a, **k: None)
+    app._schedule_tick()
+    assert starts == []
+
+
+def test_opted_in_schedule_runs_while_watching(monkeypatch):
+    app = _app()
+    app.settings = {"schedule_enabled": True, "schedule_time": "00:00",
+                    "schedule_last_run": ""}
+    app.watcher = SimpleNamespace(running=True)
+    app._busy = False
+    app.root = SimpleNamespace(after=lambda *a, **k: None)
+    starts = []
+    app._sort_now = lambda: starts.append("sort")
+    app._log = lambda *a, **k: None
+    monkeypatch.setattr(P, "session_log", lambda *a, **k: None)
+    monkeypatch.setattr(P, "save_settings", lambda *_: None)
+    app._schedule_tick()
+    assert starts == ["sort"]
+
+
 def test_process_queue_survives_tcl_error_from_dialog(monkeypatch, tmp_path,
                                                       capsys):
     fil = tmp_path / "dokument.pdf"
@@ -172,6 +257,27 @@ def test_process_queue_survives_tcl_error_from_dialog(monkeypatch, tmp_path,
     monkeypatch.setattr(P, "ReviewDialog", trasig_dialog)
     app._process_queue()                 # får inte kasta vidare
     assert app._review_dialog is None
+
+
+# -- samlad felsökningslogg -----------------------------------------------
+def test_session_errors_are_mirrored_to_one_searchable_log(monkeypatch,
+                                                            tmp_path):
+    session = io.StringIO()
+    logs = tmp_path / "logs"
+    monkeypatch.setattr(S, "_SESSION_FH", session)
+    monkeypatch.setattr(S, "_SESSION_PATH", None)
+    monkeypatch.setattr(S, "session_dir", lambda: logs)
+
+    S.session_log("motor", "PDFTextError: text kunde inte läsas\nspårningsrad",
+                  "err")
+    S.session_log("motor", "bara information", "info")
+
+    consolidated = logs / "fel-samlat.log"
+    text = consolidated.read_text(encoding="utf-8")
+    assert "PDFTextError: text kunde inte läsas" in text
+    assert "spårningsrad" in text
+    assert "bara information" not in text
+    assert P.diag.parse_session_log(text)[0]["nivå"] == "FEL"
 
 
 # -- loggarkivering --------------------------------------------------------

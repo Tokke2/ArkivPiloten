@@ -48,7 +48,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 - ↩️ **Never destructive** — files are never overwritten (name clashes become `invoice (2).pdf`), and every move can be undone
 - 🎨 **One shared app icon** — the new transparent 512px archive/checkmark mark is the source for windows/dialogs, taskbar, tray, shortcuts, macOS app bundle and the multi-size Windows `.ico`.
 - 🧰 **Tray icon, autostart, single instance** — a manual launch opens the window; OS autostart starts in the tray. Windows autostart runs `pythonw.exe pdfsorter.py --tray` directly (not the `.pyw` file association), so the app branding replaces Python’s generic icon. Closing/minimizing sends the app to the tray while idle, but the window stays visible during sorting so duplicate prompts cannot get hidden.
-- 🪵 **Session logging** in `logs/` and a one-click diagnostics bundle (*Copy diagnostics*) for support
+- 🪵 **Session logging** in `logs/`, plus `logs/fel-samlat.log` for errors gathered across sessions and a one-click diagnostics bundle (*Copy diagnostics*) for support
 - 🎒 **Portable by default** — settings, rules, history, logs, cache, icons, backups, updates and temp files live in subfolders of the app folder (`json/`, `logs/`, …). If the app folder is read-only (e.g. `/Applications` or `/opt`), data moves to the standard per-user folder instead; override with `PDFSORTER_HOME`
 - 🧹 **Smart cache cleanup** — runs every 24 hours; removes cache unused for 30 days and the oldest entries above 1,500 files / 512 MB. Corrupt entries are discarded when read. A manual “Clean cache now” action is available under Settings → Cache and storage. Only regenerable PDF text-cache files are touched.
 - 🧭 **AI report in one click (1.4.13)** — every error, warning and Tk callback exception collected into one compact block, ready to paste into an AI chat or a bug report. The same error from memory, the session log and `errors.log` is merged into one row with a count; only the tail of each log is read, so the report is ready in well under a second even with tens of megabytes of logs, and it says plainly if a log was only read in part. Tk callback exceptions are now captured even when the app runs without a console (`pythonw`). GUI: *Help → Copy AI report*, or `--ai-rapport` (add `--djup` to read the logs in full)
@@ -184,7 +184,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-Found a bug? Run `python pdfsorter.py --ai-rapport` (or *Copy AI report* in the app) and paste the block into the report — it lists every error with a stable fingerprint, a count, the code location and the traceback, merged from memory, the session log and `errors.log`. `--diagnostik` adds versions, settings and engine status. Neither contains document content, and the AI report redacts your user name and home folder.
+Found a bug? Run `python pdfsorter.py --ai-rapport` (or *Copy AI report* in the app) and paste the block into the report — it lists every error with a stable fingerprint, a count, the code location and the traceback, merged from memory and the logs. For quick manual inspection, errors are also collected across sessions in `logs/fel-samlat.log`. `--diagnostik` adds versions, settings and engine status. Neither contains document content, and the AI report redacts your user name and home folder.
 
 ---
 
@@ -255,7 +255,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 - ↩️ **Aldrig destruktiv** — filer skrivs aldrig över (namnkrockar blir `faktura (2).pdf`), och varje flytt går att ångra
 - 🎨 **En gemensam appikon** — den nya transparenta 512px-ikonen med arkiv/checkmark är källa för fönster/dialoger, aktivitetsfält, systemfält, genvägar, macOS-appen och Windows-`.ico` i flera storlekar.
 - 🧰 **Tray-ikon, autostart, enkelinstans** — manuell start visar fönstret; OS-autostart startar i systemfältet. Windows-autostart kör `pythonw.exe pdfsorter.py --tray` direkt (inte `.pyw` via filassociation), så appens egen ikon används i stället för Pythons standardikon. Stängning/minimering gömmer appen när den är inaktiv, men under sortering hålls fönstret synligt så att dubblettfrågor inte hamnar bakom systemfältet.
-- 🪵 **Sessionsloggning** i `logs/` och ett diagnostikpaket med ett klick (*Kopiera diagnostik*) för support
+- 🪵 **Sessionsloggning** i `logs/`, plus `logs/fel-samlat.log` som samlar fel från flera körningar och ett diagnostikpaket med ett klick (*Kopiera diagnostik*) för support
 - 🎒 **Portabelt som standard** — inställningar, regler, historik, loggar, cache, ikoner, säkerhetskopior, uppdateringar och tempfiler bor i appmappens undermappar (`json/`, `logs/`, …). Är appmappen skrivskyddad (t.ex. `/Applications` eller `/opt`) flyttas datan till användarens ordinarie datamapp i stället; `PDFSORTER_HOME` styr om
 - 🧹 **Smart cacherensning** — körs var 24:e timme och tar bort cache som inte använts på 30 dagar samt äldsta poster över 1 500 filer / 512 MB. Skadade poster rensas när de läses. Manuell knapp finns under Inställningar → Cache och lagring. Bara återskapbar PDF-textcache påverkas.
 - 🧭 **AI-rapport på ett klick (1.4.13)** — alla fel, varningar och Tk-callbackundantag samlade i ett kompakt block, klart att klistra in i en AI-chatt eller felanmälan. Samma fel från minnet, sessionsloggen och `errors.log` slås ihop till en rad med antal; bara svansen av varje logg läses, så rapporten är klar på under en sekund även med tiotalet megabyte loggar — och den säger rakt ut om en logg bara lästes delvis. Tk-callbackundantag fångas nu även när appen körs utan konsol (`pythonw`). I appen: *Hjälp → Kopiera AI-rapport (alla fel)*, eller `--ai-rapport` (lägg till `--djup` för att läsa hela loggarna)
@@ -392,7 +392,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-Hittat en bugg? Kör `python pdfsorter.py --ai-rapport` (eller *Kopiera AI-rapport* i appen) och klistra in blocket i felanmälan — det listar varje fel med ett stabilt fingeravtryck, antal, kodplats och spårning, sammanslaget från minnet, sessionsloggen och `errors.log`. `--diagnostik` lägger till versioner, inställningar och motorstatus. Inget av dem innehåller dokumentinnehåll, och AI-rapporten avidentifierar användarnamn och hemkatalog.
+Hittat en bugg? Kör `python pdfsorter.py --ai-rapport` (eller *Kopiera AI-rapport* i appen) och klistra in blocket i felanmälan — det listar varje fel med ett stabilt fingeravtryck, antal, kodplats och spårning, sammanslaget från minnet och loggarna. För snabb manuell felsökning samlas fel från flera körningar även i `logs/fel-samlat.log`. `--diagnostik` lägger till versioner, inställningar och motorstatus. Inget av dem innehåller dokumentinnehåll, och AI-rapporten avidentifierar användarnamn och hemkatalog.
 
 ---
 

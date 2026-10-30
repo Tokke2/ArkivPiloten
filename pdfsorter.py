@@ -1236,8 +1236,17 @@ def _ta_combobox(event) -> None:
 
 
 def _ta_listbox(event) -> None:
-    """Samma typahead i öppna listor/rullgardiner, med flera tecken."""
-    lb = event.widget
+    """Samma typahead i öppna listor/rullgardiner, med flera tecken.
+
+    Tk kan i vissa <Key>-händelser lämna widgetens namn som en sträng i
+    stället för ett Python-widgetobjekt. Då finns inget säkert sätt att
+    anropa Listbox-API:t; låt Tk hantera tangenten normalt i stället.
+    """
+    lb = getattr(event, "widget", None)
+    if not all(callable(getattr(lb, namn, None)) for namn in
+               ("size", "get", "curselection", "selection_clear",
+                "selection_set")):
+        return
     keysym = getattr(event, "keysym", "")
     if getattr(event, "state", 0) & 0x4:
         _ta_remember(lb, "")
@@ -7029,9 +7038,22 @@ class App:
             self._start_watch(quiet=True)
 
     def _on_watched_file(self, path: Path) -> None:
+        # En watcher-tråd kan precis hinna lämna sin callback när användaren
+        # stänger av bevakningen. Kontrollera tillståndet innan någon analys
+        # eller sorteringsåtgärd får starta.
+        watcher = getattr(self, "watcher", None)
+        if not watcher or not getattr(watcher, "running", False):
+            session_log("bevaka", f"Ignorerade fil efter stoppad bevakning: {path}",
+                        "info")
+            return
         session_log("bevaka", f"Ny stabil fil upptäckt: {path}")
         try:
             decision = self.engine.analyze(path)
+            # Bevaka kan ha stoppats medan PDF:en analyserades.
+            if not getattr(watcher, "running", False):
+                session_log("bevaka", f"Avbröt sortering efter stoppad bevakning: {path}",
+                            "info")
+                return
             self._handle(decision, from_watch=True)
         except Exception as exc:
             self._fel(exc, f"bevaka {path.name}")
@@ -7869,6 +7891,20 @@ class App:
             self._refresh_queue()
 
     def _process_queue(self, start: int = 0) -> None:
+        """Visa högst en granskningsdialog/köprocessor åt gången.
+
+        Dialogens väntan driver en nästlad Tk-event-loop. Händelser kan därför
+        anropa _process_queue igen innan den första dialogen stängts.
+        """
+        if getattr(self, "_processing_queue", False):
+            return
+        self._processing_queue = True
+        try:
+            self._process_queue_impl(start)
+        finally:
+            self._processing_queue = False
+
+    def _process_queue_impl(self, start: int = 0) -> None:
         """Visa granskningsdialogen för varje kvarvarande fil."""
         if not self.queue or getattr(self, "_closing", False):
             return
@@ -8588,7 +8624,11 @@ class App:
         """1.1.0: schemalagd sortering - kör en sortering per dag vid
         inställt klockslag medan appen är igång (även i systemfältet)."""
         try:
-            if self.settings.get("schedule_enabled", False) and not self._busy:
+            bevakar = bool(getattr(self, "watcher", None)
+                           and self.watcher.running)
+            if (self.settings.get("schedule_enabled", False) and bevakar
+                    and not self._busy
+                    and not getattr(self, "_processing_queue", False)):
                 tid = str(self.settings.get("schedule_time", "07:00"))[:5]
                 idag = time.strftime("%Y-%m-%d")
                 if (time.strftime("%H:%M") >= tid
