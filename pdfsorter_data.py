@@ -1566,6 +1566,40 @@ def unique_target(target: Path) -> Path:
     return parent / f"{stem} ({int(time.time())}){suffix}"
 
 
+def is_file_locked(path: Path) -> bool:
+    """Testa om en fil har ett exklusivt handtag på Windows.
+
+    På POSIX-system är öppna filer normalt flyttbara och lås är rådgivande,
+    så där avgör det faktiska filsystemsanropet. Windows ger däremot
+    sharing/lock-violation när ett annat program håller filen låst.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        handle = create_file(str(Path(path)), 0x80000000, 0, None, 3, 0x80, None)
+        invalid = ctypes.c_void_p(-1).value
+        if handle == invalid:
+            return ctypes.get_last_error() in (32, 33)  # sharing/lock violation
+        close_handle(handle)
+    except Exception:
+        return False
+    return False
+
+
 def place_file(src: Path, out_root: Path, folder: str, action: str = "move",
                on_conflict: str = "rename", dry_run: bool = False,
                subfolder: str = "") -> Tuple[bool, str, Optional[Path]]:

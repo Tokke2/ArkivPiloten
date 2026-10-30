@@ -237,6 +237,7 @@ try:
         flush_history,
         compact_history_if_large,
         is_ignored_file,
+        is_file_locked,
         json_dir,
         migrate_to_portable,
         list_ignored_files,
@@ -2320,13 +2321,15 @@ class SortEngine:
 
     def __init__(self, rules: Rules, settings: Dict[str, Any],
                  log: Optional[Callable[[str, str], None]] = None,
-                 conflict_asker: Optional[Callable[[Path, Path, str], str]] = None):
+                 conflict_asker: Optional[Callable[[Path, Path, str], str]] = None,
+                 locked_file_asker: Optional[Callable[[Path], bool]] = None):
         self.rules = rules
         self.settings = settings
         self.log = log or (lambda msg, level="info": None)
         #: REQ-N4: anropas när en dubblett upptäcks och returnerar
         # "replace" eller "rename". None (headless) = behåll båda + logga.
         self.conflict_asker = conflict_asker
+        self.locked_file_asker = locked_file_asker
         self.lock = threading.RLock()
         self.stats = Counter()
         # Debouncad rules.save (snabbare batch, mindre I/O-hack): högst en
@@ -2455,6 +2458,35 @@ class SortEngine:
         except OSError:
             return True
 
+    def _place_file(self, src: Path, out_root: Path, folder: str,
+                    action: str, on_conflict: str, dry_run: bool,
+                    subfolder: str) -> Tuple[bool, str, Optional[Path]]:
+        """Förvarna om låsta filer och försök flytten efter användarens svar."""
+        asker = self.locked_file_asker
+        if action != "copy" and not dry_run and is_file_locked(src):
+            if asker is None or not asker(src):
+                return False, ("Filen är låst och lämnades kvar. Stäng den "
+                               "i programmet där den är öppen."), None
+            if is_file_locked(src):
+                return False, ("Filen är fortfarande låst och lämnades kvar. "
+                               "Stäng den och försök igen."), None
+
+        result = place_file(src, out_root, folder, action=action,
+                            on_conflict=on_conflict, dry_run=dry_run,
+                            subfolder=subfolder)
+        ok, msg, target = result
+        # Låset kan uppstå mellan förkontrollen och flytten. Fråga då också
+        # innan nästa (eventuellt lyckade) försök.
+        if (not ok and action != "copy" and not dry_run and asker is not None
+                and "låst" in msg.casefold() and asker(src)):
+            if is_file_locked(src):
+                return False, ("Filen är fortfarande låst och lämnades kvar. "
+                               "Stäng den och försök igen."), None
+            return place_file(src, out_root, folder, action=action,
+                              on_conflict=on_conflict, dry_run=dry_run,
+                              subfolder=subfolder)
+        return result
+
     def apply(self, decision: Decision, category: str, matched: List[str],
               decided_by: str = "auto", learned: Optional[List[str]] = None) -> Tuple[bool, str]:
         # Hela verkställandet serialiseras: parallella sorteringstrådar får
@@ -2522,7 +2554,7 @@ class SortEngine:
                     else:
                         on_conflict = "rename"
 
-            ok, msg, target = place_file(
+            ok, msg, target = self._place_file(
                 decision.path, Path(s["output_dir"]), folder,
                 action=s.get("action", "move"),
                 on_conflict=on_conflict,
@@ -2530,7 +2562,10 @@ class SortEngine:
                 subfolder=sub,
             )
             if not ok:
-                self.stats["error"] += 1
+                if "lämnades kvar" in msg:
+                    self.stats["left"] += 1
+                else:
+                    self.stats["error"] += 1
                 return False, msg
             if not s.get("dry_run", False) and s.get("tag_pdf_metadata", True):
                 try:
@@ -2614,7 +2649,7 @@ class SortEngine:
                 self.stats["left"] += 1
                 return False, "Lämnad i inmappen"
             subfolder, _when, _source = self.subfolder_for(decision.extraction)
-            ok, msg, target = place_file(
+            ok, msg, target = self._place_file(
                 decision.path, Path(self.settings["output_dir"]), folder,
                 action=self.settings.get("action", "move"),
                 on_conflict=self.settings.get("on_conflict", "rename"),
@@ -4907,9 +4942,13 @@ class App:
         except Exception:
             pass
         self._warm_patterns()
+        # Flera sorteringstrådar kan hitta låsta filer samtidigt; varningarna
+        # visas en i taget på Tk-tråden.
+        self._locked_dialog_lock = threading.Lock()
         self.engine = SortEngine(self.rules, self.settings,
                                  log=self._log_threadsafe,
-                                 conflict_asker=self._ask_conflict)
+                                 conflict_asker=self._ask_conflict,
+                                 locked_file_asker=self._ask_locked_file)
         # Startsammanfattning till sessionsloggen - den som felsöker ska
         # direkt se inställningar, regler och motorer utan att fråga.
         _antal_kw = sum(len(c.get("keywords", []))
@@ -6293,6 +6332,86 @@ class App:
             lbl.configure(foreground=(self.C[tones[key]] if n
                                       else self.C["text_faint"]))
 
+    def _ask_locked_file(self, path: Path) -> bool:
+        """Varna på Tk-tråden, be användaren stänga filen och försöka igen."""
+        lock = getattr(self, "_locked_dialog_lock", None)
+        if lock is None:
+            return False
+        if threading.current_thread() is getattr(self, "_main_thread", None):
+            # Blockera inte en nästlad Tk-loop om en annan varning redan visas.
+            if not lock.acquire(blocking=False):
+                return False
+            try:
+                return self._show_locked_file_warning(path)
+            finally:
+                lock.release()
+                self._resume_queue_after_locked_warning()
+
+        if not lock.acquire(timeout=120):
+            return False
+        finished = threading.Event()
+        answer = {"retry": False}
+
+        def show() -> None:
+            if self._review_is_open():
+                try:
+                    self.root.after(150, show)
+                except Exception:
+                    finished.set()
+                return
+            try:
+                answer["retry"] = self._show_locked_file_warning(path)
+            finally:
+                finished.set()
+
+        try:
+            self._post(show)
+            if not finished.wait(120):
+                session_log("sortering", f"Timeout på låst-fil-dialog: {path}",
+                            "warn")
+                return False
+            return answer["retry"]
+        finally:
+            lock.release()
+            self._resume_queue_after_locked_warning()
+
+    def _resume_queue_after_locked_warning(self) -> None:
+        if (getattr(self, "queue", None)
+                and not getattr(self, "_closing", False)
+                and getattr(self, "settings", {}).get("ask_when_unsure", True)):
+            self._post(self._process_queue)
+
+    def _show_locked_file_warning(self, path: Path) -> bool:
+        """Dialogens innehåll hålls på ett ställe för batch och bevakning."""
+        if getattr(self, "_closing", False) or self._review_is_open():
+            return False
+        try:
+            if not self.root.winfo_exists():
+                return False
+            if not getattr(self, "visible", True):
+                # Visa ägarfönstret så varningen inte hamnar bakom tray-starten;
+                # undvik show_window(), som annars kan öppna granskningskön.
+                self.root.deiconify()
+                self.root.state("normal")
+                self.root.lift()
+                self.root.focus_force()
+                self.visible = True
+                self._sync_tray()
+        except Exception:
+            return False
+        session_log("sortering", f"Filen verkar vara låst: {path}", "warn")
+        try:
+            return bool(self.messagebox.askretrycancel(
+                "Filen används",
+                f"ArkivPiloten kan inte flytta filen eftersom den verkar vara "
+                f"öppen eller låst:\n\n{path.name}\n\n"
+                "Stäng filen i programmet där den är öppen och välj "
+                "Försök igen. Välj Avbryt för att låta filen ligga kvar.",
+                parent=self.root))
+        except Exception as exc:
+            session_error("låst-fil-dialog", exc)
+            return False
+
     def _ask_conflict(self, src: Path, target: Path, kind: str) -> str:
         """REQ-N4: visa dubblettfrågan och vänta på svaret.
 
@@ -6957,7 +7076,8 @@ class App:
                         self._post(lambda n=name, c=best.name:
                                    self._notify(f"{n} → {c}"))
             else:
-                self._log_threadsafe(f"{name}  ✖ {msg}", "err")
+                level = "warn" if "lämnades kvar" in msg else "err"
+                self._log_threadsafe(f"{name}  ✖ {msg}", level)
             return
 
         # osäker
@@ -7929,6 +8049,9 @@ class App:
                     return
             except Exception:
                 return
+            lock_guard = getattr(self, "_locked_dialog_lock", None)
+            if lock_guard is not None and lock_guard.locked():
+                return
             decision = self.queue[i]
             if not decision.path.exists():
                 self.queue.pop(i)
@@ -8002,8 +8125,10 @@ class App:
                 else:
                     self.engine.learn(cat, [])
                 ok, msg = self.engine.apply(decision, cat, words, "user", learned=words)
+                level = ("ok" if ok else
+                         "warn" if "lämnades kvar" in msg else "err")
                 self._log(f"{decision.path.name}  →  {cat}   (ditt val)" if ok
-                          else f"{decision.path.name}  ✖ {msg}", "ok" if ok else "err")
+                          else f"{decision.path.name}  ✖ {msg}", level)
                 if self.watcher:
                     self.watcher.forget(decision.path)
             self.queue.pop(i)
