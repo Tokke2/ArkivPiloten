@@ -4,9 +4,9 @@
 
 Paketet innehåller exakt filerna i pdfsorter_system.UPDATE_FILES, med
 pdfsorter.py i roten, plus en SHA256SUMS.txt. GitHub-arbetsflödet
-(.github/workflows/release.yml) publicerar paketet som en release så
-fort main uppdateras, så att "Sök efter uppdateringar" alltid hittar
-den senaste koden.
+(.github/workflows/release.yml) publicerar paketet som en release vid
+varje kodpush till en gren, så att "Sök efter uppdateringar" alltid hittar
+den senaste koden utan att kräva ett versionshopp.
 
     python tools/build_release.py                 # -> dist/
     python tools/build_release.py --bump patch    # höj versionen först
@@ -166,7 +166,7 @@ def main(argv=None) -> int:
     print(f"SHA-256: {meta['sha256']}")
     print(f"Summor: {meta['sums']}")
     print("\nPublicera (görs automatiskt av .github/workflows/release.yml "
-          "när main uppdateras):")
+          "vid kodpush):")
     print(f"  gh release create {meta['tag']} {meta['zip']} "
           f"{meta['sums']} --title 'ArkivPiloten {meta['version']}'")
     return 0

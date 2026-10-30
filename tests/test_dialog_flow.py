@@ -160,6 +160,18 @@ def _type(stub, text):
         stub._combo_search(_key(ch))
 
 
+def test_review_dialog_uses_an_editable_free_text_folder_search():
+    import inspect
+
+    source = inspect.getsource(P.ReviewDialog.__init__)
+    assert 'text="Befintlig mapp:"' in source
+    assert 'text="VART SKA FILEN SPARAS?"' in source
+    assert 'text="STÖDORD OCH TRÄFFAR"' in source
+    assert 'state="normal"' in source
+    assert 'self.combo.bind("<KeyRelease>", self._combo_search)' in source
+    assert "self.combo.bind(\"<Return>\", self._combo_pick)" in source
+
+
 def test_typing_p_shows_only_names_starting_with_p():
     stub = _Stub()
     stub.combo.text = ""

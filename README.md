@@ -4,8 +4,8 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.4.13 — your PDFs, sorted into the right folders. Automatically.**
-**PDF Sorter 1.4.13 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
+**PDF Sorter 1.4.14 — your PDFs, sorted into the right folders. Automatically.**
+**PDF Sorter 1.4.14 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
@@ -43,7 +43,8 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 - 🧠 **Self-learning classifier** — suggests and breaks deadlocks between rule-approved candidates after roughly 5 decisions per category; it never moves a file on its own
 - 🔐 **Safer matching (1.2.0+)** — body-text-only mentions never auto-move a file on Normal and above: auto-sorting requires sender-zone, strong-ID or multi-page evidence, at least 12 characters of read text, and the exact analysed bytes are fingerprinted (SHA-256) and re-verified before any move
 - 🔍 **OCR for scanned PDFs** (Tesseract), including logos in letterheads of otherwise text-based files
-- 💡 **10 keyword suggestions per uncertain file** — tick the right ones in the review dialog and the file (and future lookalikes) sort themselves. Type in the existing-category field to filter and jump to a match; the mouse wheel is paused while its dropdown is open.
+- 💡 **Clearer review dialog (1.4.14)** — file details, keyword suggestions and destination are grouped into clean cards. The existing-folder field accepts free text and filters the dropdown as you type; choose a match with Enter. The primary “Save & move” action is easy to spot.
+- 💡 **10 keyword suggestions per uncertain file** — tick the right ones in the review dialog and the file (and future lookalikes) sort themselves. The mouse wheel is paused while the category dropdown is open.
 - ↩️ **Never destructive** — files are never overwritten (name clashes become `invoice (2).pdf`), and every move can be undone
 - 🎨 **One shared app icon** — the new transparent 512px archive/checkmark mark is the source for windows/dialogs, taskbar, tray, shortcuts, macOS app bundle and the multi-size Windows `.ico`.
 - 🧰 **Tray icon, autostart, single instance** — a manual launch opens the window; OS autostart starts in the tray. Windows autostart runs `pythonw.exe pdfsorter.py --tray` directly (not the `.pyw` file association), so the app branding replaces Python’s generic icon. Closing/minimizing sends the app to the tray while idle, but the window stays visible during sorting so duplicate prompts cannot get hidden.
@@ -159,7 +160,7 @@ python tools/build_release.py --bump patch   # bumps all five modules + README
 git commit -am "Release 1.4.1" && git push
 ```
 
-`.github/workflows/release.yml` builds the package and publishes/refreshes the release automatically for every push to `main` and every `v*` tag. If the version is unchanged the release assets are replaced, but already-installed apps only see the update once `APP_VERSION` is bumped.
+`.github/workflows/release.yml` builds the package and publishes/refreshes the current release automatically for every branch push and every `v*` tag. Release assets stay on the app's version; the updater compares the release commit and per-file SHA-256 hashes, so it can detect same-version rebuilds too.
 
 **Branch policy:** no merge commits. Work on a branch and publish with a fast-forward push or a tag/release — never `gh pr merge`.
 
@@ -249,7 +250,8 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 - 🔐 **Lokal, återställningsbar inlärning** — modell och zonfunktioner sparas lokalt med atomisk skrivning och säkerhetskopia; historiken kan spelas upp igen efter återställning. Ingen molntjänst eller nätverksinlärning används
 - 🔐 **Säkrare matchning (1.2.0+)** — bara löptextträffar flyttar aldrig en fil automatiskt på Normal och uppåt: det krävs avsändarzon, starkt ID eller flersidigt bevis, minst 12 lästa tecken, och exakt analyserade byte fingeravtrycks (SHA-256) och kontrolleras igen före varje flytt
 - 🔍 **OCR för skannade PDF:er** (Tesseract), inklusive logotyper i brevhuvuden på i övrigt textbaserade filer
-- 💡 **10 stödordsförslag per osäker fil** — bocka i rätt ord i granskningsrutan så sorterar sig filen (och framtida liknande filer) själva. Skriv i fältet för befintlig kategori för att filtrera och hoppa till en träff; mushjulet pausas medan rullgardinen är öppen.
+- 💡 **Tydligare granskningsruta (1.4.14)** — filinfo, stödordsförslag och målmapp ligger i rena, separata kort. Fältet för befintlig mapp tar fritext och filtrerar listan medan du skriver; Enter väljer en träff. Huvudknappen **Spara & flytta** är lätt att hitta.
+- 💡 **10 stödordsförslag per osäker fil** — bocka i rätt ord i granskningsrutan så sorterar sig filen (och framtida liknande filer) själva. Mushjulet pausas medan kategorirullgardinen är öppen.
 - ↩️ **Aldrig destruktiv** — filer skrivs aldrig över (namnkrockar blir `faktura (2).pdf`), och varje flytt går att ångra
 - 🎨 **En gemensam appikon** — den nya transparenta 512px-ikonen med arkiv/checkmark är källa för fönster/dialoger, aktivitetsfält, systemfält, genvägar, macOS-appen och Windows-`.ico` i flera storlekar.
 - 🧰 **Tray-ikon, autostart, enkelinstans** — manuell start visar fönstret; OS-autostart startar i systemfältet. Windows-autostart kör `pythonw.exe pdfsorter.py --tray` direkt (inte `.pyw` via filassociation), så appens egen ikon används i stället för Pythons standardikon. Stängning/minimering gömmer appen när den är inaktiv, men under sortering hålls fönstret synligt så att dubblettfrågor inte hamnar bakom systemfältet.
@@ -366,7 +368,7 @@ python tools/build_release.py --bump patch   # höjer alla fem moduler + README
 git commit -am "Release 1.4.1" && git push
 ```
 
-`.github/workflows/release.yml` bygger paketet och publicerar/uppdaterar releasen automatiskt vid varje push till `main` och varje `v*`-tagg. Är versionen oförändrad byts release-filerna ut, men redan installerade appar ser uppdateringen först när `APP_VERSION` höjs.
+`.github/workflows/release.yml` bygger paketet och publicerar/uppdaterar den aktuella releasen automatiskt vid push till valfri gren och varje `v*`-tagg. Release-filerna behåller appens versionsnummer; uppdateraren jämför release-commit och SHA-256 för varje fil och hittar därför även ombyggnader med samma versionsnummer.
 
 **Grenpolicy:** inga merge-commits. Arbeta på en gren och publicera med fast-forward-push eller tagg/release — aldrig `gh pr merge`.
 
@@ -424,7 +426,7 @@ Du kan också donera inifrån appen via **Hjälp → Stöd projektet 💖**, ell
 
 <div align="center">
 
-**ArkivPiloten 1.4.13** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
+**ArkivPiloten 1.4.14** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
 
 [🇬🇧 Back to English ↑](#english) · [🇸🇪 Tillbaka till Svenska ↑](#svenska) · [❤️ Donate / Donera ↑](#support)
 

@@ -457,8 +457,8 @@ def test_manual_install_asks_and_then_restarts(tmp_path, monkeypatch):
 def test_silent_check_without_new_version_only_logs(tmp_path, monkeypatch):
     monkeypatch.setenv("PDFSORTER_HOME", str(tmp_path / "data"))
     app = _Sken()
-    app._update_prompt({"ok": True, "available": False, "remote": "1.4.13"},
-                       manual=False)
+    app._update_prompt({"ok": True, "available": False,
+                        "remote": P.APP_VERSION}, manual=False)
     assert app.messagebox.klart == [] and app.messagebox.fragor == []
     assert any("Ingen nyare version" in t for _n, t in app.handelser)
 
@@ -521,7 +521,7 @@ def test_watchdog_searches_and_records_the_time(tmp_path, monkeypatch):
 
     def _sok(*a, **k):
         anrop.append(1)
-        return {"ok": True, "available": False, "remote": "1.4.13"}
+        return {"ok": True, "available": False, "remote": P.APP_VERSION}
     monkeypatch.setattr(P, "check_for_update", _sok)
     monkeypatch.setattr(P.threading, "Thread", _InlineThread)
     monkeypatch.setattr(P, "session_log", lambda *a, **k: None)

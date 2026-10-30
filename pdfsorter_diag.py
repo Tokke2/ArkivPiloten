@@ -43,7 +43,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
-VERSION = "1.4.13"
+VERSION = "1.4.14"
 
 #: Max antal fel som hålls i minnet. Nog för en hel dag, litet nog att vara billigt.
 RING_SIZE = 250

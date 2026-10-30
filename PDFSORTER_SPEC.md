@@ -248,6 +248,16 @@
 > Tester täcker hjulets öppna/stängda läge och tray-menyn. Versionsnumret
 > behålls.
 >
+> **Leverans 1.4.14 (2026-10-30) — granskningsdialog och sökbar målmapp.**
+> Filgranskningen har tydligare hierarki: filstatus och förslag ligger överst,
+> stödord och målmapp visas som separata kort, och huvudåtgärden är visuellt
+> prioriterad. Fältet **Befintlig mapp** tar fritext och filtrerar rullgardinen
+> medan användaren skriver; accentokänslig prefix-, ordstarts- och delsträngssök
+> samt tangentbordsval bevaras. Versionsnumret höjs med en patch till 1.4.14,
+> så tidigare installationer kan hämta den som en vanlig versionsuppdatering.
+> Därefter hittar appen även ombyggnader med samma versionsnummer genom att
+> jämföra release-commit och SHA-256 för paketerade filer.
+>
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
 > bara till `stderr`, som inte finns när appen startar med `pythonw`, och
@@ -456,8 +466,9 @@
 > auto_update är på som standard men installerar ENDAST när
 > kontrollsumma finns. Saknar releasen bifogade filer används GitHubs
 > tagg-arkiv som paket, med SHA-256 ur release-texten.
-> .github/workflows/release.yml publicerar/uppdaterar releasen vid varje
-> push till main och varje v*-tagg.
+> .github/workflows/release.yml publicerar/uppdaterar aktuell release vid
+> varje push till valfri gren och varje v*-tagg; innehållsuppdateringar kan
+> behålla versionsnumret.
 > (d) Tester: tests/ (pytest) för autostart per OS, datamapp, startfil,
 > genvägar, CLI-autostart, uppdateraren och kategorisökningen; CI på
 > Linux/macOS/Windows.

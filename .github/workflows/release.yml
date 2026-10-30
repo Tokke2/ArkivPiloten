@@ -66,16 +66,16 @@ jobs:
           # stabila för en oförändrad tagg; ändras de avbryter appen
           # uppdateringen i stället för att installera något overifierat.
           TAG_SHA=$(curl -fsSL "https://codeload.github.com/${GITHUB_REPOSITORY}/zip/refs/tags/${TAG}" | sha256sum | cut -d' ' -f1)
-          PREV=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          PREV=$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)
 
           {
             echo "Paket byggt från \`${GITHUB_SHA::12}\` på \`${GITHUB_REF_NAME}\`."
             echo
             echo "Autouppdateringen verifierar paketet mot \`SHA256SUMS.txt\` innan något installeras."
             echo
-            echo "### Om du redan har version 1.4.13"
+            echo "### Uppdatering"
             echo
-            echo "Den äldre uppdateraren jämförde bara versionsnummer och kan därför inte upptäcka den här ombyggda releasen automatiskt. Installera om paketet manuellt en gång för att få den nya uppdateraren; därefter jämförs både commit och filhashar även när versionsnumret är samma."
+            echo "Från äldre versioner visas ArkivPiloten $VERSION som en vanlig versionsuppdatering. Efter installationen jämför uppdateraren både release-commit och filhashar, så även framtida innehållsuppdateringar hittas när versionsnumret är oförändrat."
             echo
             echo "<!-- ARKIVPILOTEN_BUILD_MANIFEST_BEGIN"
             cat dist/BUILD-MANIFEST.json

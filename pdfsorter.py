@@ -95,7 +95,7 @@ except Exception:                     # pragma: no cover - trasig installation
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.13"
+APP_VERSION = "1.4.14"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -3416,8 +3416,12 @@ class ReviewDialog:
         head.grid(row=0, column=0, sticky="ew", **pad)
         head.columnconfigure(0, weight=1)
 
-        ttk.Label(head, text=decision.path.name, style="CardTitle.TLabel"
-                  ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 0))
+        ttk.Label(head, text=decision.path.name, style="CardTitle.TLabel",
+                  wraplength=820, justify="left").grid(
+                      row=0, column=0, sticky="w", padx=16, pady=(14, 0))
+        ttk.Label(head, text=f"{index} / {total}",
+                  style="PillMuted.TLabel").grid(
+                      row=0, column=1, sticky="e", padx=16, pady=(14, 0))
         try:
             size = human_size(decision.path.stat().st_size)
         except OSError:
@@ -3432,7 +3436,7 @@ class ReviewDialog:
         else:
             info += "  ·  textlager"
         ttk.Label(head, text=info, style="CardMuted.TLabel").grid(
-            row=1, column=0, sticky="w", padx=16)
+            row=1, column=0, columnspan=2, sticky="w", padx=16)
 
         best, second = decision.best, decision.runner_up
         if best:
@@ -3449,9 +3453,10 @@ class ReviewDialog:
                          f"föreslår: {hint[0]} ({hint[1]} liknande filer)")
             else:
                 guess = "Ingen kategori matchade den här filen"
-        ttk.Label(head, text=guess, style="Card.TLabel",
-                  foreground=self.C["warn"]
-                  ).grid(row=2, column=0, sticky="w", padx=16, pady=(10, 0))
+        ttk.Label(head, text=guess, style="PillWarn.TLabel",
+                  wraplength=820, justify="left").grid(
+                      row=2, column=0, columnspan=2, sticky="w",
+                      padx=16, pady=(10, 0))
 
         # Var i dokumentet träffarna låg - förklarar ofta tveksamheten
         if best and best.matched:
@@ -3459,16 +3464,19 @@ class ReviewDialog:
                 f"{w} {ZONE_LABELS.get(best.zone_of(w), '')}"
                 for w in best.matched[:3])
             ttk.Label(head, text=f"Träffar: {var_txt}", style="CardMuted.TLabel"
-                      ).grid(row=4, column=0, sticky="w", padx=16, pady=(2, 14))
+                      ).grid(row=4, column=0, columnspan=2, sticky="w",
+                             padx=16, pady=(2, 14))
         if decision.reason and best:
             ttk.Label(head, text="→ " + decision.reason,
                       style="CardMuted.TLabel").grid(row=3, column=0,
-                                                     sticky="w", padx=16)
+                                                     columnspan=2, sticky="w",
+                                                     padx=16)
         explanation = category_explanation(best, getattr(decision, "learned_hint", None))
         if explanation:
             ttk.Label(head, text=explanation, style="CardMuted.TLabel",
                       wraplength=840, justify="left").grid(
-                          row=5, column=0, sticky="w", padx=16, pady=(2, 10))
+                          row=5, column=0, columnspan=2, sticky="w",
+                          padx=16, pady=(2, 10))
 
         ttk.Separator(self._all).grid(row=1, column=0, sticky="ew", padx=14, pady=(10, 0))
 
@@ -3502,11 +3510,19 @@ class ReviewDialog:
             row_box = 3
 
         # -- stödordslistan ------------------------------------------------
-        box = ttk.LabelFrame(self._all,
-                             text="  Välj de stödord som hör till rätt kategori  ")
+        # En tydlig kortyta med rubrik och förklaring i stället för en
+        # tät LabelFrame-rubrik. Listan får en egen scrollbar.
+        box = ttk.Frame(self._all, style="Card.TFrame")
         box.grid(row=row_box, column=0, sticky="nsew", padx=14, pady=(12, 0))
         box.columnconfigure(0, weight=1)
-        box.rowconfigure(0, weight=1)
+        box.rowconfigure(2, weight=1)
+        ttk.Label(box, text="STÖDORD OCH TRÄFFAR",
+                  style="CardHead.TLabel").grid(
+                      row=0, column=0, sticky="w", padx=14, pady=(12, 0))
+        ttk.Label(box,
+                  text="Välj orden som bäst beskriver filen och hjälper nästa sortering.",
+                  style="CardMuted.TLabel").grid(
+                      row=1, column=0, sticky="w", padx=14, pady=(2, 4))
 
         # Fast höjd på inre listan: den rullar själv, medan resten av
         # fönstret rullas av den yttre canvasen.
@@ -3520,8 +3536,9 @@ class ReviewDialog:
         win_id = canvas.create_window((0, 0), window=self.inner, anchor="nw")
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win_id, width=e.width))
         canvas.configure(yscrollcommand=scroll.set)
-        canvas.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
-        scroll.grid(row=0, column=1, sticky="ns", pady=6)
+        canvas.grid(row=2, column=0, sticky="nsew", padx=(10, 0),
+                    pady=(4, 10))
+        scroll.grid(row=2, column=1, sticky="ns", pady=(4, 10))
 
         def _in_inner(w) -> bool:
             """Pekar händelsen inuti stödordslistan (canvas + dess barn)?"""
@@ -3542,14 +3559,24 @@ class ReviewDialog:
         self.vars: List[Tuple[Any, str]] = []
         self._build_rows()
 
-        ttk.Button(box, text="+ Eget ord…",
-                   command=self._add_own).grid(row=1, column=0, sticky="w", padx=10, pady=(0, 8))
+        ttk.Button(box, text="+ Lägg till eget stödord…", style="CardLink.TButton",
+                   command=self._add_own).grid(
+                       row=3, column=0, sticky="w", padx=12, pady=(0, 10))
 
         # -- kategori ------------------------------------------------------
-        catbox = ttk.LabelFrame(
-            self._all, text="  Kategori / mapp (skriv för att söka)  ")
-        catbox.grid(row=row_box + 1, column=0, sticky="ew", padx=14, pady=(12, 0))
+        catbox = ttk.Frame(self._all, style="Card.TFrame")
+        catbox.grid(row=row_box + 1, column=0, sticky="ew", padx=14,
+                    pady=(12, 10))
         catbox.columnconfigure(1, weight=1)
+        ttk.Label(catbox, text="VART SKA FILEN SPARAS?",
+                  style="CardHead.TLabel").grid(
+                      row=0, column=0, columnspan=2, sticky="w",
+                      padx=14, pady=(12, 0))
+        ttk.Label(catbox,
+                  text="Välj en befintlig mapp eller skapa en ny. Ditt val kan läras in.",
+                  style="CardMuted.TLabel").grid(
+                      row=1, column=0, columnspan=2, sticky="w",
+                      padx=14, pady=(2, 8))
 
         self.guess_name = guess_category_name(candidates)
         # Har ingen kategori träffat väljer vi "Ny mapp" med ett gissat namn,
@@ -3557,11 +3584,15 @@ class ReviewDialog:
         start_mode = "existing" if (best and best.name in rules.names()) else (
             "new" if self.guess_name or not rules.names() else "existing")
         self.mode = tk.StringVar(value=start_mode)
-        ttk.Radiobutton(catbox, text="Befintlig:", value="existing", variable=self.mode,
-                        command=self._sync).grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        ttk.Radiobutton(catbox, text="Befintlig mapp:", value="existing",
+                        variable=self.mode, style="Card.TRadiobutton",
+                        command=self._sync).grid(
+                            row=2, column=0, sticky="w", padx=14, pady=6)
         self._all_categories = list(rules.names())
+        # Skriv vanlig fritext direkt i fältet: listan filtreras medan man
+        # skriver, och en unik träff kan väljas med Enter.
         self.combo = ttk.Combobox(catbox, values=self._all_categories,
-                                  state="normal")
+                                  state="normal", width=44)
         if best and best.name in rules.names():
             self.combo.set(best.name)
         elif rules.names():
@@ -3584,20 +3615,23 @@ class ReviewDialog:
         # dialogen; medan den är öppen är mushjulet avstängt helt.
         for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.combo.bind(_seq, self._combo_wheel)
-        self.combo.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=6)
+        self.combo.grid(row=2, column=1, sticky="ew", padx=(8, 14), pady=6)
 
         # Liten hjälprad: visar vad sökningen hittar och vad Enter gör.
         self._combo_hint_lbl = ttk.Label(catbox, text="",
                                         style="CardMuted.TLabel",
                                         wraplength=560, justify="left")
-        self._combo_hint_lbl.grid(row=2, column=0, columnspan=2, sticky="w",
-                                  padx=8, pady=(0, 4))
+        self._combo_hint_lbl.grid(row=3, column=0, columnspan=2, sticky="w",
+                                  padx=14, pady=(0, 8))
         self._combo_show_hint()
 
-        ttk.Radiobutton(catbox, text="Ny mapp:", value="new", variable=self.mode,
-                        command=self._sync).grid(row=1, column=0, sticky="w", padx=8, pady=(0, 8))
+        ttk.Radiobutton(catbox, text="Skapa ny mapp:", value="new",
+                        variable=self.mode, style="Card.TRadiobutton",
+                        command=self._sync).grid(
+                            row=4, column=0, sticky="w", padx=14, pady=(0, 8))
         self.new_entry = ttk.Entry(catbox)
-        self.new_entry.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(0, 8))
+        self.new_entry.grid(row=4, column=1, sticky="ew",
+                            padx=(8, 14), pady=(0, 8))
         self.new_entry.bind("<KeyRelease>", lambda e: self.mode.set("new"))
         if self.guess_name:
             self.new_entry.insert(0, self.guess_name)
@@ -3609,15 +3643,18 @@ class ReviewDialog:
                       text=f"🔎 Uppslag via org.nr: {suggested_sender}"
                            " - kontrollera namnet innan du sparar",
                       style="CardMuted.TLabel").grid(
-                          row=3, column=0, columnspan=2, sticky="w",
-                          padx=8, pady=(0, 6))
+                          row=5, column=0, columnspan=2, sticky="w",
+                          padx=14, pady=(0, 6))
         # "Ny mapp"-fältet ska vara låst när "Befintlig" är förvalt.
         self._sync()
 
         self.save_rule = tk.BooleanVar(value=True)
-        ttk.Checkbutton(catbox, variable=self.save_rule,
-                        text="Spara valda ord som regel (matchar automatiskt nästa gång)"
-                        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+        ttk.Checkbutton(
+            catbox, variable=self.save_rule,
+            text="Lär in valda ord för framtida sortering",
+            style="Card.TCheckbutton").grid(
+                row=6, column=0, columnspan=2, sticky="w",
+                padx=14, pady=(4, 12))
 
         # -- knappar (ligger utanför rullytan, alltid synliga) -------------
         btns = ttk.Frame(self.win)
@@ -3785,7 +3822,7 @@ class ReviewDialog:
         q = str(text or "").strip()
         if not q:
             antal = len(self._all_categories)
-            msg = (f"{antal} mappar – skriv för att söka, ↓ öppnar listan."
+            msg = (f"{antal} mappar · skriv en del av namnet för att filtrera."
                    if antal else
                    "Inga mappar än – skriv ett namn för att skapa en.")
             lbl.configure(text=msg)
@@ -4417,7 +4454,16 @@ _UI_EN = {
     "Poppa upp dialogen direkt under bevakning": "Pop up the dialog directly while watching",
     "Aktiv": "Active", "Dagar:": "Days:", "Hoppa över": "Skip",
     "Spara & flytta": "Save & move", "Lägg i _Osorterat": "Put in _Unsorted",
-    "Ignorera filen": "Ignore file", "Befintlig:": "Existing:", "Ny mapp:": "New folder:",
+    "Ignorera filen": "Ignore file", "Befintlig mapp:": "Existing folder:",
+    "Skapa ny mapp:": "Create new folder:",
+    "VART SKA FILEN SPARAS?": "WHERE SHOULD THE FILE GO?",
+    "Välj en befintlig mapp eller skapa en ny. Ditt val kan läras in.":
+        "Choose an existing folder or create a new one. Your choice can be learned.",
+    "STÖDORD OCH TRÄFFAR": "KEYWORDS AND MATCHES",
+    "Välj orden som bäst beskriver filen och hjälper nästa sortering.":
+        "Choose the words that best describe the file and help future sorting.",
+    "Lär in valda ord för framtida sortering":
+        "Learn selected words for future sorting",
     "Mappnamn:": "Folder name:", "Undermapp:": "Subfolder:",
     "Sök stödord": "Search keywords", "Kontrollera": "Check", "Kontrollera igen": "Check again",
     "Spara hjälpen som textfil…": "Save help as text file…",
