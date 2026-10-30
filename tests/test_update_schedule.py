@@ -269,7 +269,8 @@ def test_settings_tab_has_its_own_update_card():
     kalla = ast.unparse(f)
     assert 'T.card(g, \'Uppdateringar\')' in kalla or \
         'T.card(g, "Uppdateringar")' in kalla
-    assert "var_tystomstart" in kalla and "Sök nu" in kalla
+    assert "var_tystomstart" in kalla
+    assert "Sök och uppdatera" in kalla and "Accent.TButton" in kalla
 
 
 def test_saving_the_tab_keeps_the_silent_restart_setting():
@@ -331,6 +332,15 @@ class _FakeRoot:
 
     def destroy(self):
         self.riven = True
+
+
+class _FakeUpdateButton:
+    def __init__(self):
+        self.states = []
+
+    def configure(self, **kwargs):
+        if "state" in kwargs:
+            self.states.append(kwargs["state"])
 
 
 class _Sken:
@@ -466,6 +476,42 @@ def test_watchdog_skips_a_check_that_is_not_due(tmp_path, monkeypatch):
     monkeypatch.setattr(P, "check_for_update", _nej)
     app._check_updates_gui(manual=False)
     assert any("hoppad" in t for _n, t in app.handelser)
+
+
+def test_manual_update_button_disables_during_check_and_ignores_double_click(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("PDFSORTER_HOME", str(tmp_path / "data"))
+    app = _Sken()
+    button = _FakeUpdateButton()
+    app.btn_update = button
+
+    class _DeferredRoot(_FakeRoot):
+        def __init__(self):
+            super().__init__()
+            self.callbacks = []
+
+        def after(self, ms, fn=None, *a):
+            self.efter.append(ms)
+            if callable(fn):
+                self.callbacks.append(lambda: fn(*a))
+            return f"id{len(self.efter)}"
+
+    app.root = _DeferredRoot()
+    calls = []
+    monkeypatch.setattr(P, "check_for_update", lambda: calls.append(1) or {
+        "ok": True, "available": False, "remote": P.APP_VERSION})
+    monkeypatch.setattr(P.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(P, "session_log", lambda *a, **k: None)
+
+    app._check_updates_gui(manual=True)
+    app._check_updates_gui(manual=True)  # andra klicket ignoreras under sökning
+    assert calls == [1]
+    assert button.states == ["disabled"]
+    assert app._manual_update_checking is True
+
+    app.root.callbacks.pop()()
+    assert button.states == ["disabled", "normal"]
+    assert app._manual_update_checking is False
 
 
 def test_watchdog_searches_and_records_the_time(tmp_path, monkeypatch):

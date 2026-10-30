@@ -4373,6 +4373,7 @@ _UI_EN = {
     "Exportera årsarkiv…": "Export year archive…",
     "Granska alla…": "Review all…", "Ångra valda": "Undo selected",
     "Sök efter uppdateringar…": "Check for updates…",
+    "Sök och uppdatera": "Check and update",
     "Kontrollera uppdateringar": "Check updates",
     "Installera Python-paket": "Install Python packages",
     "Uppdatera Python-paket": "Update Python packages",
@@ -6150,9 +6151,10 @@ class App:
         updrad = ttk.Frame(updb, style="CardInner.TFrame")
         updrad.grid(row=2, column=0, columnspan=4, sticky="ew",
                     padx=8, pady=(2, 6))
-        ttk.Button(updrad, text="Sök nu",
-                   command=lambda: self._check_updates_gui(manual=True)).pack(
-            side="right")
+        self.btn_update = ttk.Button(
+            updrad, text="Sök och uppdatera", style="Accent.TButton",
+            command=lambda: self._check_updates_gui(manual=True))
+        self.btn_update.pack(side="right")
         self.lbl_uppdatering = ttk.Label(
             updrad, text=self._uppdatering_status_text(),
             style="CardMuted.TLabel")
@@ -8655,12 +8657,47 @@ class App:
             self._h("uppdatering", "Tyst versionssökning hoppad - "
                     f"{self._uppdatering_nasta()}")
             return
+        if manual and getattr(self, "_manual_update_checking", False):
+            return
+        if manual:
+            self._manual_update_checking = True
+            button = getattr(self, "btn_update", None)
+            if button is not None:
+                try:
+                    button.configure(state="disabled")
+                except Exception:
+                    pass
+            label = getattr(self, "lbl_uppdatering", None)
+            if label is not None:
+                try:
+                    text = ("Checking GitHub Releases…"
+                            if self.settings.get("ui_language", "sv") == "en"
+                            else "Söker efter uppdateringar på GitHub Releases…")
+                    label.configure(text=text)
+                except Exception:
+                    pass
         self._h("uppdatering", "Söker efter ny version ("
                 + ("manuellt" if manual else "tyst, enligt schemat") + ")")
 
         def work():
-            info = check_for_update()
-            self.root.after(0, lambda: self._update_prompt(info, manual))
+            try:
+                info = check_for_update()
+            except Exception as exc:
+                info = {"ok": False, "available": False,
+                        "error": f"{type(exc).__name__}: {exc}"}
+
+            def present():
+                if manual:
+                    self._manual_update_checking = False
+                    button = getattr(self, "btn_update", None)
+                    if button is not None:
+                        try:
+                            button.configure(state="normal")
+                        except Exception:
+                            pass
+                self._update_prompt(info, manual)
+
+            self.root.after(0, present)
         threading.Thread(target=work, daemon=True,
                          name="versionssok").start()
 
