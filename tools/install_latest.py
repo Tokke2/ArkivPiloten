@@ -10,10 +10,12 @@ releaserna - den jämför sig med main, som ligger kvar på 1.1.0, och
 tycker att allt är uppdaterat. Från och med 1.4.x läses i stället
 /releases/latest, med kontrollsumma och backup.
 
-Det här skriptet byter en gammal installation till den nya koden en enda
-gång. Efter det sköter appens egen uppdatering resten. Skriptet rör
-aldrig användardata (json/, logs/, backups/ eller egna filer) - bara de
-programfiler som releasen innehåller.
+Det här skriptet byter en gammal installation till den nya koden. Det kan
+även installera om en release byggts om med samma versionsnummer: då jämförs
+SHA-256 för programmets filer innan skriptet avgör att inget behöver göras.
+Efter övergången sköter appens egen uppdatering resten. Skriptet rör aldrig
+användardata (json/, logs/, backups/ eller egna filer) - bara programfilerna
+som releasen innehåller.
 
     python3 tools/install_latest.py              # hittar appmappen själv
     python3 tools/install_latest.py --root .      # eller ange den
@@ -245,6 +247,25 @@ def extract(zip_bytes: bytes, dest: Path) -> List[str]:
     return skrivna
 
 
+def changed_files(staging: Path, root: Path, names: List[str]) -> List[str]:
+    """Filer i paketet som saknas eller skiljer sig från installationen."""
+    changed = []
+    for name in names:
+        remote = Path(staging) / name
+        local = Path(root) / name
+        if not remote.is_file():
+            continue
+        try:
+            same = (local.is_file()
+                    and hashlib.sha256(remote.read_bytes()).digest()
+                    == hashlib.sha256(local.read_bytes()).digest())
+        except OSError:
+            same = False
+        if not same:
+            changed.append(name)
+    return changed
+
+
 def compile_check(folder: Path) -> str:
     """Kompilera alla .py i staging. Returnerar feltext eller "".
 
@@ -383,10 +404,26 @@ def run(root: Optional[Path], dry_run: bool = False,
         if fel:
             _log(f"Paketet går inte att köra ({fel}) - avbryter.")
             return 1
-        if (nuvarande and ny and not force
-                and version_tuple(ny) <= version_tuple(nuvarande)):
-            _log(f"Du har redan {nuvarande} - inget att göra.")
-            return 2
+        if nuvarande and ny and not force:
+            installerad = version_tuple(nuvarande)
+            släppt = version_tuple(ny)
+            if släppt < installerad:
+                _log(f"Installerad version {nuvarande} är nyare än {ny} - "
+                     "ingen nedgradering görs.")
+                return 2
+            if släppt == installerad:
+                ändrade = changed_files(staging, root, filer)
+                if not ändrade:
+                    _log(f"Du har redan {nuvarande} med samma filer - "
+                         "inget att göra.")
+                    return 2
+                _log(f"Versionsnumret är oförändrat ({ny}), men "
+                     f"{len(ändrade)} programfil(er) skiljer sig:")
+                for namn in ändrade[:12]:
+                    _log(f"  {namn}")
+                if len(ändrade) > 12:
+                    _log(f"  ... och {len(ändrade) - 12} till")
+                _log("Installerar verifierat release-innehåll ...")
         if dry_run:
             _log("Torrkörning: inget skrivs. Filerna som skulle bytas:")
             for f in filer:

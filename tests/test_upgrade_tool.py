@@ -164,11 +164,30 @@ def test_upgrade_handles_tag_archive_layout(tmp_path):
     assert U.version_in(app) == "1.4.7"
 
 
-def test_same_version_is_a_no_op(tmp_path):
+def test_same_version_is_a_no_op_when_all_package_files_match(tmp_path):
     app = _install(tmp_path, "1.4.7")
     url = _release(tmp_path, "1.4.7")
+    staging = tmp_path / "release-files"
+    package = (Path(url[7:]) / U.ASSET).read_bytes()
+    U.extract(package, staging)
+    for source in staging.iterdir():
+        shutil.copy2(source, app / source.name)
+
     assert U.run(app, url_base=url, tag="v1.4.7") == 2
     assert not (app / "backups").exists()
+
+
+def test_same_version_installs_when_release_file_hashes_changed(tmp_path, capsys):
+    app = _install(tmp_path, "1.4.7")
+    url = _release(tmp_path, "1.4.7", extra={
+        "pdfsorter.py": 'APP_VERSION = "1.4.7"\n# refreshed layout\n',
+    })
+
+    assert U.run(app, url_base=url, tag="v1.4.7") == 0
+    assert U.version_in(app) == "1.4.7"
+    assert "refreshed layout" in (app / "pdfsorter.py").read_text()
+    assert "Versionsnumret är oförändrat" in capsys.readouterr().out
+    assert list((app / "backups").glob("upgrade_*"))
 
 
 def test_broken_checksum_changes_nothing(tmp_path):
