@@ -25,7 +25,8 @@ class _FakeTk:
     def call(self, *args):
         self.calls.append(args)
         if self.on_call is not None:
-            self.on_call(*args)
+            result = self.on_call(*args)
+            return "" if result is None else result
         return ""
 
 
@@ -126,6 +127,9 @@ class _Stub:
         self.posted.append(seed)
         self.popdown_open = True
 
+    def _popdown_selected_name(self):
+        return getattr(self, "selected_popup_name", "") if self.popdown_open else ""
+
     def _combo_unpost(self):                 # används av _combo_search
         self.popdown_open = False
         self.unposted += 1
@@ -219,15 +223,63 @@ def test_accent_and_case_do_not_matter():
     assert stub.combo["values"] == ["FARA RÅDA"]
 
 
-def test_ambiguous_enter_opens_the_list_instead_of_guessing():
+def test_ambiguous_enter_opens_the_list_without_auto_selecting_first():
     stub = _Stub()
     stub.combo.text = ""
     _type(stub, "utrymningspla")             # matchar två mappar
     assert len(stub.combo["values"]) == 2
+    before = stub.combo.get()
     stub._combo_pick(_key("Return"))
     assert stub.mode.get() == "existing"
     assert stub.combo["values"] == ["Utrymningsplan", "Utrymningsplan 2"]
+    assert stub.combo.get() == before
     assert stub.new_entry.text == ""
+
+
+def test_enter_uses_the_explicitly_highlighted_ambiguous_result():
+    stub = _Stub()
+    stub.combo.text = "utrymningspla"
+    stub.combo.values = ["Utrymningsplan", "Utrymningsplan 2"]
+    stub.popdown_open = True
+    stub.selected_popup_name = "Utrymningsplan 2"
+
+    stub._combo_pick(_key("Return"))
+
+    assert stub.combo.get() == "Utrymningsplan 2"
+    assert stub.mode.get() == "existing"
+
+
+def test_popdown_row_selection_maps_to_the_filtered_category_name():
+    stub = _Stub()
+    stub.combo.values = ["Utrymningsplan", "Utrymningsplan 2"]
+    stub.popdown_open = True
+
+    def tk_call(*args):
+        if args and args[-1] == "curselection":
+            return "1"
+        return ""
+
+    stub.combo.tk.on_call = tk_call
+    stub._popdown_lb_path = lambda: ".combo.popdown.f.l"
+
+    assert P.ReviewDialog._popdown_selected_name(stub) == "Utrymningsplan 2"
+
+
+def test_dialog_enter_in_search_field_never_submits_the_review():
+    stub = _Stub()
+    picked = []
+    submitted = []
+    stub.win = SimpleNamespace(focus_get=lambda: stub.combo)
+    stub._popdown_lb_path = lambda: ""
+    stub._popdown_open = lambda: False
+    stub._combo_pick = lambda event=None: picked.append(event) or "break"
+    stub._ok = lambda: submitted.append(True)
+
+    result = P.ReviewDialog._dialog_return(stub, _key("Return"))
+
+    assert result == "break"
+    assert picked == [_key("Return")]
+    assert submitted == []
 
 
 def test_escape_restores_the_full_list():

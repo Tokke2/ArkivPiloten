@@ -208,11 +208,13 @@ def test_post_dropdown_scrolls_to_first_filtered_match_when_already_open():
             icursor=lambda pos: focus_calls.append(("icursor", pos)),
         )
         win = SimpleNamespace(after_idle=scheduled.append)
+        bound = []
         dialog = SimpleNamespace(
             combo=combo,
             win=win,
             _popdown_open=lambda: state["open"],
-            _popdown_select_first=lambda: selected.append(True),
+            _popdown_clear_selection=lambda: selected.append(True),
+            _bind_popdown_return=lambda: bound.append(True),
         )
         dialog._keep_combo_search_focus = lambda: \
             pdfsorter.ReviewDialog._keep_combo_search_focus(dialog)
@@ -221,9 +223,11 @@ def test_post_dropdown_scrolls_to_first_filtered_match_when_already_open():
 
         assert combo._ta_seed == "pil"
         assert calls[0][0] == expected_call
-        assert len(scheduled) == 2
+        assert len(scheduled) == 3
         scheduled.pop(0)()
         assert selected == [True]
+        scheduled.pop(0)()
+        assert bound == [True]
         scheduled.pop(0)()
         assert focus_calls == ["focus", ("icursor", "end")]
 

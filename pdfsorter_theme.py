@@ -232,9 +232,9 @@ class Theme:
 
     #: Standardavstånd i bildpunkter. Att gå via namn i stället för siffror
     #: gör att luften blir densamma på alla flikar.
-    PAD = 14        # ytterkant mot fönstret
-    GAP = 10        # mellan två kort
-    INNER = 12      # inuti ett kort
+    PAD = 16        # ytterkant mot fönstret
+    GAP = 12        # mellan två kort
+    INNER = 14      # inuti ett kort
 
     def __init__(self, root, ttk, dark: bool = False,
                  contrast: str = "normal"):
@@ -272,13 +272,13 @@ class Theme:
               "Helvetica Neue", "Cantarell", "Ubuntu", "DejaVu Sans", "Arial")
         mono = ("Cascadia Mono", "Consolas", "SF Mono", "JetBrains Mono",
                 "DejaVu Sans Mono", "Menlo", "Courier New")
-        self.f_base = _pick_font(root, ui, _sz(10))
+        self.f_base = _pick_font(root, ui, _sz(11))
         self.f_small = _pick_font(root, ui, _sz(9))
         self.f_tiny = _pick_font(root, ui, _sz(8))
-        self.f_bold = _pick_font(root, ui, _sz(10), "bold")
-        self.f_head = _pick_font(root, ui, _sz(12), "bold")
-        self.f_title = _pick_font(root, ui, _sz(16), "bold")
-        self.f_huge = _pick_font(root, ui, _sz(22), "bold")
+        self.f_bold = _pick_font(root, ui, _sz(11), "bold")
+        self.f_head = _pick_font(root, ui, _sz(13), "bold")
+        self.f_title = _pick_font(root, ui, _sz(17), "bold")
+        self.f_huge = _pick_font(root, ui, _sz(24), "bold")
         self.f_mono = _pick_font(root, mono, _sz(9))
         self.f_mono_bold = _pick_font(root, mono, _sz(9), "bold")
 
@@ -375,7 +375,7 @@ class Theme:
         # -- knappar ------------------------------------------------------
         self._cfg("TButton", background=c["surface"], foreground=c["text"],
                      bordercolor=c["border_strong"], relief="solid",
-                     borderwidth=1, padding=(13, 7), font=self.f_base,
+                     borderwidth=1, padding=(14, 8), font=self.f_base,
                      anchor="center")
         self._map("TButton",
                background=[("pressed", c["accent_light"]),
@@ -387,7 +387,7 @@ class Theme:
 
         self._cfg("Accent.TButton", background=c["accent"],
                      foreground=c["text_invert"], bordercolor=c["accent_dark"],
-                     padding=(17, 8), font=self.f_bold)
+                     padding=(18, 9), font=self.f_bold)
         self._map("Accent.TButton",
                background=[("pressed", c["accent_dark"]),
                            ("active", c["accent_dark"]),
@@ -423,7 +423,7 @@ class Theme:
         self._cfg("TNotebook", background=c["bg"], borderwidth=0,
                      tabmargins=(4, 6, 4, 0))
         self._cfg("TNotebook.Tab", background=c["bg"],
-                     foreground=c["text_muted"], padding=(20, 10),
+                     foreground=c["text_muted"], padding=(22, 11),
                      font=self.f_base, borderwidth=0)
         self._map("TNotebook.Tab",
                background=[("selected", c["surface"]), ("active", c["accent_light"])],
@@ -434,7 +434,7 @@ class Theme:
         # -- tabeller -----------------------------------------------------
         self._cfg("Treeview", background=c["surface"],
                      fieldbackground=c["surface"], foreground=c["text"],
-                     rowheight=30, borderwidth=0, relief="flat",
+                     rowheight=32, borderwidth=0, relief="flat",
                      font=self.f_base)
         self._cfg("Treeview.Heading", background=c["header_bg"],
                      foreground=c["text_muted"], relief="flat",

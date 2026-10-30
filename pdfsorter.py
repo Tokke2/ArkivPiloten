@@ -3557,7 +3557,9 @@ class ReviewDialog:
         # En tydlig kortyta med rubrik och förklaring i stället för en
         # tät LabelFrame-rubrik. Listan får en egen scrollbar.
         box = ttk.Frame(self._all, style="Card.TFrame")
-        box.grid(row=row_box, column=0, sticky="nsew", padx=14, pady=(12, 0))
+        # Kategori/målmapp är huvudbeslutet, därför visas det före
+        # stödordsinlärningen i dialogen.
+        box.grid(row=row_box + 1, column=0, sticky="nsew", padx=14, pady=(12, 0))
         box.columnconfigure(0, weight=1)
         box.rowconfigure(2, weight=1)
         ttk.Label(box, text="STÖDORD OCH TRÄFFAR",
@@ -3609,7 +3611,7 @@ class ReviewDialog:
 
         # -- kategori ------------------------------------------------------
         catbox = ttk.Frame(self._all, style="Card.TFrame")
-        catbox.grid(row=row_box + 1, column=0, sticky="ew", padx=14,
+        catbox.grid(row=row_box, column=0, sticky="ew", padx=14,
                     pady=(12, 10))
         catbox.columnconfigure(1, weight=1)
         ttk.Label(catbox, text="VART SKA FILEN SPARAS?",
@@ -3636,11 +3638,13 @@ class ReviewDialog:
         # Skriv vanlig fritext direkt i fältet: listan filtreras medan man
         # skriver, och en unik träff kan väljas med Enter.
         self.combo = ttk.Combobox(catbox, values=self._all_categories,
-                                  state="normal", width=44)
+                                  state="normal", width=44, takefocus=True)
         if best and best.name in rules.names():
             self.combo.set(best.name)
-        elif rules.names():
-            self.combo.current(0)
+        else:
+            # Välj aldrig den översta kategorin automatiskt: om ingen
+            # tydlig gissning finns ska Enter inte kunna flytta dit av misstag.
+            self.combo.set("")
         self.combo.bind("<<ComboboxSelected>>", self._combo_chosen)
         # Sökbar rullgardin: skriv några tecken -> listan filtreras och
         # visar bara matchande kategorier (början på namnet först).
@@ -3653,6 +3657,7 @@ class ReviewDialog:
         self.combo.bind("<Escape>", self._combo_reset)
         self.combo.bind("<FocusIn>", self._combo_focus_in)
         self.combo.bind("<FocusOut>", self._combo_focus_out)
+        self.combo.bind("<Button-1>", self._combo_schedule_popup_bind, add="+")
         self.combo.bind("<Down>", self._combo_navigate)
         self.combo.bind("<Up>", self._combo_navigate)
         # Mushjulet får ALDRIG byta kategori. När listan är stängd rullas
@@ -3720,7 +3725,7 @@ class ReviewDialog:
         self._sync()
         self.win.protocol("WM_DELETE_WINDOW", self._skip)
         self.win.bind("<Escape>", lambda e: self._skip())
-        self.win.bind("<Return>", lambda e: self._ok())
+        self.win.bind("<Return>", self._dialog_return)
         self.win.update_idletasks()
         try:
             self.win.grab_set()
@@ -3866,7 +3871,7 @@ class ReviewDialog:
         q = str(text or "").strip()
         if not q:
             antal = len(self._all_categories)
-            msg = (f"{antal} mappar · skriv en del av namnet för att filtrera."
+            msg = (f"{antal} mappar · skriv för att filtrera, välj med ↑/↓ och Enter."
                    if antal else
                    "Inga mappar än – skriv ett namn för att skapa en.")
             lbl.configure(text=msg)
@@ -3874,14 +3879,14 @@ class ReviewDialog:
         träffar, nivå = _rank_categories(q, self._all_categories)
         n = len(träffar)
         if nivå == "prefix":
-            msg = f"{n} mappar börjar med ”{q}” – ↓/Enter visar dem."
+            msg = f"{n} träffar · fortsätt skriva eller välj med ↑/↓ och Enter."
         elif nivå == "word":
-            msg = (f"Ingen mapp börjar med ”{q}” – {n} har ett ord "
-                   "som börjar så.")
+            msg = (f"{n} mappar har ett ord som börjar med ”{q}” · "
+                   "välj aktivt med piltangenterna.")
         elif nivå == "contains":
-            msg = f"{n} mappar innehåller ”{q}”."
+            msg = f"{n} mappar innehåller ”{q}” · välj aktivt med ↑/↓."
         else:
-            msg = f"Ingen mapp matchar ”{q}” – Enter skapar den."
+            msg = f"Ingen mapp matchar ”{q}” – Enter fyller i namnet som ny mapp."
         lbl.configure(text=msg)
 
     def _combo_chosen(self, event=None) -> None:
@@ -3948,19 +3953,18 @@ class ReviewDialog:
         except Exception:
             return False
 
-    def _popdown_select_first(self) -> None:
-        """Markera första träffen när listan öppnats - då räcker Enter."""
+    def _popdown_clear_selection(self) -> None:
+        """Visa första träffen utan att välja åt användaren.
+
+        En automatisk markering gjorde att Enter kunde godkänna och flytta
+        till första kategorin trots att användaren bara försökte söka.
+        """
         lb = self._popdown_lb_path()
         if not lb:
             return
         try:
             if int(self.combo.tk.call(lb, "size")):
                 self.combo.tk.call(lb, "selection", "clear", 0, "end")
-                self.combo.tk.call(lb, "selection", "set", 0)
-                try:
-                    self.combo.tk.call(lb, "activate", 0)
-                except Exception:
-                    pass
                 self.combo.tk.call(lb, "see", 0)
         except Exception:
             pass
@@ -3972,6 +3976,73 @@ class ReviewDialog:
             return f"{popdown}.f.l"
         except Exception:
             return ""
+
+    def _popdown_selected_name(self) -> str:
+        """Returnera bara en rad som användaren faktiskt markerat."""
+        if not self._popdown_open():
+            return ""
+        lb = self._popdown_lb_path()
+        if not lb:
+            return ""
+        try:
+            selected = self.combo.tk.call(lb, "curselection")
+            if isinstance(selected, (tuple, list)):
+                indices = selected
+            else:
+                indices = str(selected).split()
+            if not indices:
+                return ""
+            index = int(indices[0])
+            values = list(self.combo["values"])
+            return str(values[index]) if 0 <= index < len(values) else ""
+        except Exception:
+            return ""
+
+    def _bind_popdown_return(self) -> None:
+        """Ge popdown-Enter samma säkra semantik som skrivfältet."""
+        lb = self._popdown_lb_path()
+        if not lb:
+            return
+        try:
+            if getattr(self, "_return_bound_listbox", None) == lb:
+                return
+            callback = self.win.register(self._combo_pick)
+            script = f'if {{[{callback}] == "break"}} break'
+            self.combo.tk.call("bind", lb, "<Return>", script)
+            self._return_bound_listbox = lb
+        except Exception:
+            pass
+
+    def _combo_schedule_popup_bind(self, event=None) -> None:
+        """Native arrow opens after the click; make its initial row inert."""
+        try:
+            self.win.after_idle(self._popdown_clear_selection)
+            self.win.after_idle(self._bind_popdown_return)
+        except Exception:
+            pass
+
+    def _dialog_return(self, event=None) -> str:
+        """Enter in the folder search selects; it must never submit the file."""
+        try:
+            focus = self.win.focus_get()
+            path = str(focus) if focus is not None else ""
+            combo_path = str(self.combo)
+            lb = self._popdown_lb_path()
+            popup_path = lb.rsplit(".f.l", 1)[0] if lb else ""
+            if (path == combo_path or path.startswith(combo_path + ".")
+                    or (self._popdown_open() and popup_path
+                        and path.startswith(popup_path))):
+                return self._combo_pick(event)
+            if focus is self.new_entry:
+                self._ok()
+                return "break"
+            klass = str(focus.winfo_class()) if focus is not None else ""
+            if klass in ("TButton", "TCheckbutton", "TRadiobutton"):
+                return ""
+        except Exception:
+            pass
+        self._ok()
+        return "break"
 
     def _post_dropdown(self, seed: Optional[str] = None) -> None:
         """Visa/uppdatera filtreringen och rulla till första träffen."""
@@ -3991,7 +4062,8 @@ class ReviewDialog:
             # var öppen. Annars kan tangentbordssökningen filtrera listan
             # men lämna den kvar scrollad till en gammal rad.
             try:
-                self.win.after_idle(self._popdown_select_first)
+                self.win.after_idle(self._popdown_clear_selection)
+                self.win.after_idle(self._bind_popdown_return)
                 # Keep keyboard focus in the editable field while the
                 # filtered popup stays open, so typing "li" continues the
                 # query instead of becoming listbox type-ahead for "l".
@@ -4080,12 +4152,14 @@ class ReviewDialog:
         return "break"
 
     def _combo_pick(self, event=None) -> str:
-        """Enter: välj den entydiga träffen i stället för att gissa."""
+        """Enter väljer bara en entydig eller markerad träff — aldrig första."""
         text = self.combo.get().strip()
-        namn = _resolve_category_name(text, self._all_categories)
+        # En synlig rad som användaren aktivt flyttat till ska slå söktexten;
+        # annars väljs en unik textmatchning som vanligt.
+        namn = self._popdown_selected_name() if self._popdown_open() else ""
+        if not namn:
+            namn = _resolve_category_name(text, self._all_categories)
         if namn:
-            # Stäng en öppen lista först - annars ligger de filtrerade
-            # raderna kvar även sedan valet är gjort.
             if self._popdown_open():
                 try:
                     self.combo.tk.call("ttk::combobox::Unpost", self.combo)
@@ -4099,9 +4173,9 @@ class ReviewDialog:
             self._combo_reset_values()
             self._combo_show_hint()
         elif _filter_categories(text, self._all_categories):
-            # Flera träffar: öppna listan med dem och markera första
-            # raden, så att nästa Enter väljer den.
+            # Tvetydig sökning: visa alternativen men kräv ett aktivt val.
             self._post_dropdown(seed=text)
+            self._combo_show_hint(text)
         elif text:
             self.mode.set("new")
             self._sync()
@@ -4130,17 +4204,41 @@ class ReviewDialog:
         return "break"
 
     def _combo_navigate(self, event) -> str:
-        """Ner öppnar listan (native), upp bläddrar bakåt bland namnen."""
+        """Styr piltangenterna själv, oberoende av Tk-version och tema."""
+        keysym = getattr(event, "keysym", "")
         if self._popdown_open():
-            return ""
-        if getattr(event, "keysym", "") == "Down":
-            # Låt TCombobox öppna rullgardinen med de filtrerade raderna.
+            lb = self._popdown_lb_path()
+            values = list(self.combo["values"])
+            if not lb or not values:
+                return "break"
+            try:
+                selected = self.combo.tk.call(lb, "curselection")
+                indices = (selected if isinstance(selected, (tuple, list))
+                           else str(selected).split())
+                current = int(indices[0]) if indices else None
+                step = 1 if keysym == "Down" else -1
+                index = (0 if step > 0 else len(values) - 1) if current is None \
+                    else (current + step) % len(values)
+                self.combo.tk.call(lb, "selection", "clear", 0, "end")
+                self.combo.tk.call(lb, "selection", "set", index)
+                self.combo.tk.call(lb, "activate", index)
+                self.combo.tk.call(lb, "see", index)
+            except Exception:
+                pass
+            return "break"
+        if keysym == "Down":
+            # Tk öppnar den inbyggda rullgardinen; installera Enter-skyddet
+            # direkt efter att popdown-fönstret skapats.
+            try:
+                self.win.after_idle(self._bind_popdown_return)
+            except Exception:
+                pass
             return ""
         names = self._all_categories
         if not names:
             return "break"
         cur = self.combo.get()
-        idx = names.index(cur) if cur in names else -1
+        idx = names.index(cur) if cur in names else 0
         idx = (idx - 1) % len(names)
         self.combo.set(names[idx])
         self.mode.set("existing")
