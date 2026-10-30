@@ -8,6 +8,8 @@ ny mapp när den pekar ut flera befintliga kategorier.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pdfsorter
 
 
@@ -180,3 +182,34 @@ def test_repeated_letter_cycles_to_next_match():
     assert lb.items[lb.sel] == "Pilkington"
     _ta_listbox(_tangent(lb, "p"))           # "pp" -> nästa P-namn
     assert lb.items[lb.sel] == "PARKERINGEN AYGSINN"
+
+
+# -- rullgardinens listval rullas till filtrerad träff även när öppen -----
+def test_post_dropdown_scrolls_to_first_filtered_match_when_already_open():
+    for opened, expected_call in (
+            (False, "ttk::combobox::Post"),
+            (True, "ttk::combobox::ConfigureListbox")):
+        calls = []
+        scheduled = []
+        selected = []
+
+        def tk_call(*args):
+            calls.append(args)
+            return ""
+
+        combo = SimpleNamespace(_ta_seed="", tk=SimpleNamespace(call=tk_call))
+        win = SimpleNamespace(after_idle=scheduled.append)
+        dialog = SimpleNamespace(
+            combo=combo,
+            win=win,
+            _popdown_open=lambda opened=opened: opened,
+            _popdown_select_first=lambda: selected.append(True),
+        )
+
+        pdfsorter.ReviewDialog._post_dropdown(dialog, seed="pil")
+
+        assert combo._ta_seed == "pil"
+        assert calls[0][0] == expected_call
+        assert len(scheduled) == 1
+        scheduled.pop()()
+        assert selected == [True]

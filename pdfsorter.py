@@ -3658,7 +3658,7 @@ class ReviewDialog:
             return ""
 
     def _post_dropdown(self, seed: Optional[str] = None) -> None:
-        """Visa/uppdatera den filtrerade listan (best effort)."""
+        """Visa/uppdatera filtreringen och rulla till första träffen."""
         if seed is not None:
             self.combo._ta_seed = seed
         try:
@@ -3671,10 +3671,13 @@ class ReviewDialog:
                     pass
             else:
                 self.combo.tk.call("ttk::combobox::Post", self.combo)
-                try:
-                    self.win.after_idle(self._popdown_select_first)
-                except Exception:
-                    pass
+            # Uppdatera markering och scrollposition även när listan redan
+            # var öppen. Annars kan tangentbordssökningen filtrera listan
+            # men lämna den kvar scrollad till en gammal rad.
+            try:
+                self.win.after_idle(self._popdown_select_first)
+            except Exception:
+                pass
         except Exception:
             pass
 
