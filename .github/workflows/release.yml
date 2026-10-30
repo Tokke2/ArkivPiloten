@@ -1,11 +1,11 @@
 name: release
 
-# Publicerar (eller uppdaterar) GitHub-releasen varje gång koden når main
-# eller en versions-tagg skapas. Appens autouppdatering läser alltid den
-# senaste releasen - därför måste releasen alltid spegla senaste koden.
+# Uppdatera den befintliga GitHub-releasen vid varje kodpush, oavsett gren.
+# Versionen hämtas från appen och ändras inte av arbetsflödet: samma versions-
+# tagg behålls och dess paket skrivs över. Appens autouppdatering läser senaste.
 on:
   push:
-    branches: [main]
+    branches: ["**"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -13,7 +13,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Alla grenar skriver över samma release - serialisera publiceringarna.
+  group: release-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -84,7 +85,7 @@ jobs:
             if [ -n "$PREV" ]; then
               echo "### Ändringar sedan $PREV"
               echo
-              git log --pretty='- %s (%h)' "$PREV..$TAG" | head -40
+              git log --pretty='- %s (%h)' "$PREV..$GITHUB_SHA" | head -40
               echo
             fi
             echo "### Har du 1.0.0 eller 1.1.0?"
