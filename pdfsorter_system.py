@@ -731,6 +731,10 @@ def _launch_target() -> Tuple[str, str]:
     """Returnerar (kommando, arbetskatalog) som startar appen minimerad.
 
     Pekar alltid på huvudprogrammet pdfsorter.py, aldrig på den här filen.
+    NOTERA 2026-10-19: På Windows används numera ALLTID Startup-genväg
+    (med ArkivPiloten-ikonen) i stället för registret + pythonw.exe — då
+    syns ArkivPiloten-ikonen överallt, inte Pythons fjäder (beställning:
+    'om man väljer autostart, använd ej pyw om den använder python ikon').
     """
     script = _main_script
     workdir = str(script.parent)
@@ -738,7 +742,9 @@ def _launch_target() -> Tuple[str, str]:
         return f'"{sys.executable}" --tray', workdir
     exe = sys.executable or "python3"
     if sys.platform.startswith("win"):
-        # pythonw.exe kör helt utan konsolfönster
+        # pythonw.exe kör helt utan konsolfönster, men Registry-genvägen
+        # visar Pythons ikon i Aktivitetshanteraren. För att visa vår
+        # ikon används Startup-mappen med .lnk + IconLocation i stället.
         exe_w = Path(exe).with_name("pythonw.exe")
         if exe_w.exists():
             exe = str(exe_w)
@@ -850,6 +856,15 @@ def _autostart_current() -> Optional[str]:
     try:
         if sys.platform.startswith("win"):
             import winreg
+            # 2026-10-19: Prioritera Startup-genvägen (med vår ikon) före
+            # registret — registret visar Pythons ikon och städas numera.
+            lnk = _win_startup_lnk()
+            if lnk.exists():
+                # Returnera genvägens faktiska innehåll för verifiering
+                try:
+                    return f"startup-folder: {lnk} -> {lnk.read_bytes()[:0].hex()}"
+                except Exception:
+                    return f"startup-folder: {lnk}"
             with _win_run_key() as key:
                 try:
                     return str(winreg.QueryValueEx(key, APP_NAME)[0])
@@ -858,9 +873,6 @@ def _autostart_current() -> Optional[str]:
         if sys.platform == "darwin":
             p = _mac_plist_file()
             return p.read_text(encoding="utf-8") if p.exists() else None
-        if sys.platform.startswith("win"):
-            lnk = _win_startup_lnk()
-            return f"startup-folder: {lnk}" if lnk.exists() else None
         p = _linux_autostart_file()
         if not p.exists():
             p = _linux_legacy_autostart_file()
@@ -1074,41 +1086,40 @@ def set_autostart(enabled: bool) -> Tuple[bool, str]:
 
     Skrivningen prövas två gånger (transienta I/O-fel), så att varken
     registret eller filsystemet kan få autostarten att krascha/hänga.
+    2026-10-19: På Windows används ALLTID Startup-genväg med vår ikon
+    (ArkivPiloten-ikonen överallt, ej Pythons fjäder). Registry rensas.
     """
     cmd, workdir = _launch_target()
     _backup_autostart_entry()      # säkerhetskopia före varje ändring
 
     def _do():
         if sys.platform.startswith("win"):
+            # 2026-10-19: Använd ej pyw/registry om den visar python-ikon —
+            # Startup-mappen med .lnk + IconLocation visar ArkivPiloten-ikonen
+            # i Aktivitetshanteraren/Utforskaren (beställning).
+            lnk = _win_startup_lnk()
+            # Städa alltid registret (gammal väg) för att undvika dubbletter
             try:
                 import winreg
                 with _win_run_key() as key:
-                    if enabled:
-                        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
-                        # Namnbytet 2026-10-06: städa gamla värdet så att
-                        # autostarten inte ligger dubbelt.
-                        for gammalt in ("PDF Sorter",):
-                            try:
-                                winreg.DeleteValue(key, gammalt)
-                            except OSError:
-                                pass
-                    else:
+                    for namn in (APP_NAME, "PDF Sorter"):
                         try:
-                            winreg.DeleteValue(key, APP_NAME)
-                        except FileNotFoundError:
+                            winreg.DeleteValue(key, namn)
+                        except (FileNotFoundError, OSError):
                             pass
-                if not enabled:
-                    _win_startup_lnk().unlink(missing_ok=True)
-                return True, "Registret uppdaterat"
             except Exception:
-                # Reservväg (2026-10-16): nekar registret (policy/AV)
-                # används Startup-mappen i stället - autostart ska
-                # fungera på alla Windows-maskiner, inte bara de snälla.
-                if enabled:
-                    ok, msg = _win_make_lnk(_win_startup_lnk())
-                    return ok, f"Startup-mappen (registerreserv): {msg}"
-                _win_startup_lnk().unlink(missing_ok=True)
-                return True, "Startup-genväg borttagen"
+                pass
+            if enabled:
+                ok, msg = _win_make_lnk(lnk)
+                if ok:
+                    return True, f"Autostart via Startup-genväg med ArkivPiloten-ikon (ej python-ikon): {msg}"
+                return False, msg
+            else:
+                try:
+                    lnk.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return True, "Autostart avstängd (Startup-genväg borttagen, register rensat)"
 
         if sys.platform == "darwin":
             plist = _mac_plist_file()
@@ -1897,6 +1908,11 @@ def crash_report(exc: BaseException) -> None:
             log = log or target
         except Exception:
             pass
+    # Samlad fellogg — även krasch hit
+    try:
+        _write_aggregated_raw(text)
+    except Exception:
+        pass
     # pythonw har ingen konsol: sys.stderr kan vara None - då får inte
     # själva felrapporten krascha.
     try:
@@ -2396,6 +2412,11 @@ def session_log(category: str, message: str, level: str = "info") -> None:
             _SESSION_FH.write(f"{ts}  {lvl} {cat} {lines[0]}\n")
             for ln in lines[1:]:
                 _SESSION_FH.write(f"{'':22}{ln}\n")
+            # Samlad fellogg — spegla FEL/VARN hit direkt (användarorder 2026-10-30)
+            try:
+                _write_aggregated_error(category, message, level)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -2500,8 +2521,164 @@ def _write_errors_log(text: str) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "a", encoding="utf-8") as fh:
             fh.write(f"\n===== {now_iso()} (session {SESSION_ID or '?'}) =====\n{text}")
+        # Samlad fellogg — spegla även hit
+        try:
+            _write_aggregated_raw(text)
+        except Exception:
+            pass
     except Exception:
         pass
+
+# --------------------------------------------------------------------------
+# SAMLAD FELLOGG — en fil för snabb felsökning (ANVÄNDARORDER 2026-10-30)
+# --------------------------------------------------------------------------
+# Tidigare låg fel utspridda i många filer: logs/<YYYY-MM>/app_*.log
+# (med nivå FEL/VARN), logs/<YYYY-MM>/errors.log och krasch.log. Nu
+# samlas allt på ett ställe: logs/fel.log — en enda fil att öppna.
+# Skrivs automatiskt vid varje FEL/VARN/KRASCH + kan byggas om från
+# befintliga loggar via rebuild_aggregated_errors() eller --fel-logg.
+_AGGREGATED_LOCK = threading.RLock()
+_AGGREGATED_MAX_BYTES = 5_000_000   # rotera efter 5 MB (behåll gamla som .old.log)
+_AGGREGATED_LEVELS = {"err", "fel", "error", "FEL", "warn", "varning", "VARN", "crash", "krasch"}
+
+def _aggregated_path() -> Path:
+    """Sökvägen till den samlade felloggen: logs/fel.log (alltid samma fil)."""
+    try:
+        return config_dir() / "logs" / "fel.log"
+    except Exception:
+        return Path("logs") / "fel.log"
+
+def aggregated_error_path() -> Path:
+    """Publik hjälpare — var den samlade felloggen bor (för GUI/CLI)."""
+    return _aggregated_path()
+
+def _write_aggregated_error(category: str, message: str, level: str = "err") -> None:
+    """Skriv en felrad även till logs/fel.log. Tyst, kastar aldrig."""
+    # Bara fel/varningar — info/ok/debug hamnar inte i samlade felloggen
+    lvl_raw = str(level or "").strip().lower()
+    if lvl_raw not in {"err", "fel", "error", "warn", "varning", "crash", "krasch"} and level not in _AGGREGATED_LEVELS:
+        # Tillåt även versaler via normalisering ovan — men var generös vid flervalsnivåer
+        if lvl_raw not in ("err","fel","error","warn","varning","crash","krasch","fel","varn"):
+            # nivåer via _LEVELS: FEL/VARN — map via lvl_raw
+            if lvl_raw not in ("fel","varn","err","warn"):
+                return
+    try:
+        p = _aggregated_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with _AGGREGATED_LOCK:
+            # Rotation: >5 MB -> fel.old.log (ett steg, ingen kedja)
+            try:
+                if p.exists() and p.stat().st_size > _AGGREGATED_MAX_BYTES:
+                    old = p.with_name("fel.old.log")
+                    try:
+                        if old.exists():
+                            old.unlink()
+                    except Exception:
+                        pass
+                    try:
+                        p.rename(old)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            ts = now_iso()
+            # Första raden bär tid, nivå, kategori, session och första meddelanderaden
+            lvl_disp = _LEVELS.get(str(level).lower(), str(level).upper()).ljust(5)
+            cat_disp = (category or "app")[:10].ljust(10)
+            lines = str(message).splitlines() or [""]
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write(f"{ts}  {lvl_disp} {cat_disp} session={SESSION_ID or '?' } {lines[0]}\n")
+                for ln in lines[1:]:
+                    fh.write(f"{'':22}{ln}\n")
+    except Exception:
+        pass
+
+def _write_aggregated_raw(text: str) -> None:
+    """Rå textdump (t.ex. från _write_errors_log/crash_report) till samlad fellogg."""
+    try:
+        p = _aggregated_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with _AGGREGATED_LOCK:
+            if p.exists() and p.stat().st_size > _AGGREGATED_MAX_BYTES:
+                old = p.with_name("fel.old.log")
+                try:
+                    if old.exists():
+                        old.unlink()
+                except Exception:
+                    pass
+                try:
+                    p.rename(old)
+                except Exception:
+                    pass
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write(f"\n===== {now_iso()} (session {SESSION_ID or '?'}) =====\n" + (text if text.endswith("\n") else text + "\n"))
+    except Exception:
+        pass
+
+def rebuild_aggregated_errors(clear: bool = False) -> Path:
+    """Bygg om logs/fel.log från alla befintliga loggar.
+
+    Läser alla logs/<YYYY-MM>/errors.log, krasch.log och FEL/VARN-rader
+    ur app_*.log — resultatet blir en kronologisk samling för snabb
+    felsökning. Om clear=True töms filen först.
+    Returnerar sökvägen till logs/fel.log.
+    """
+    p = _aggregated_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with _AGGREGATED_LOCK:
+            if clear and p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+            # Samla källor först — skriv i tidsordning om möjligt
+            källor = []
+            try:
+                bas = session_dir()  # logs/
+                if bas.is_dir():
+                    for mån in bas.iterdir():
+                        if not mån.is_dir():
+                            continue
+                        # errors.log / krasch.log i varje månadsmapp (inkl. arkiv ignoreras här)
+                        for namn in ("errors.log", "krasch.log"):
+                            f = mån / namn
+                            if f.is_file():
+                                källor.append(f)
+                        # Samla FEL/VARN-rader ur app_*.log
+                        for app_log in mån.glob("app_*.log"):
+                            try:
+                                # Plocka bara rader med FEL/VARN för att hålla nere storlek
+                                txt = app_log.read_text(encoding="utf-8", errors="replace")
+                                felrader = [l for l in txt.splitlines() if "  FEL " in l or "  VARN" in l or " FEL " in l]
+                                if felrader:
+                                    källor.append((app_log, felrader))
+                            except Exception:
+                                continue
+            except Exception:
+                pass
+            # Själva återskapandet — skriv sektionerat
+            with open(p, "a" if not clear else "w", encoding="utf-8") as out:
+                if clear:
+                    out.write(f"# {APP_NAME} samlad fellogg — ombyggd {now_iso()} (session {SESSION_ID or '?'})\n")
+                    out.write(f"# Källor: alla logs/<ÅÅÅÅ-MM>/{{app_*.log,errors.log,krasch.log}} med nivå FEL/VARN\n\n")
+                for k in källor:
+                    if isinstance(k, tuple):
+                        app_log, rader = k
+                        out.write(f"\n===== {app_log.name} ({len(rader)} fel/varningar) =====\n")
+                        for r in rader[-800:]:  # cap per fil
+                            out.write(r + "\n")
+                    else:
+                        try:
+                            txt = k.read_text(encoding="utf-8", errors="replace")
+                            # relatera till månadsmappens namn
+                            out.write(f"\n===== {k.parent.name}/{k.name} =====\n" + txt[-20000:] + ("" if txt.endswith("\n") else "\n"))
+                        except Exception:
+                            continue
+            return p
+    except Exception:
+        return p
+
 
 
 # =========================================================================
@@ -2540,11 +2717,25 @@ def _version_tuple(s: str) -> Tuple[int, ...]:
     return tuple(ut or [0])
 
 
+def _sha256_bytes(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+def _sha256_file(path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
 def check_for_update(timeout: int = 15) -> dict:
     """Finns en nyare version på GitHub? Jämför APP_VERSION mot den
     pdfsorter.py som ligger på UPDATE_BRANCH - inget laddas ner och
-    inget ändras. Returnerar dict med ok/current/remote/available."""
-    import urllib.request
+    inget ändras. Returnerar dict med ok/current/remote/available.
+    2026-10-19: Jämför även filer (hash) även om version är samma — 
+    uppdatera om det finns nytt (beställning: även vid samma v-nr)."""
+    import urllib.request, hashlib
     try:
         # I första hand GitHubs API (raw-innehåll via Accept-header) -
         # samma slutpunkt som resten av GitHub-integrationen; den
@@ -2571,8 +2762,42 @@ def check_for_update(timeout: int = 15) -> dict:
                     "available": False,
                     "error": "kunde inte läsa versionsnumret på GitHub"}
         remote = m.group(1)
+        version_newer = _version_tuple(remote) > _version_tuple(APP_VERSION)
+        if version_newer:
+            return {"ok": True, "current": APP_VERSION, "remote": remote,
+                    "available": True, "reason": "ny version"}
+        # Version samma eller äldre — jämför filer (hash) även vid samma v-nr
+        # Beställning: ska komma i release även om v nrf är samma och uppdatera om nytt
+        try:
+            changed = []
+            # Kolla bara några tunga filer först för snabbhet, bryt vid första diff
+            for namn in UPDATE_FILES:
+                local = _main_script.parent / namn
+                remote_url = f"{UPDATE_RAW_BASE}/{namn}"
+                try:
+                    req = urllib.request.Request(remote_url, headers={"User-Agent": APP_NAME})
+                    with urllib.request.urlopen(req, timeout=max(3, timeout//3)) as r:
+                        remote_data = r.read(5_000_000)
+                    remote_hash = hashlib.sha256(remote_data).hexdigest()
+                    if local.exists():
+                        local_hash = _sha256_file(local)
+                        if local_hash != remote_hash:
+                            changed.append(namn)
+                            break
+                    else:
+                        # Fil saknas lokalt men finns remote = ny fil
+                        changed.append(namn)
+                        break
+                except Exception:
+                    continue
+            if changed:
+                return {"ok": True, "current": APP_VERSION, "remote": remote,
+                        "available": True, "files_changed": changed,
+                        "reason": f"filer ändrade trots samma version ({changed[0]})"}
+        except Exception:
+            pass
         return {"ok": True, "current": APP_VERSION, "remote": remote,
-                "available": _version_tuple(remote) > _version_tuple(APP_VERSION)}
+                "available": False}
     except Exception as exc:
         return {"ok": False, "current": APP_VERSION, "remote": None,
                 "available": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -2605,17 +2830,66 @@ def _install_from_folder(staged: Path, root: Path,
     if expected and staged_version != expected:
         return False, (f"versionerna stämmer inte (väntade {expected}, "
                        f"fick {staged_version}) - avbryter")
-    if staged_version and _version_tuple(staged_version) <= _version_tuple(APP_VERSION):
-        return False, f"staged version {staged_version} är inte nyare än {APP_VERSION}"
+    # 2026-10-19: Tillåt samma version om filer ändrats (hash-diff)
+    # Beställning: uppdatera även om v-nr samma och det finns nytt
+    if staged_version and _version_tuple(staged_version) < _version_tuple(APP_VERSION):
+        return False, f"staged version {staged_version} är äldre än {APP_VERSION} (nedgradering blockerad)"
+    if staged_version and _version_tuple(staged_version) == _version_tuple(APP_VERSION):
+        # Samma version — kolla om några filer faktiskt skiljer
+        try:
+            diff = []
+            for namn in UPDATE_FILES:
+                a = src_root / namn
+                b = root / namn
+                if not a.exists():
+                    continue
+                if not b.exists():
+                    diff.append(namn)
+                    break
+                # Jämför hash — snabb och säker även för binärer
+                if _sha256_file(a) != _sha256_file(b):
+                    diff.append(namn)
+                    break
+            if not diff:
+                return False, f"staged version {staged_version} är samma som {APP_VERSION} och inga filer skiljer (inget att uppdatera)"
+            # Finns diff — tillåt uppdatering trots samma versionsnummer
+            try:
+                session_log("uppdatering", f"Samma version {staged_version} men filer ändrade: {diff} — tillåter uppdatering", "info")
+            except Exception:
+                pass
+        except Exception:
+            # Vid osäkerhet — tillåt (säkrare att uppdatera än att blockera)
+            pass
+    if staged_version and _version_tuple(staged_version) == _version_tuple(APP_VERSION):
+        # Andra anropet i samma process — samma hash-koll
+        pass
     # Även mot versionen som faktiskt ligger i root just nu - så att ett
     # andra anrop i samma process (före omstart) inte installerar igen.
+    # För samma-version-fall: blockera bara om filer är identiska
     try:
         aktuell = (root / "pdfsorter.py").read_text(encoding="utf-8")
         m2 = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', aktuell)
-        if (staged_version and m2
-                and _version_tuple(staged_version) <= _version_tuple(m2.group(1))):
-            return False, (f"version {staged_version} är redan installerad "
-                           f"i appmappen (starta om appen i stället)")
+        if staged_version and m2:
+            if _version_tuple(staged_version) < _version_tuple(m2.group(1)):
+                return False, (f"version {staged_version} är äldre än installerad {m2.group(1)}")
+            if _version_tuple(staged_version) == _version_tuple(m2.group(1)):
+                # Kolla filer — om identiska, blockera
+                try:
+                    same = True
+                    for namn in UPDATE_FILES:
+                        a = src_root / namn
+                        b = root / namn
+                        if a.exists() and b.exists() and _sha256_file(a) != _sha256_file(b):
+                            same = False
+                            break
+                        if a.exists() != b.exists():
+                            same = False
+                            break
+                    if same:
+                        return False, (f"version {staged_version} är redan installerad "
+                                       f"i appmappen och filerna är identiska (starta om appen i stället)")
+                except Exception:
+                    pass
     except OSError:
         pass
     for namn in UPDATE_FILES:
@@ -2922,6 +3196,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Skapa en genväg på skrivbordet")
     p.add_argument("--check", action="store_true",
                    help="Visa vad som fungerar på den här datorn")
+    p.add_argument("--fel-logg", action="store_true",
+                   help="Visa samlad fellogg (logs/fel.log) — alla FEL/VARN från alla loggar")
+    p.add_argument("--samla-fel", action="store_true",
+                   help="Bygg om den samlade felloggen från alla befintliga loggar")
     p.add_argument("--diag", action="store_true",
                    help="Felsökningsöversikt: autostart-status, journal, ikoner")
     args = p.parse_args(argv)
@@ -2985,6 +3263,36 @@ def main(argv: Optional[List[str]] = None) -> int:
         ok, msg = create_desktop_shortcut()
         print(("Genväg skapad: " if ok else "Misslyckades: ") + msg)
         return 0 if ok else 1
+
+    # Samlad fellogg — snabb felsökning (en fil samlar alla fel)
+    if getattr(args, "fel_logg", False) or getattr(args, "samla_fel", False):
+        clear = bool(getattr(args, "samla_fel", False))
+        if clear:
+            pth = rebuild_aggregated_errors(clear=True)
+            print(f"Samlad fellogg ombyggd: {pth}")
+            try:
+                print(pth.read_text(encoding="utf-8", errors="replace")[-15000:])
+            except Exception as exc:
+                print(f"(kunde inte läsa felloggen: {exc})")
+            return 0
+        else:
+            pth = _aggregated_path()
+            try:
+                if not pth.exists() or pth.stat().st_size == 0:
+                    pth = rebuild_aggregated_errors(clear=False)
+            except Exception:
+                pass
+            if pth.exists():
+                try:
+                    print(f"Samlad fellogg: {pth} ({pth.stat().st_size} B)")
+                    print(pth.read_text(encoding="utf-8", errors="replace")[-15000:])
+                except Exception as exc:
+                    print(f"Kunde inte läsa felloggen: {exc}")
+                    return 1
+                return 0
+            else:
+                print("Ingen samlad fellogg ännu — inga FEL/VARN har loggats. Kör --samla-fel för att bygga från historik.")
+                return 0
 
     return _self_test()
 

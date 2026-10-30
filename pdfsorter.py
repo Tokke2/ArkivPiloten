@@ -6728,6 +6728,8 @@ class App:
                    command=self._copy_support_log).pack(side="left", padx=6)
         ttk.Button(bar, text="Öppna log-mappen",
                    command=self._open_log_dir).pack(side="left", padx=6)
+        ttk.Button(bar, text="Visa samlad fellogg",
+                   command=self._show_fel_log).pack(side="left", padx=6)
         ttk.Button(bar, text="Stöd projektet 💖",
                    command=self._visa_stod).pack(side="left", padx=6)
         ttk.Button(bar, text="Sök efter uppdateringar…",
@@ -7495,6 +7497,77 @@ class App:
             open_externally(d)
         except Exception as exc:
             self._fel(exc, "öppna log-mappen")
+
+    def _show_fel_log(self) -> None:
+        """Visa den samlade felloggen logs/fel.log — ett ställe för alla FEL."""
+        self._ui("Visa samlad fellogg")
+        try:
+            import pdfsorter_system as _sys_mod
+            agg = getattr(_sys_mod, "aggregated_error_path", None)
+            path = agg() if callable(agg) else _sys_mod.config_dir() / "logs" / "fel.log"
+            # Bygg om från befintliga loggar om filen saknas eller är tom
+            try:
+                if (not path.exists() or path.stat().st_size == 0):
+                    rebuild = getattr(_sys_mod, "rebuild_aggregated_errors", None)
+                    if callable(rebuild):
+                        rebuild(clear=False)
+            except Exception:
+                pass
+            if path.exists() and path.stat().st_size > 0:
+                open_externally(path)
+                self._log(f"Samlad fellogg öppnad: {path} ({path.stat().st_size} byte)", "info")
+            else:
+                # Inga fel ännu — visa info och öppna log-mappen istället
+                d = _sys_mod.session_dir()
+                d.mkdir(parents=True, exist_ok=True)
+                open_externally(d)
+                self.messagebox.showinfo(APP_NAME,
+                    "Inga fel har samlats ännu — bra!\n\n"
+                    "Den samlade felloggen (logs/fel.log) skapas automatiskt\n"
+                    "när något går fel (FEL/VARN i logg, krasch, ohanterat fel).\n\n"
+                    f"Log-mappen öppnad: {d}\n"
+                    "Tips: klicka '\u00d6ppna log-mappen' för att se alla loggar,"
+                    " eller kör med --fel-logg för att bygga om samlingen.",
+                    parent=self.root)
+        except Exception as exc:
+            self._fel(exc, "visa samlad fellogg")
+
+    def _copy_fel_log(self) -> None:
+        """Kopiera den samlade felloggen till urklipp — snabb felsökning."""
+        self._ui("Kopiera samlad fellogg")
+        try:
+            import pdfsorter_system as _sys_mod
+            agg = getattr(_sys_mod, "aggregated_error_path", None)
+            path = agg() if callable(agg) else _sys_mod.config_dir() / "logs" / "fel.log"
+            if not path.exists():
+                self.messagebox.showwarning(APP_NAME, f"Ingen samlad fellogg ännu:\n{path}", parent=self.root)
+                return
+            txt = path.read_text(encoding="utf-8", errors="replace")
+            if len(txt) > 400_000:
+                txt = "(början avkapad)\n" + txt[-400_000:]
+            self.root.clipboard_clear()
+            self.root.clipboard_append(txt)
+            self.messagebox.showinfo(APP_NAME, f"Samlad fellogg kopierad ({len(txt):,} tecken):\n{path}", parent=self.root)
+        except Exception as exc:
+            self._fel(exc, "kopiera fellogg")
+
+    def _rebuild_fel_log(self) -> None:
+        """Samla alla fel från andra loggar på nytt — fyll logs/fel.log."""
+        self._ui("Bygg om samlad fellogg")
+        try:
+            import pdfsorter_system as _sys_mod
+            rebuild = getattr(_sys_mod, "rebuild_aggregated_errors", None)
+            if not callable(rebuild):
+                self.messagebox.showerror(APP_NAME, "Funktionen saknas i denna version.", parent=self.root)
+                return
+            p = rebuild(clear=True)
+            txt = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+            n = len(txt.splitlines())
+            self._log(f"Samlad fellogg ombyggd: {p} ({n} rader)", "info")
+            self.messagebox.showinfo(APP_NAME, f"Samlad fellogg ombyggd:\n{p}\n{n} rader (alla FEL/VARN + errors/krasch).", parent=self.root)
+        except Exception as exc:
+            self._fel(exc, "bygg om fellogg")
+
 
     def _save_help(self) -> None:
         path = self.filedialog.asksaveasfilename(
