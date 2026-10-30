@@ -3652,6 +3652,7 @@ class ReviewDialog:
         # Egen sökning i stället för klassbindningens "hoppa till första
         # prefix" (klassbindningen hoppar över pga _egen_ta).
         self.combo._egen_ta = True
+        self.combo.bind("<KeyPress>", self._combo_prepare_search)
         self.combo.bind("<KeyRelease>", self._combo_search)
         self.combo.bind("<Return>", self._combo_pick)
         self.combo.bind("<Escape>", self._combo_reset)
@@ -3871,7 +3872,7 @@ class ReviewDialog:
         q = str(text or "").strip()
         if not q:
             antal = len(self._all_categories)
-            msg = (f"{antal} mappar · skriv för att filtrera, välj med ↑/↓ och Enter."
+            msg = (f"{antal} mappar · skriv för att filtrera; tryck ↓ för att visa träffarna."
                    if antal else
                    "Inga mappar än – skriv ett namn för att skapa en.")
             lbl.configure(text=msg)
@@ -3879,7 +3880,7 @@ class ReviewDialog:
         träffar, nivå = _rank_categories(q, self._all_categories)
         n = len(träffar)
         if nivå == "prefix":
-            msg = f"{n} träffar · fortsätt skriva eller välj med ↑/↓ och Enter."
+            msg = f"{n} träffar · fortsätt skriva eller tryck ↓ för att välja."
         elif nivå == "word":
             msg = (f"{n} mappar har ett ord som börjar med ”{q}” · "
                    "välj aktivt med piltangenterna.")
@@ -3890,6 +3891,7 @@ class ReviewDialog:
         lbl.configure(text=msg)
 
     def _combo_chosen(self, event=None) -> None:
+        self.combo._replace_on_type = False
         self.mode.set("existing")
         self._sync()
         self.new_entry.delete(0, "end")
@@ -3897,6 +3899,22 @@ class ReviewDialog:
         self.combo["values"] = self._all_categories
         self.combo._ta_seed = ""
         self._combo_show_hint()
+
+    def _combo_prepare_search(self, event=None) -> None:
+        """Starta en ny sökning genom att ersätta en förvald mapp vid typing."""
+        if not getattr(self.combo, "_replace_on_type", False) or event is None:
+            return
+        if getattr(event, "state", 0) & 0x4:  # behåll Ctrl+A/C/V m.m.
+            return
+        keysym = getattr(event, "keysym", "")
+        char = getattr(event, "char", "")
+        if char and char.isprintable():
+            self.combo.delete(0, "end")
+            self.combo._replace_on_type = False
+        elif keysym in ("BackSpace", "Delete"):
+            self.combo.delete(0, "end")
+            self.combo._replace_on_type = False
+            return "break"
 
     def _combo_search(self, event=None) -> None:
         """Filtrera listan medan användaren skriver."""
@@ -3931,7 +3949,13 @@ class ReviewDialog:
             self.new_entry.delete(0, "end")
             # Sökordet följer med ned i listan, så att "p" + "i" + "l"
             # fortsätter till PIL i stället för att börja om på "i".
-            self._post_dropdown(seed=text)
+            # Håll skrivfokus i comboboxen medan användaren bygger sökningen.
+            # Öppna listan bara om användaren redan öppnat den, annars tar
+            # Tk:s popdown fokus efter första tecknet och stoppar fortsatt text.
+            if self._popdown_open():
+                self._post_dropdown(seed=text)
+            else:
+                self.combo._ta_seed = text
         else:
             # Skrivet namn finns inte bland kategorierna -> ny mapp.
             self.combo._ta_seed = ""
@@ -4014,7 +4038,9 @@ class ReviewDialog:
             pass
 
     def _combo_schedule_popup_bind(self, event=None) -> None:
-        """Native arrow opens after the click; make its initial row inert."""
+        """Native arrow opens after the click; keep a visible, editable caret."""
+        if not self._popdown_open():
+            self.combo._replace_on_type = self.combo.get().strip() in self._all_categories
         try:
             self.win.after_idle(self._popdown_clear_selection)
             self.win.after_idle(self._bind_popdown_return)
@@ -4088,13 +4114,14 @@ class ReviewDialog:
             self.combo["values"] = self._all_categories
 
     def _combo_focus_in(self, event=None) -> None:
-        """When entering a closed field, select its value for replacement.
+        """Place the caret in the editable field without selecting its text.
 
         If the filtered popup is open, preserve the live query instead:
         typing must continue from "l" to "li", not replace the query or
         fall through to listbox type-ahead.
         """
         if self._popdown_open():
+            self.combo._replace_on_type = False
             self._combo_show_hint(self.combo.get())
             try:
                 self.combo.icursor("end")
@@ -4103,9 +4130,11 @@ class ReviewDialog:
             return
         self.combo["values"] = self._all_categories
         self.combo._ta_seed = ""
+        self.combo._replace_on_type = self.combo.get().strip() in self._all_categories
         self._combo_show_hint()
         try:
-            self.combo.selection_range(0, "end")
+            # Lämna insättningspunkten synlig i stället för att markera hela
+            # mappnamnet när användaren klickar i sökrutan.
             self.combo.icursor("end")
         except Exception:
             pass
@@ -4136,6 +4165,7 @@ class ReviewDialog:
                     (popdown and path.startswith(popdown)):
                 return
         self.combo._ta_seed = ""
+        self.combo._replace_on_type = False
         self.combo["values"] = self._all_categories
         self._combo_show_hint()
 

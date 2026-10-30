@@ -56,6 +56,9 @@ class _FakeCombo:
     def set(self, value):
         self.text = value
 
+    def delete(self, first, last=None):
+        self.text = ""
+
     def current(self, index=None):
         if index is None:
             return self.selected if self.selected is not None else -1
@@ -137,6 +140,7 @@ class _Stub:
     # -- riktiga metoder från ReviewDialog -------------------------------
     _sync = P.ReviewDialog._sync
     _combo_show_hint = P.ReviewDialog._combo_show_hint
+    _combo_prepare_search = P.ReviewDialog._combo_prepare_search
     _combo_search = P.ReviewDialog._combo_search
     _combo_pick = P.ReviewDialog._combo_pick
     _combo_reset = P.ReviewDialog._combo_reset
@@ -176,13 +180,14 @@ def test_review_dialog_uses_an_editable_free_text_folder_search():
     assert "self.combo.bind(\"<Return>\", self._combo_pick)" in source
 
 
-def test_typing_p_shows_only_names_starting_with_p():
+def test_typing_p_filters_names_without_stealing_entry_focus():
     stub = _Stub()
     stub.combo.text = ""
     _type(stub, "p")
     assert stub.combo["values"] == ["Pilkington", "PARKERINGEN AYGSINN"]
     assert stub.mode.get() == "existing"
-    assert stub.posted == ["p"]              # listan öppnades med träffarna
+    assert stub.posted == []                  # skriva öppnar inte popdown
+    assert stub.combo._ta_seed == "p"
 
 
 def test_typing_p_i_l_keeps_narrowing_to_pil():
@@ -299,12 +304,24 @@ def test_arrow_up_walks_the_full_list():
     assert stub.combo.get() == NAMES[-2]
 
 
-def test_focus_selects_the_text_so_the_first_key_replaces_it():
+def test_focus_shows_caret_without_selecting_the_whole_folder_name():
     stub = _Stub()
     stub.combo.set("Pilkington")
     stub._combo_focus_in(_key("FocusIn"))
-    assert ("selection_range", 0, "end") in stub.combo.tk.calls
+    assert ("selection_range", 0, "end") not in stub.combo.tk.calls
+    assert ("icursor", "end") in stub.combo.tk.calls
     assert stub.combo["values"] == NAMES
+
+
+def test_first_typed_character_replaces_a_preselected_folder():
+    stub = _Stub()
+    stub.combo.set("Pilkington")
+    stub.combo._replace_on_type = True
+
+    stub._combo_prepare_search(_key("L", "l"))
+
+    assert stub.combo.get() == ""
+    assert stub.combo._replace_on_type is False
 
 
 def test_focus_return_with_popup_open_preserves_the_live_search_query():
