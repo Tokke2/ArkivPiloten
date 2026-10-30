@@ -253,3 +253,19 @@ def test_focus_selects_the_text_so_the_first_key_replaces_it():
     stub._combo_focus_in(_key("FocusIn"))
     assert ("selection_range", 0, "end") in stub.combo.tk.calls
     assert stub.combo["values"] == NAMES
+
+
+def test_focus_return_with_popup_open_preserves_the_live_search_query():
+    stub = _Stub()
+    stub.combo.set("li")
+    stub.combo._ta_seed = "li"
+    stub.combo["values"] = ["Lidingö", "Lindab"]
+    stub.popdown_open = True
+
+    stub._combo_focus_in(_key("FocusIn"))
+
+    assert stub.combo.get() == "li"
+    assert stub.combo._ta_seed == "li"
+    assert stub.combo["values"] == ["Lidingö", "Lindab"]
+    assert ("selection_range", 0, "end") not in stub.combo.tk.calls
+    assert ("icursor", "end") in stub.combo.tk.calls

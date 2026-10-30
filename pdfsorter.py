@@ -3948,8 +3948,22 @@ class ReviewDialog:
             # men lämna den kvar scrollad till en gammal rad.
             try:
                 self.win.after_idle(self._popdown_select_first)
+                # Keep keyboard focus in the editable field while the
+                # filtered popup stays open, so typing "li" continues the
+                # query instead of becoming listbox type-ahead for "l".
+                self.win.after_idle(self._keep_combo_search_focus)
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    def _keep_combo_search_focus(self) -> None:
+        """Keep the popup open but return typing focus to its search field."""
+        if not self._popdown_open():
+            return
+        try:
+            self.combo.focus_set()
+            self.combo.icursor("end")
         except Exception:
             pass
 
@@ -3958,11 +3972,20 @@ class ReviewDialog:
             self.combo["values"] = self._all_categories
 
     def _combo_focus_in(self, event=None) -> None:
-        """Fältet är en sökruta: markera allt så att första tecknet
-        ersätter det förvalda kategorinamnet i stället för att hamna
-        efter det ("Pilkington" + p = "Pilkingtonp")."""
-        if not self._popdown_open():
-            self.combo["values"] = self._all_categories
+        """When entering a closed field, select its value for replacement.
+
+        If the filtered popup is open, preserve the live query instead:
+        typing must continue from "l" to "li", not replace the query or
+        fall through to listbox type-ahead.
+        """
+        if self._popdown_open():
+            self._combo_show_hint(self.combo.get())
+            try:
+                self.combo.icursor("end")
+            except Exception:
+                pass
+            return
+        self.combo["values"] = self._all_categories
         self.combo._ta_seed = ""
         self._combo_show_hint()
         try:

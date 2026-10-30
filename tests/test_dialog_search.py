@@ -193,26 +193,39 @@ def test_post_dropdown_scrolls_to_first_filtered_match_when_already_open():
         scheduled = []
         selected = []
 
+        state = {"open": opened}
+
         def tk_call(*args):
             calls.append(args)
+            if args and args[0] == "ttk::combobox::Post":
+                state["open"] = True
             return ""
 
-        combo = SimpleNamespace(_ta_seed="", tk=SimpleNamespace(call=tk_call))
+        focus_calls = []
+        combo = SimpleNamespace(
+            _ta_seed="", tk=SimpleNamespace(call=tk_call),
+            focus_set=lambda: focus_calls.append("focus"),
+            icursor=lambda pos: focus_calls.append(("icursor", pos)),
+        )
         win = SimpleNamespace(after_idle=scheduled.append)
         dialog = SimpleNamespace(
             combo=combo,
             win=win,
-            _popdown_open=lambda opened=opened: opened,
+            _popdown_open=lambda: state["open"],
             _popdown_select_first=lambda: selected.append(True),
         )
+        dialog._keep_combo_search_focus = lambda: \
+            pdfsorter.ReviewDialog._keep_combo_search_focus(dialog)
 
         pdfsorter.ReviewDialog._post_dropdown(dialog, seed="pil")
 
         assert combo._ta_seed == "pil"
         assert calls[0][0] == expected_call
-        assert len(scheduled) == 1
-        scheduled.pop()()
+        assert len(scheduled) == 2
+        scheduled.pop(0)()
         assert selected == [True]
+        scheduled.pop(0)()
+        assert focus_calls == ["focus", ("icursor", "end")]
 
 
 def test_mousewheel_is_disabled_while_category_dropdown_is_open():
