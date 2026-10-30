@@ -213,3 +213,49 @@ def test_post_dropdown_scrolls_to_first_filtered_match_when_already_open():
         assert len(scheduled) == 1
         scheduled.pop()()
         assert selected == [True]
+
+
+def test_mousewheel_is_disabled_while_category_dropdown_is_open():
+    class Canvas:
+        def __init__(self):
+            self.scrolled = []
+
+        def yview_scroll(self, steps, units):
+            self.scrolled.append((steps, units))
+
+    event = SimpleNamespace(
+        widget=SimpleNamespace(winfo_class=lambda: "TFrame"),
+        delta=120,
+        num=4,
+    )
+    inner, outer = Canvas(), Canvas()
+    is_inner = lambda _widget: False
+
+    assert pdfsorter._dialog_wheel(
+        inner, outer, is_inner, event, dropdown_open=True) == "break"
+    assert inner.scrolled == []
+    assert outer.scrolled == []
+
+    # När rullgardinen är stängd fungerar den vanliga dialogscrollen.
+    assert pdfsorter._dialog_wheel(
+        inner, outer, is_inner, event, dropdown_open=False) == "break"
+    assert outer.scrolled == [(-1, "units")]
+
+
+def test_mousewheel_over_category_field_scrolls_only_when_dropdown_closed():
+    class Canvas:
+        def __init__(self):
+            self.scrolled = []
+
+        def yview_scroll(self, steps, units):
+            self.scrolled.append((steps, units))
+
+    event = SimpleNamespace(delta=120, num=4)
+    outer = Canvas()
+    for opened, expected in ((True, []), (False, [(-1, "units")])):
+        dialog = SimpleNamespace(
+            _popdown_open=lambda opened=opened: opened,
+            _outer=outer,
+        )
+        assert pdfsorter.ReviewDialog._combo_wheel(dialog, event) == "break"
+        assert outer.scrolled == expected

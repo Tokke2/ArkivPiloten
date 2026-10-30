@@ -238,6 +238,16 @@
 > (c) Tester täcker migreringen, batchminimering och dialogskydd.
 > Versionsnumret höjs inte och releasen uppdateras med samma versionsnummer.
 >
+> **Korrigering (2026-10-30) — mushjul och uppdatering från systemfältet.**
+> (a) När kategorirullgardinen är öppen gör mushjulet ingenting; när den är
+> stängd rullar hjulet granskningsdialogen som vanligt. Skrivning i fältet
+> **Befintlig** fortsätter filtrera kategorier och rulla till första träffen.
+> (b) Högerklick på systemfältsikonen → **Sök efter uppdateringar…** visar
+> huvudfönstret och startar samma manuella, verifierade GitHub Releases-flöde
+> som knappen i appen. Resultatdialoger är kopplade till huvudfönstret.
+> Tester täcker hjulets öppna/stängda läge och tray-menyn. Versionsnumret
+> behålls.
+>
 > **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
 > Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
 > bara till `stderr`, som inte finns när appen startar med `pythonw`, och

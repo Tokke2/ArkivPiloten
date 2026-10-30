@@ -307,14 +307,14 @@ class _FakeMessagebox:
         self.svar = svar
         self.fragor, self.varningar, self.klart = [], [], []
 
-    def askyesno(self, titel, text):
+    def askyesno(self, titel, text, **kwargs):
         self.fragor.append(text)
         return self.svar
 
-    def showwarning(self, titel, text):
+    def showwarning(self, titel, text, **kwargs):
         self.varningar.append(text)
 
-    def showinfo(self, titel, text):
+    def showinfo(self, titel, text, **kwargs):
         self.klart.append(text)
 
 

@@ -1683,8 +1683,8 @@ class TrayIcon:
             Item(self._queue_label, lambda: self.app._post(self.app.show_review)),
             Menu.SEPARATOR,
             Item("Öppna utmappen", lambda: self.app._post(self.app.open_output)),
-            Item("Sök efter uppdatering…", lambda: self.app._post(
-                lambda: self.app._check_updates_gui(manual=True))),
+            Item("Sök efter uppdateringar…", lambda: self.app._post(
+                self.app._check_updates_from_tray)),
             Item("Avsluta", lambda: self.app._post(self.app.quit_app)),
         )
 
@@ -1827,6 +1827,8 @@ HELP_CONTENT: List[Tuple[str, str]] = [
     ("body", "Är appen osäker hamnar filen i granskningskön och du får upp "
              "en ruta med tio förslag på stödord hämtade ur just den filen. "
              "Bocka i de ord som hör ihop med rätt leverantör och välj mapp. "
+             "Skriv i fältet Befintlig för att filtrera kategorier och hoppa "
+             "till en träff. Mushjulet är pausat medan rullgardinen är öppen. "
              "Nästa gång ett av orden dyker upp går filen automatiskt."),
     ("body", "Välj hellre ord som är unika för företaget:"),
     ("bullet", "Bäst:  organisationsnummer, VAT-nummer, bankgiro, domän "
@@ -2039,6 +2041,8 @@ HELP_CONTENT: List[Tuple[str, str]] = [
                "utan att hoppa upp."),
     ("bullet", "Bevakningen var på?  Den slås på igen direkt efter "
                "omstarten, så ingen fil missas."),
+    ("bullet", "Vill du söka direkt: Hjälp → Sök efter uppdateringar, eller "
+               "högerklicka på ikonen i systemfältet och välj samma sak."),
     ("bullet", "Antalet sökningar gäller över omstarter — en app som startas "
                "tio gånger om dagen frågar GitHub lika sällan ändå."),
     ("note", "Allt styrs under Inställningar → Uppdateringar. Vill du "

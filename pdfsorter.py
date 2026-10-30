@@ -3097,14 +3097,18 @@ def _reinstall_tab_wheel() -> None:
     _bind_tab_wheel(root)
 
 
-def _dialog_wheel(inner_canvas, outer_canvas, is_inner, event):
+def _dialog_wheel(inner_canvas, outer_canvas, is_inner, event,
+                  dropdown_open: bool = False):
     """Mushjul i granskningsdialogen (ANVÄNDARORDER 2026-08-26):
 
     * över inmatningsfält (rullgardin/spinn/entry/text): "break" utan
       någon rullning - hjulet får aldrig ändra ett fältvärde;
     * över stödordslistan: rullar listan;
-    * överallt annars i fönstret: rullar hela fönstret (yttre canvas).
+    * överallt annars i fönstret: rullar hela fönstret (yttre canvas);
+    * medan kategorirullgardinen är öppen: hjulet gör ingenting.
     """
+    if dropdown_open:
+        return "break"
     try:
         cls = event.widget.winfo_class()
     except Exception:
@@ -3298,7 +3302,9 @@ class ReviewDialog:
             return False
 
         def _wheel(event):
-            return _dialog_wheel(canvas, self._outer, _in_inner, event)
+            return _dialog_wheel(
+                canvas, self._outer, _in_inner, event,
+                dropdown_open=self._popdown_open())
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.win.bind_all(seq, _wheel)
         self._canvas = canvas
@@ -3344,9 +3350,8 @@ class ReviewDialog:
         self.combo.bind("<FocusOut>", self._combo_focus_out)
         self.combo.bind("<Down>", self._combo_navigate)
         self.combo.bind("<Up>", self._combo_navigate)
-        # Mushjulet får ALDRIG byta kategori. Bindningen ligger på
-        # widgeten (körs före TCombobox-klassens egen hjulbindning) och
-        # returnerar "break"; i stället rullas dialogens yttre yta.
+        # Mushjulet får ALDRIG byta kategori. När listan är stängd rullas
+        # dialogen; medan den är öppen är mushjulet avstängt helt.
         for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.combo.bind(_seq, self._combo_wheel)
         self.combo.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=6)
@@ -3774,7 +3779,9 @@ class ReviewDialog:
         return "break"
 
     def _combo_wheel(self, event) -> str:
-        """Mushjulet rullar fönstret - det får aldrig byta kategori."""
+        """Mushjulet rullar fönstret endast när kategorilistan är stängd."""
+        if self._popdown_open():
+            return "break"
         try:
             delta = int(getattr(event, "delta", 0) or 0)
             # Använd tecknet, inte storleken: macOS rapporterar ibland ±1
@@ -8390,6 +8397,11 @@ class App:
             forra_lyckades=bool(self.settings.get("last_update_check_ok", True)))
         return "nästa sökning nu" if text == "nu" else f"nästa sökning {text}"
 
+    def _check_updates_from_tray(self) -> None:
+        """Visa appen och starta en manuell uppdateringssökning från tray-menyn."""
+        self.show_window("uppdatering via systemfältet")
+        self._check_updates_gui(manual=True)
+
     def _check_updates_gui(self, manual: bool = False) -> None:
         """Sök efter ny version i bakgrunden (enbart GitHub Releases).
 
@@ -8570,7 +8582,8 @@ class App:
             self._h("uppdatering", "Kunde inte söka uppdatering: " + fel, "warn")
             if manual:
                 self.messagebox.showwarning(
-                    APP_NAME, "Kunde inte söka efter uppdateringar:\n" + fel)
+                    APP_NAME, "Kunde inte söka efter uppdateringar:\n" + fel,
+                    parent=self.root)
             return
         if steg == "aktuell":
             self._h("uppdatering",
@@ -8578,7 +8591,8 @@ class App:
                     f"GitHub: {info.get('remote')})")
             if manual:
                 self.messagebox.showinfo(
-                    APP_NAME, f"Du har den senaste versionen ({APP_VERSION}).")
+                    APP_NAME, f"Du har den senaste versionen ({APP_VERSION}).",
+                    parent=self.root)
             return
         if steg == "osaker":
             self._h("uppdatering",
@@ -8590,7 +8604,8 @@ class App:
                     f"Releasen {info.get('remote')} saknar kontrollsumma "
                     "(SHA256SUMS.txt eller SHA-256 i release-texten).\n\n"
                     "Appen installerar inte ett paket som inte kan "
-                    "verifieras. Ladda ner den manuellt från releasesidan.")
+                    "verifieras. Ladda ner den manuellt från releasesidan.",
+                    parent=self.root)
             return
         kalla = "GitHub Releases"
         if steg == "erbjudande":
@@ -8620,7 +8635,7 @@ class App:
                    "\nVarning: releasen saknar kontrollsumma.")
                 + "\n\nAppen uppdateras i sin egen mapp, dina "
                 "inställningar, regler och historik rörs inte. "
-                "En säkerhetskopia tas först.")
+                "En säkerhetskopia tas först.", parent=self.root)
         if not svar:
             self._h("uppdatering", "Uppdateringen avböjd av användaren")
             return
@@ -8634,7 +8649,8 @@ class App:
                 self._h("uppdatering", msg, "ok" if ok else "warn")
                 if not ok:
                     if manual:
-                        self.messagebox.showwarning(APP_NAME, msg)
+                        self.messagebox.showwarning(APP_NAME, msg,
+                                                    parent=self.root)
                     else:
                         self._log(f"Uppdateringen misslyckades: {msg}", "warn")
                     return
@@ -8646,7 +8662,7 @@ class App:
                     self._planera_omstart(tyst=True)
                 elif self.messagebox.askyesno(
                         APP_NAME, msg + "\n\nStarta om appen nu "
-                        "för att köra den nya versionen?"):
+                        "för att köra den nya versionen?", parent=self.root):
                     self._planera_omstart(tyst=False)
             self.root.after(0, done)
         threading.Thread(target=install, daemon=True,
