@@ -1317,6 +1317,9 @@ _LEARNED_CAP_TOKENS = 2500
 _LEARNED_CONF_MARGIN = 0.25
 #: Hur hårt ett ord som lett fel straffas i modellen. 0 = ingen påverkan.
 _LEARNED_NEG_BETA = 0.5
+#: En uttrycklig granskning/korrigering väger flera gånger tyngre än ett
+#: automatiskt utfall. Antalet faktiska dokument räknas fortfarande separat.
+_LEARNED_MANUAL_WEIGHT = 3
 #: Rankningsbonus för modellens val. Liten med flit: den får flytta
 #: ordningen och marginalen, aldrig beviskraven.
 _LEARNED_BONUS = 0.2
@@ -1413,15 +1416,21 @@ class LearnedMatcher:
               rejected_for: Optional[str] = None,
               rejected_tokens: Optional[List[str]] = None,
               incorrect_for: Optional[str] = None,
-              timestamp: Optional[str] = None) -> None:
+              timestamp: Optional[str] = None,
+              evidence_weight: int = 1) -> None:
         """Träna på ett beslut.
 
         `rejected_for` = kategorin som gissade fel. Då räknas filens ord
         som NEGATIVA bevis för den kategorin, så att samma ord inte leder
-        fel igen. En användarkorrigering lär alltså både rätt och fel.
+        fel igen. `evidence_weight` förstärker uttryckliga användarbeslut,
+        medan `n` fortfarande räknar faktiska dokument för minimiunderlaget.
         """
         if not category or not tokens:
             return
+        try:
+            weight = max(1, min(5, int(evidence_weight)))
+        except (TypeError, ValueError, OverflowError):
+            weight = 1
         timestamp = timestamp or now_iso()
         c = self.cats.setdefault(category, {"n": 0, "tot": 0, "w": {}})
         c["updated"] = timestamp
@@ -1430,10 +1439,10 @@ class LearnedMatcher:
         c["calibration"]["correct"] = int(c["calibration"].get("correct", 0)) + 1
         w = c.setdefault("w", {})
         seen = c.setdefault("last_seen", {})
-        for t in dict.fromkeys(tokens):          # en gång per fil
-            w[t] = int(w.get(t, 0)) + 1
+        for t in dict.fromkeys(tokens):          # en gång per fil, viktad evidens
+            w[t] = int(w.get(t, 0)) + weight
             seen[t] = timestamp
-            c["tot"] = int(c.get("tot", 0)) + 1
+            c["tot"] = int(c.get("tot", 0)) + weight
         if len(w) > _LEARNED_CAP_TOKENS:         # minnestak
             c["w"] = dict(sorted(w.items(), key=lambda kv: -kv[1])
                           [:_LEARNED_CAP_TOKENS])
@@ -1447,9 +1456,9 @@ class LearnedMatcher:
             nw = neg.setdefault("neg", {})
             neg_seen = neg.setdefault("neg_last_seen", {})
             for t in dict.fromkeys(rejected):
-                nw[t] = int(nw.get(t, 0)) + 1
+                nw[t] = int(nw.get(t, 0)) + weight
                 neg_seen[t] = timestamp
-                neg["neg_tot"] = int(neg.get("neg_tot", 0)) + 1
+                neg["neg_tot"] = int(neg.get("neg_tot", 0)) + weight
             if len(nw) > _LEARNED_CAP_TOKENS:
                 neg["neg"] = dict(sorted(nw.items(), key=lambda kv: -kv[1])
                                   [:_LEARNED_CAP_TOKENS])
@@ -1565,6 +1574,18 @@ def _history_features(event: Dict[str, Any]) -> List[str]:
     return [str(value) for value in stored if value]
 
 
+def _history_evidence_weight(event: Dict[str, Any]) -> int:
+    """Use stored calibration weight, or infer it for older history records."""
+    try:
+        stored = int(event.get("learning_weight", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        stored = 0
+    if stored > 0:
+        return max(1, min(5, stored))
+    return (_LEARNED_MANUAL_WEIGHT
+            if event.get("decided_by") == "user" else 1)
+
+
 def replay_learned_history(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Walk-forward backtest: each event is tested before it is learned."""
     replay = LearnedMatcher(load=False)
@@ -1584,7 +1605,13 @@ def replay_learned_history(events: List[Dict[str, Any]]) -> Dict[str, Any]:
             stats = per_category.setdefault(category, {"tested": 0, "correct": 0})
             stats["tested"] += 1
             stats["correct"] += int(is_correct)
-        replay.train(category, features, timestamp=str(event.get("time") or now_iso()))
+        replay.train(
+            category, features,
+            incorrect_for=str(event.get("corrected_from") or "") or None,
+            rejected_tokens=[str(token) for token in event.get("rejected_features", [])],
+            timestamp=str(event.get("time") or now_iso()),
+            evidence_weight=_history_evidence_weight(event),
+        )
     return {"tested": tested, "correct": correct,
             "accuracy": (correct / tested) if tested else None,
             "categories": per_category}
@@ -1610,10 +1637,13 @@ def restore_learned_category(category: str, events: List[Dict[str, Any]],
         features = _history_features(event)
         timestamp = str(event.get("time") or now_iso())
         if chosen == category and features and event.get("decided_by") != "unmatched":
-            learner.train(category, features, timestamp=timestamp)
+            learner.train(
+                category, features, timestamp=timestamp,
+                evidence_weight=_history_evidence_weight(event))
             count += 1
         if event.get("corrected_from") == category:
             rejected = [str(token) for token in event.get("rejected_features", [])]
+            weight = _history_evidence_weight(event)
             profile = learner.cats.setdefault(
                 category, {"n": 0, "tot": 0, "w": {}, "neg": {}})
             calibration = profile.setdefault("calibration", {"correct": 0, "incorrect": 0})
@@ -1621,9 +1651,9 @@ def restore_learned_category(category: str, events: List[Dict[str, Any]],
             neg = profile.setdefault("neg", {})
             seen = profile.setdefault("neg_last_seen", {})
             for token in rejected:
-                neg[token] = int(neg.get(token, 0)) + 1
+                neg[token] = int(neg.get(token, 0)) + weight
                 seen[token] = timestamp
-                profile["neg_tot"] = int(profile.get("neg_tot", 0)) + 1
+                profile["neg_tot"] = int(profile.get("neg_tot", 0)) + weight
             profile["updated"] = timestamp
     learner.flush()
     return count
@@ -1646,6 +1676,7 @@ def rebuild_learned_from_history(events: List[Dict[str, Any]],
             incorrect_for=str(event.get("corrected_from") or "") or None,
             rejected_tokens=[str(token) for token in event.get("rejected_features", [])],
             timestamp=str(event.get("time") or now_iso()),
+            evidence_weight=_history_evidence_weight(event),
         )
         count += 1
     learner.flush()
@@ -2605,6 +2636,9 @@ class SortEngine:
                             _learned().train(
                                 category, features, incorrect_for=wrong or None,
                                 rejected_tokens=rejected_features,
+                                evidence_weight=(
+                                    _LEARNED_MANUAL_WEIGHT
+                                    if decided_by == "user" else 1),
                             )
                     except Exception:
                         pass
@@ -2626,6 +2660,8 @@ class SortEngine:
                     "matched": matched,
                     "used_ocr": decision.extraction.used_ocr,
                     "decided_by": decided_by,
+                    "learning_weight": (
+                        _LEARNED_MANUAL_WEIGHT if decided_by == "user" else 1),
                     "corrected_from": wrong or None,
                     "learned": learned or [],
                     "date": when.isoformat() if when else None,
@@ -6021,9 +6057,15 @@ class App:
                    command=self._reset_learned).pack(side="left", padx=6)
         ttk.Button(learning_actions, text="Hantera per kategori…",
                    command=self._manage_learned).pack(side="left", padx=6)
+        ttk.Label(
+            opt,
+            text=("Manuella val och rättelser väger 3× tyngre än autosortering. "
+                  "Välj ‘Återbygg från historik’ för att tillämpa det på äldre beslut."),
+            style="CardMuted.TLabel", wraplength=720, justify="left",
+        ).grid(row=5, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 4))
 
         adv = ttk.Frame(opt, style="CardInner.TFrame")
-        adv.grid(row=5, column=0, columnspan=4, sticky="w",
+        adv.grid(row=6, column=0, columnspan=4, sticky="w",
                  padx=8, pady=(8, T.INNER))
         self.var_unmatched = tk.StringVar(value=self.settings.get("unmatched_folder", ""))
         ttk.Label(adv, text="Osorterat-mapp:", style="Card.TLabel").pack(side="left")

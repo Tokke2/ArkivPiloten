@@ -32,6 +32,18 @@ def test_zone_features_and_rejected_feedback_are_specific(tmp_path):
     assert "body:friday" not in rejected
 
 
+def test_manual_evidence_is_stronger_without_faking_more_documents(tmp_path):
+    matcher = P.LearnedMatcher(tmp_path / "model.json")
+    matcher.train("Auto", ["header:acme"])
+    matcher.train("Manual", ["header:acme"], evidence_weight=3)
+
+    assert matcher.cats["Auto"]["n"] == matcher.cats["Manual"]["n"] == 1
+    assert matcher.cats["Auto"]["w"]["header:acme"] == 1
+    assert matcher.cats["Manual"]["w"]["header:acme"] == 3
+    assert matcher.cats["Manual"]["tot"] == 3
+    assert matcher.predict(["header:acme"], min_files=1)[0] == "Manual"
+
+
 def test_model_trains_targeted_corrections_and_calibration(tmp_path):
     matcher = P.LearnedMatcher(tmp_path / "model.json")
     matcher.train("Correct", ["header:acme", "body:invoice"],
@@ -77,8 +89,9 @@ def test_restore_and_reset_are_scoped_to_one_category(tmp_path):
     ]
     restored = P.restore_learned_category("Target", events, matcher)
     assert restored == 1
-    assert matcher.cats["Target"]["w"] == {"header:target": 1}
-    assert matcher.cats["Target"]["neg"] == {"header:wrong": 1}
+    assert matcher.cats["Target"]["n"] == 1
+    assert matcher.cats["Target"]["w"] == {"header:target": 3}
+    assert matcher.cats["Target"]["neg"] == {"header:wrong": 3}
     assert "Unrelated" in matcher.cats
     P.reset_learned_category("Target", matcher)
     assert "Target" not in matcher.cats

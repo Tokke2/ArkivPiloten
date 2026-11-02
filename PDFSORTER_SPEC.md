@@ -2162,9 +2162,11 @@ regelstödd och får inte försvaga sorteringens säkerhetsgränser.)
   lagrar fel kategori och endast träffade ord i deras zon (plus den
   generella ordsignalen), inte samtliga dokumentord som felbevis.
 - AC-17.2 Kategoriprofilen kalibreras med valda respektive korrigerade
-  beslut. Enskilda signaler klingar av med två års halveringstid; den
-  senaste träffen per signal sparas för drifthantering. Modellen är
-  fortfarande bara en svag rangordningssignal.
+  beslut. Manuellt granskade beslut väger tre gånger tyngre än automatiska
+  utfall, men varje PDF räknas fortfarande som ett enda dokument vid
+  minimiunderlaget. Enskilda signaler klingar av med två års halveringstid;
+  den senaste träffen per signal sparas för drifthantering. Modellen är
+  fortfarande bara en rangordningssignal och kan aldrig ensam utlösa flytt.
 - AC-17.3 Granskningsdialogen förklarar förslaget med matchade stödord,
   deras dokumentzoner och eventuell lärd/historisk förstärkning.
 - AC-17.4 Walk-forward-testet poängsätter varje historikpost innan den
