@@ -44,7 +44,7 @@ def test_tray_menu_has_manual_update_action_and_posts_it_to_ui(monkeypatch):
     menu = S.TrayIcon(app)._build_menu()
     update = next(item for item in menu.items
                   if getattr(item, "text", None)
-                  == "Sök efter uppdateringar…")
+                  == "Uppdatera ArkivPiloten…")
     update.action()
 
     assert len(posted) == 1

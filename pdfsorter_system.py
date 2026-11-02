@@ -1693,6 +1693,8 @@ class TrayIcon:
         return Menu(
             Item("Visa fönster", lambda: self.app._post(self.app.show_window),
                  default=True),
+            Item("Uppdatera ArkivPiloten…", lambda: self.app._post(
+                self.app._check_updates_from_tray)),
             Menu.SEPARATOR,
             Item("Sortera nu", lambda: self.app._post(self.app._sort_now)),
             Item("Bevakning", lambda: self.app._post(self.app._toggle_watch),
@@ -1700,8 +1702,6 @@ class TrayIcon:
             Item(self._queue_label, lambda: self.app._post(self.app.show_review)),
             Menu.SEPARATOR,
             Item("Öppna utmappen", lambda: self.app._post(self.app.open_output)),
-            Item("Sök efter uppdateringar…", lambda: self.app._post(
-                self.app._check_updates_from_tray)),
             Item("Avsluta", lambda: self.app._post(self.app.quit_app)),
         )
 
