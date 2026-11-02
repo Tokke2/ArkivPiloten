@@ -712,7 +712,12 @@ def set_app_user_model_id(app_id: str = APP_USER_MODEL_ID) -> None:
         return
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        set_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        set_id.argtypes = (ctypes.c_wchar_p,)
+        set_id.restype = ctypes.c_long
+        hr = int(set_id(app_id))
+        if hr < 0:
+            raise OSError(f"SetCurrentProcessExplicitAppUserModelID failed: {hr}")
     except Exception:
         pass
 
@@ -730,6 +735,10 @@ def brand_window(root: Any, size: int = 64) -> Any:
     try:
         photo = icon_photoimage(size)
         if photo is not None:
+            # Keep a reference on the actual Tk object. Several utility
+            # windows call this function without a Python-side owner; letting
+            # PhotoImage be collected clears the WM icon on Windows.
+            setattr(root, "_arkivpiloten_icon_ref", photo)
             root.iconphoto(True, photo)
     except Exception:
         photo = None
@@ -737,6 +746,11 @@ def brand_window(root: Any, size: int = 64) -> Any:
         try:
             ico = ensure_icon_file()
             if ico:
+                # Set both this HWND and Tk's default for later Toplevels.
+                # The explicit per-window call is what Explorer/taskbar reads;
+                # -default alone can leave an existing Tk root on python.exe's
+                # generic icon on some Windows/Tk builds.
+                root.iconbitmap(str(ico))
                 root.iconbitmap(default=str(ico))
         except Exception:
             pass
@@ -2228,6 +2242,13 @@ def _fel_dialog(text):
         rot = tk.Tk()
         rot.withdraw()
         try:
+            icon = Path(__file__).resolve().parent / "ArkivPiloten.ico"
+            if icon.is_file():
+                rot.iconbitmap(str(icon))
+                rot.iconbitmap(default=str(icon))
+        except Exception:
+            pass
+        try:
             rot.after(120_000, rot.destroy)
             messagebox.showerror("ArkivPiloten", text)
         finally:
@@ -2238,6 +2259,16 @@ def _fel_dialog(text):
 
 def main():
     _fixa_stdio()
+    # Sätt identiteten innan även en eventuell felruta skapas.
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            set_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+            set_id.argtypes = (ctypes.c_wchar_p,)
+            set_id.restype = ctypes.c_long
+            set_id(_APP_ID)
+        except Exception:
+            pass
 
     huvud = Path(__file__).resolve().with_suffix(".py")
     if not huvud.is_file():
@@ -2254,15 +2285,6 @@ def main():
     sys.argv = [str(huvud)] + list(sys.argv[1:])
     if str(huvud.parent) not in sys.path:
         sys.path.insert(0, str(huvud.parent))
-
-    if sys.platform.startswith("win"):
-        # Måste ske före det första fönstret skapas för att ge vår ikon
-        # i aktivitetsfältet. Kan aldrig få starten att misslyckas.
-        try:
-            import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_APP_ID)
-        except Exception:
-            pass
 
     import runpy
     try:

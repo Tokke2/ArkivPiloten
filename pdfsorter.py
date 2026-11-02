@@ -3457,6 +3457,7 @@ class ReviewDialog:
         self.result: Optional[Dict[str, Any]] = None
 
         self.win = tk.Toplevel(parent)
+        self._icon_ref = brand_window(self.win)
         self.win.configure(background=self.C["bg"])
         self.win.after(80, lambda: dark_titlebar(
             self.win, bool(getattr(self.theme, "dark", False))))
@@ -4669,6 +4670,7 @@ class ConflictDialog:
         self.app = app
         self.result = "rename"
         self.win = tk.Toplevel(parent)
+        self._icon_ref = brand_window(self.win)
         self.win.after(80, lambda: dark_titlebar(
             self.win, bool(getattr(app, "theme", None)
                            and app.theme.dark)))
@@ -8114,6 +8116,7 @@ class App:
         """Liten dialog med en rullgardin. Returnerar valt värde."""
         tk, ttk = self.tk, self.ttk
         win = tk.Toplevel(self.root)
+        brand_window(win)
         win.title(titel)
         win.configure(background=self.C["bg"])
         win.transient(self.root)
@@ -9363,6 +9366,7 @@ class App:
     def _manage_learned(self) -> None:
         tk, ttk = self.tk, self.ttk
         win = tk.Toplevel(self.root)
+        brand_window(win)
         win.title("Inlärning per kategori")
         win.transient(self.root)
         win.geometry("720x390")
@@ -9808,6 +9812,7 @@ class App:
         med originalkoden."""
         tk, ttk = self.tk, self.ttk
         win = tk.Toplevel(self.root)
+        brand_window(win)
         win.title("ArkivPiloten — stöd")
         win.transient(self.root)
         win.resizable(False, False)
@@ -9961,6 +9966,7 @@ class App:
     def _visa_progress(self, rubrik: str):
         tk, ttk = self.tk, self.ttk
         win = tk.Toplevel(self.root)
+        brand_window(win)
         win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
         win.title(rubrik)
         win.transient(self.root)
@@ -10025,6 +10031,7 @@ class App:
                 return
             tk, ttk = self.tk, self.ttk
             win = tk.Toplevel(self.root)
+            brand_window(win)
             win.title(f"{APP_NAME} - komplettera installationen")
             win.transient(self.root)
             win.resizable(False, False)

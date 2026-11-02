@@ -68,6 +68,13 @@ def _fel_dialog(text):
         rot = tk.Tk()
         rot.withdraw()
         try:
+            icon = Path(__file__).resolve().parent / "ArkivPiloten.ico"
+            if icon.is_file():
+                rot.iconbitmap(str(icon))
+                rot.iconbitmap(default=str(icon))
+        except Exception:
+            pass
+        try:
             rot.after(120_000, rot.destroy)
             messagebox.showerror("ArkivPiloten", text)
         finally:
@@ -78,6 +85,16 @@ def _fel_dialog(text):
 
 def main():
     _fixa_stdio()
+    # Sätt identiteten innan även en eventuell felruta skapas.
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            set_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+            set_id.argtypes = (ctypes.c_wchar_p,)
+            set_id.restype = ctypes.c_long
+            set_id(_APP_ID)
+        except Exception:
+            pass
 
     huvud = Path(__file__).resolve().with_suffix(".py")
     if not huvud.is_file():
@@ -94,15 +111,6 @@ def main():
     sys.argv = [str(huvud)] + list(sys.argv[1:])
     if str(huvud.parent) not in sys.path:
         sys.path.insert(0, str(huvud.parent))
-
-    if sys.platform.startswith("win"):
-        # Måste ske före det första fönstret skapas för att ge vår ikon
-        # i aktivitetsfältet. Kan aldrig få starten att misslyckas.
-        try:
-            import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_APP_ID)
-        except Exception:
-            pass
 
     import runpy
     try:
