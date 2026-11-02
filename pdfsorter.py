@@ -4198,6 +4198,10 @@ class ReviewDialog:
         try:
             self.win.after_idle(self._popdown_clear_selection)
             self.win.after_idle(self._bind_popdown_return)
+            # The native popdown takes keyboard focus when opened with the
+            # mouse. Return it to the editable field so typing can continue
+            # the live category search while the dropdown stays visible.
+            self.win.after_idle(self._keep_combo_search_focus)
         except Exception:
             pass
 
@@ -4421,6 +4425,9 @@ class ReviewDialog:
             # direkt efter att popdown-fönstret skapats.
             try:
                 self.win.after_idle(self._bind_popdown_return)
+                # Tk opens the popdown after this binding returns. Restore
+                # focus afterwards so subsequent keystrokes keep filtering.
+                self.win.after_idle(self._keep_combo_search_focus)
             except Exception:
                 pass
             return ""
