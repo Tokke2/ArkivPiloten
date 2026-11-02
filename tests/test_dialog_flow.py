@@ -104,6 +104,45 @@ class _FakeEntry:
         return self.text
 
 
+class _FakeSuggestList:
+    def __init__(self):
+        self.items = []
+        self.selected = []
+        self.active = None
+        self.visible_index = None
+
+    def size(self):
+        return len(self.items)
+
+    def get(self, index):
+        return self.items[index]
+
+    def delete(self, first, last=None):
+        self.items = []
+        self.selected = []
+
+    def insert(self, index, name):
+        self.items.append(name)
+
+    def selection_clear(self, first, last=None):
+        self.selected = []
+
+    def selection_set(self, index):
+        self.selected = [index]
+
+    def activate(self, index):
+        self.active = index
+
+    def see(self, index):
+        self.visible_index = index
+
+    def yview_moveto(self, fraction):
+        pass
+
+    def nearest(self, y):
+        return int(y)
+
+
 class _Stub:
     """Minimal Tk-fri stand-in för ReviewDialog."""
 
@@ -116,6 +155,9 @@ class _Stub:
         self.popdown_open = False
         self.posted = []                     # seed per öppning
         self.unposted = 0
+        self.suggestions = []
+        self._combo_suggest_index = None
+        self._combo_suggest_list = _FakeSuggestList()
         # Tk:s Unpost gör listan omappad - modellera det, så att
         # _combo_reset_values ser samma sak som i det riktiga programmet.
         self.combo.tk.on_call = self._tk_call
@@ -133,6 +175,27 @@ class _Stub:
     def _popdown_selected_name(self):
         return getattr(self, "selected_popup_name", "") if self.popdown_open else ""
 
+    def _combo_render_suggestions(self, names):
+        self.suggestions = list(names)
+        self._combo_suggest_index = None
+
+    def _combo_suggestions_visible(self):
+        return bool(self.suggestions)
+
+    def _combo_selected_suggestion(self):
+        if self._combo_suggest_index is None:
+            return ""
+        return self.suggestions[self._combo_suggest_index]
+
+    def _combo_choose_category(self, name):
+        self.combo.set(name)
+        self.combo._replace_on_type = True
+        self.mode.set("existing")
+        self.new_entry.delete(0, "end")
+        self.combo._ta_seed = ""
+        self.combo["values"] = self._all_categories
+        self._combo_render_suggestions([])
+
     def _combo_unpost(self):                 # används av _combo_search
         self.popdown_open = False
         self.unposted += 1
@@ -141,6 +204,7 @@ class _Stub:
     _sync = P.ReviewDialog._sync
     _combo_show_hint = P.ReviewDialog._combo_show_hint
     _combo_prepare_search = P.ReviewDialog._combo_prepare_search
+    _combo_select_suggestion = P.ReviewDialog._combo_select_suggestion
     _combo_search = P.ReviewDialog._combo_search
     _combo_pick = P.ReviewDialog._combo_pick
     _combo_reset = P.ReviewDialog._combo_reset
@@ -186,7 +250,8 @@ def test_typing_p_filters_names_without_stealing_entry_focus():
     _type(stub, "p")
     assert stub.combo["values"] == ["Pilkington", "PARKERINGEN AYGSINN"]
     assert stub.mode.get() == "existing"
-    assert stub.posted == []                  # skriva öppnar inte popdown
+    assert stub.posted == []                  # skriva öppnar inte native popdown
+    assert stub.suggestions == ["Pilkington", "PARKERINGEN AYGSINN"]
     assert stub.combo._ta_seed == "p"
 
 
@@ -197,6 +262,7 @@ def test_typing_p_i_l_keeps_narrowing_to_pil():
     assert stub.combo["values"] == ["Pilkington", "PARKERINGEN AYGSINN"]
     _type(stub, "il")
     assert stub.combo["values"] == ["Pilkington"]
+    assert stub.suggestions == ["Pilkington"]
     assert stub.combo._ta_seed == "pil"
 
 
@@ -268,6 +334,21 @@ def test_popdown_row_selection_maps_to_the_filtered_category_name():
     stub._popdown_lb_path = lambda: ".combo.popdown.f.l"
 
     assert P.ReviewDialog._popdown_selected_name(stub) == "Utrymningsplan 2"
+
+
+def test_live_suggestions_support_arrow_navigation_and_enter_choice():
+    stub = _Stub()
+    stub.combo.text = "utrymningspla"
+    stub.suggestions = ["Utrymningsplan", "Utrymningsplan 2"]
+    stub._combo_suggest_list.items = list(stub.suggestions)
+
+    assert stub._combo_navigate(_key("Down")) == "break"
+    assert stub._combo_suggest_index == 0
+    assert stub._combo_navigate(_key("Down")) == "break"
+    assert stub._combo_suggest_index == 1
+    assert stub._combo_pick(_key("Return")) == "break"
+    assert stub.combo.get() == "Utrymningsplan 2"
+    assert stub.suggestions == []
 
 
 def test_dialog_enter_in_search_field_never_submits_the_review():
