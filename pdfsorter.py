@@ -3939,7 +3939,8 @@ class ReviewDialog:
         q = str(text or "").strip()
         if not q:
             antal = len(self._all_categories)
-            msg = (f"{antal} mappar · skriv för att filtrera; träffarna visas direkt."
+            msg = (f"{antal} mappar · skriv för att söka; Enter väljer; "
+                   "Esc visar alla."
                    if antal else
                    "Inga mappar än – skriv ett namn för att skapa en.")
             lbl.configure(text=msg)
@@ -3947,14 +3948,17 @@ class ReviewDialog:
         träffar, nivå = _rank_categories(q, self._all_categories)
         n = len(träffar)
         if nivå == "prefix":
-            msg = f"{n} träffar · fortsätt skriva, klicka eller välj med ↑/↓ + Enter."
+            msg = (f"{n} träffar · fortsätt skriva eller välj med ↑/↓ + Enter. "
+                   "Esc visar alla mappar.")
         elif nivå == "word":
             msg = (f"{n} mappar har ett ord som börjar med ”{q}” · "
-                   "välj aktivt med piltangenterna.")
+                   "välj aktivt med piltangenterna. Esc visar alla mappar.")
         elif nivå == "contains":
-            msg = f"{n} mappar innehåller ”{q}” · välj aktivt med ↑/↓."
+            msg = (f"{n} mappar innehåller ”{q}” · välj aktivt med ↑/↓. "
+                   "Esc visar alla mappar.")
         else:
-            msg = f"Ingen mapp matchar ”{q}” – Enter fyller i namnet som ny mapp."
+            msg = (f"Ingen mapp matchar ”{q}” – Enter fyller i namnet som ny "
+                   "mapp. Esc visar alla mappar.")
         lbl.configure(text=msg)
 
     def _combo_chosen(self, event=None) -> None:
