@@ -53,6 +53,27 @@ def test_tray_menu_has_manual_update_action_and_posts_it_to_ui(monkeypatch):
     assert checked == [True]
 
 
+def test_tray_tooltip_spells_out_watcher_state_and_review_count(monkeypatch):
+    class _Icon:
+        title = ""
+
+        def update_menu(self):
+            pass
+
+    monkeypatch.setattr(S, "make_icon_image", lambda *a, **k: object())
+    app = SimpleNamespace(
+        watcher=SimpleNamespace(running=True),
+        queue=[object(), object()],
+    )
+    tray = S.TrayIcon(app)
+    tray.icon = _Icon()
+
+    tray.refresh()
+
+    assert tray.icon.title == (
+        "ArkivPiloten · Bevakning PÅ · 2 väntar på granskning")
+
+
 def test_tray_update_shows_window_then_starts_manual_check():
     calls = []
     app = SimpleNamespace(

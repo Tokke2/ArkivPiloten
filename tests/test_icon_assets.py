@@ -25,6 +25,18 @@ def test_shared_master_icon_has_transparency_and_expected_sizes():
                 (128, 128), (256, 256)} <= set(image.ico.sizes())
 
 
+def test_active_tray_icon_has_a_high_contrast_status_badge():
+    from PIL import ImageChops
+
+    idle = S.make_icon_image(64, active=False)
+    active = S.make_icon_image(64, active=True)
+    assert idle is not None and active is not None
+    diff = ImageChops.difference(
+        idle.convert("RGB"), active.convert("RGB")).getbbox()
+    assert diff is not None
+    assert diff[0] >= 32 and diff[1] >= 32  # endast statusbrickan nere till höger
+
+
 def test_every_app_toplevel_is_explicitly_branded():
     lines = (ROOT / "pdfsorter.py").read_text(encoding="utf-8").splitlines()
     positions = [i for i, line in enumerate(lines) if "tk.Toplevel(" in line]

@@ -185,7 +185,7 @@ ICON_ACCENT = (214, 60, 55)        # röd PDF-markering
 #: De tre målmapparna. Olika kulör betyder olika kategori - det är hela
 #: poängen med appen, och det som gör ikonen läsbar när den är 16 punkter.
 ICON_TARGETS = ((245, 165, 36), (34, 170, 84), (214, 60, 55))
-ICON_ACTIVE = (34, 170, 84)        # grön prick när bevakningen är på
+ICON_ACTIVE = (34, 170, 84)        # grön statusbricka när bevakningen är på
 
 #: Memo-cache: ikonen renderas en gång per (storlek, aktiv, badge) och
 #: kopieras sedan - tray-refresh och dialoger slipper rita om i onödan.
@@ -326,8 +326,9 @@ def make_icon_image(size: int = 256, active: bool = False,
     Master-ikonen (ArkivPiloten.png) är primär så att exakt samma ikon
     syns överallt; den kodritade ikonen är reserv med samma motiv.
     Under 32 punkter används ett förenklat motiv - se `_icon_simple()`.
-    `active=True` lägger till en grön prick (bevakning på); `badge>0`
-    ritar köantalet som en liten bricka (design: synlig kö utan att öppna).
+    `active=True` lägger till en tydlig grön bricka med vit bock (bevakning
+    på); `badge>0` ritar köantalet som en liten bricka (synlig kö utan att
+    öppna).
     """
     try:
         from PIL import Image, ImageDraw, ImageEnhance
@@ -367,19 +368,21 @@ def make_icon_image(size: int = 256, active: bool = False,
                              outline=(240, 244, 255, 110),
                              width=max(1, size // 64))
 
-    # Pricken ritas EFTER nedskalningen, i målstorleken. Ritas den före
-    # krymper den med resten och blir en grumlig fläck; ritas den efter
-    # behåller den skarp kant och rimlig andel av ytan vid alla storlekar.
+    # Statusbrickan ritas EFTER nedskalningen, i målstorleken, så bocken
+    # förblir tydlig även i den lilla systemfältsikonen.
     if active:
         d = ImageDraw.Draw(img)
-        r_ = max(2.0, size * 0.17)
-        pad = max(1.0, size * 0.06)
+        r_ = max(3.5, size * 0.19)
+        pad = max(1.0, size * 0.05)
         cx = cy = size - pad - r_
         kant = max(1, int(size * 0.035))
         d.ellipse([cx - r_, cy - r_, cx + r_, cy + r_],
-                  fill=ICON_ACTIVE,
-                  outline=ICON_PAPER if size >= 20 else None,
-                  width=kant)
+                  fill=ICON_ACTIVE, outline=ICON_PAPER, width=kant)
+        d.line(
+            ((cx - r_ * 0.47, cy + r_ * 0.01),
+             (cx - r_ * 0.10, cy + r_ * 0.36),
+             (cx + r_ * 0.49, cy - r_ * 0.34)),
+            fill=ICON_PAPER, width=max(1, int(size * 0.06)), joint="curve")
     # Köbricka: liten varningsfärgad cirkel med siffran, nere till vänster.
     if badge > 0 and size >= 32:
         d3 = ImageDraw.Draw(img)
@@ -1754,8 +1757,11 @@ class TrayIcon:
             img = make_icon_image(64, active=running, badge=n)
             if img is not None:
                 self.icon.icon = img
-            self.icon.title = (f"{APP_NAME} - {n} väntar på granskning" if n
-                               else f"{APP_NAME}" + (" - bevakar" if running else ""))
+            status = "Bevakning PÅ" if running else "Bevakning AV"
+            delar = [APP_NAME, status]
+            if n:
+                delar.append(f"{n} väntar på granskning")
+            self.icon.title = " · ".join(delar)
             self.icon.update_menu()
         except Exception:
             pass
