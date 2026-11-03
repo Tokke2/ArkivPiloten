@@ -5271,6 +5271,12 @@ class App:
         except Exception:
             pass
         self.watcher: Optional[MultiFolderWatcher] = None
+        # Senaste aktivitet från bevakningen visas på handlingsraden. Tiderna
+        # gäller den här appkörningen; trådlås behövs eftersom varje mapp har
+        # en egen watcher-tråd.
+        self._watch_status_lock = threading.Lock()
+        self._watch_last_found: Optional[datetime] = None
+        self._watch_last_sorted: Optional[datetime] = None
         self.queue: List[Decision] = []          # osäkra filer som väntar
         self._queued_paths: set = set()
         self._busy = False
@@ -6055,9 +6061,15 @@ class App:
                                     command=self._toggle_watch)
         self.btn_watch.grid(row=0, column=1, pady=T.INNER)
 
-        self.lbl_watch = ttk.Label(actcard, text="●  Bevakning av",
-                                   style="CardMuted.TLabel")
-        self.lbl_watch.grid(row=0, column=2, sticky="w", padx=14)
+        watch_status = ttk.Frame(actcard, style="CardInner.TFrame")
+        watch_status.grid(row=0, column=2, sticky="w", padx=14)
+        self.lbl_watch = ttk.Label(watch_status, text="● Bevakning: AV",
+                                   style="PillMuted.TLabel")
+        self.lbl_watch.pack(anchor="w")
+        self.lbl_watch_activity = ttk.Label(
+            watch_status, text="Senast hittad: aldrig · autosorterad: aldrig",
+            style="CardMuted.TLabel")
+        self.lbl_watch_activity.pack(anchor="w", pady=(2, 0))
 
         # Tre siffror som svarar på "hur går det?" utan att man läser loggen.
         stats = ttk.Frame(actcard, style="CardInner.TFrame")
@@ -6808,10 +6820,47 @@ class App:
         self.lbl_watch.configure(
             text="● Bevakning: PÅ" if watching else "● Bevakning: AV",
             style="PillOk.TLabel" if watching else "PillMuted.TLabel")
+        self._refresh_watch_activity()
         if self.var_dry.get():
             self.pill_dry.grid()
         else:
             self.pill_dry.grid_remove()
+
+    def _watch_activity_text(self) -> str:
+        lock = getattr(self, "_watch_status_lock", None)
+        if lock is None:
+            found = getattr(self, "_watch_last_found", None)
+            sorted_at = getattr(self, "_watch_last_sorted", None)
+        else:
+            with lock:
+                found = self._watch_last_found
+                sorted_at = self._watch_last_sorted
+        found_text = tid_kort(found.isoformat()) if found else "aldrig"
+        sorted_text = tid_kort(sorted_at.isoformat()) if sorted_at else "aldrig"
+        return (f"Senast hittad: {found_text} · "
+                f"autosorterad: {sorted_text}")
+
+    def _refresh_watch_activity(self) -> None:
+        label = getattr(self, "lbl_watch_activity", None)
+        if label is not None:
+            label.configure(text=self._watch_activity_text())
+
+    def _note_watch_activity(self, *, found: bool = False,
+                             sorted_file: bool = False) -> None:
+        now = datetime.now()
+        lock = getattr(self, "_watch_status_lock", None)
+        if lock is None:
+            if found:
+                self._watch_last_found = now
+            if sorted_file:
+                self._watch_last_sorted = now
+        else:
+            with lock:
+                if found:
+                    self._watch_last_found = now
+                if sorted_file:
+                    self._watch_last_sorted = now
+        self._post(self._refresh_watch_activity)
 
     def _on_strictness(self, initial: bool = False) -> None:
         """Nivåvalet fyller i fälten och låser dem, utom vid "Egen"."""
@@ -7377,6 +7426,8 @@ class App:
                     f"[{zon}]{flersidig}",
                     "ok")
                 if from_watch:
+                    if not self.settings.get("dry_run", False):
+                        self._note_watch_activity(sorted_file=True)
                     self._post(self._sync_tray)
                     if not self.visible:
                         self._post(lambda n=name, c=best.name:
@@ -7472,6 +7523,7 @@ class App:
             session_log("bevaka", f"Ignorerade fil efter stoppad bevakning: {path}",
                         "info")
             return
+        self._note_watch_activity(found=True)
         session_log("bevaka", f"Ny stabil fil upptäckt: {path}")
         try:
             decision = self.engine.analyze(path)
