@@ -4785,14 +4785,15 @@ _UI_EN = {
     "Cache och lagring": "Cache and storage",
     "återställs automatiskt om appen behöver texten igen":
         "recreated automatically if the app needs the text again",
-    "Rensa cache automatiskt en gång per dygn": "Smart-clean cache once a day",
+    "Rensa cache automatiskt dagligen och vid avslut":
+        "Smart-clean cache daily and on exit",
     "Smartfilter: tar bort cache som inte använts på 30 dagar, skadade poster vid läsning och äldsta poster över 1 500 filer / 512 MB.":
         "Smart filter: removes cache unused for 30 days, damaged entries "
         "when read, and oldest entries above 1,500 files / 512 MB.",
     "Rensa cache nu": "Clean cache now",
     "Automatisk smart rensning är avstängd.": "Automatic smart cleanup is off.",
-    "Ingen smart rensning ännu · körs automatiskt dagligen.":
-        "No smart cleanup yet · runs every 24 hours.",
+    "Ingen smart rensning ännu · körs dagligen och vid avslut.":
+        "No smart cleanup yet · runs daily and on exit.",
     "Starta bevakningen direkt": "Start watching immediately",
     "Starta minimerad i systemfältet": "Start minimized to tray",
     "Visa ikon i systemfältet": "Show tray icon",
@@ -6606,7 +6607,7 @@ class App:
         self.var_cache_cleanup = tk.BooleanVar(
             value=self.settings.get("cache_cleanup_enabled", True))
         ttk.Checkbutton(
-            cacheb, text="Rensa cache automatiskt en gång per dygn",
+            cacheb, text="Rensa cache automatiskt dagligen och vid avslut",
             style="Card.TCheckbutton", variable=self.var_cache_cleanup,
             command=self._toggle_cache_cleanup).grid(
                 row=0, column=0, columnspan=2, sticky="w",
@@ -9340,17 +9341,17 @@ class App:
                     "Automatisk smart rensning är avstängd.")
         senast = str(self.settings.get("last_cache_cleanup", "") or "")
         if not senast:
-            return ("No smart cleanup yet · runs every 24 hours." if engelska
-                    else "Ingen smart rensning ännu · körs automatiskt dagligen.")
+            return ("No smart cleanup yet · runs daily and on exit." if engelska
+                    else "Ingen smart rensning ännu · körs dagligen och vid avslut.")
         if engelska:
             try:
                 visning = datetime.fromisoformat(senast).strftime("%Y-%m-%d %H:%M")
             except ValueError:
                 visning = senast
             return (f"Last smart cleanup: {visning} · "
-                    "automatic cleanup every 24 hours.")
+                    "runs daily and on exit.")
         return (f"Senast smart rensad: {tid_kort(senast)} · "
-                "automatisk rensning var 24:e timme.")
+                "automatisk rensning dagligen och vid avslut.")
 
     def _refresh_cache_cleanup_status(self) -> None:
         lbl = getattr(self, "lbl_cache_cleanup", None)
@@ -9543,6 +9544,29 @@ class App:
 
         threading.Thread(target=work, daemon=True,
                          name="cache-cleanup").start()
+
+    def _cache_cleanup_on_exit(self) -> None:
+        """Smart-trim persistent cache at real app exit (not tray hiding)."""
+        if not self.settings.get("cache_cleanup_enabled", True):
+            self._h("cache", "Smart cache-rensning vid avslut avstängd")
+            return
+        try:
+            result = DISK_CACHE.cleanup()
+            TEXT_CACHE.clear()
+            self.settings["last_cache_cleanup"] = now_iso()
+            save_settings(self.settings)
+            removed = result.get("removed_age", 0) + result.get("removed_limit", 0)
+            mb = result.get("removed_bytes", 0) / (1024 * 1024)
+            kvar = result.get("remaining", 0)
+            errors = result.get("errors", 0)
+            message = (f"Smart cache-rensning vid avslut: {removed} poster / "
+                       f"{mb:.1f} MB bort, {kvar} cacheposter kvar")
+            if errors:
+                message += f" ({errors} kunde inte tas bort)"
+            self._h("cache", message, "warn" if errors else "ok")
+        except Exception as exc:
+            self._h("cache", f"Smart cache-rensning vid avslut misslyckades: "
+                    f"{type(exc).__name__}: {exc}", "warn")
 
     def _cache_cleanup_finished(self, result: Dict[str, int], error: str) -> None:
         self._cache_cleanup_running = False
@@ -10573,6 +10597,10 @@ class App:
                 session_error("avslut", exc)
         except Exception as exc:
             session_error("avslut", exc)
+        try:
+            self._cache_cleanup_on_exit()
+        except Exception as exc:
+            session_error("cache-avslut", exc)
         if self.tray:
             self.tray.stop()
             self.tray = None

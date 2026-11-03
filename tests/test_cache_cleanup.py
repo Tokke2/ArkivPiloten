@@ -187,3 +187,49 @@ def test_daily_tick_uses_persisted_time_and_respects_setting():
     assert "last_cache_cleanup" in text
     assert "disk_cache_cleanup_due" in text
     assert "_rensa_cache" in text
+
+
+def test_exit_runs_smart_cleanup_and_records_completion(monkeypatch):
+    calls = []
+    app = object.__new__(P.App)
+    app.settings = {"cache_cleanup_enabled": True}
+    app._h = lambda *args: calls.append(args)
+    monkeypatch.setattr(P, "DISK_CACHE", SimpleNamespace(cleanup=lambda: {
+        "removed_age": 2, "removed_limit": 1, "removed_bytes": 3 * 1024 * 1024,
+        "remaining": 7, "errors": 0,
+    }))
+    cleared = []
+    monkeypatch.setattr(P.TEXT_CACHE, "clear", lambda: cleared.append(True))
+    saved = []
+    monkeypatch.setattr(P, "save_settings", lambda settings: saved.append(dict(settings)))
+    monkeypatch.setattr(P, "now_iso", lambda: "2026-11-03T12:00:00")
+
+    P.App._cache_cleanup_on_exit(app)
+
+    assert app.settings["last_cache_cleanup"] == "2026-11-03T12:00:00"
+    assert saved and saved[0]["last_cache_cleanup"] == "2026-11-03T12:00:00"
+    assert cleared == [True]
+    assert "3 poster / 3.0 MB bort" in calls[-1][1]
+
+
+def test_exit_cleanup_respects_automatic_cleanup_toggle(monkeypatch):
+    app = object.__new__(P.App)
+    app.settings = {"cache_cleanup_enabled": False}
+    calls = []
+    app._h = lambda *args: calls.append(args)
+    monkeypatch.setattr(P, "DISK_CACHE", SimpleNamespace(
+        cleanup=lambda: (_ for _ in ()).throw(AssertionError("must not run"))))
+
+    P.App._cache_cleanup_on_exit(app)
+
+    assert calls == [("cache", "Smart cache-rensning vid avslut avstängd")]
+
+
+def test_real_shutdown_invokes_exit_cleanup():
+    source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    app = next(node for node in tree.body
+               if isinstance(node, ast.ClassDef) and node.name == "App")
+    close = next(node for node in app.body
+                 if isinstance(node, ast.FunctionDef) and node.name == "_on_close")
+    assert "_cache_cleanup_on_exit" in ast.unparse(close)
