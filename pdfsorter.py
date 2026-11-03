@@ -2192,7 +2192,12 @@ class DiskTextCache:
             try:
                 with open(cache_file, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
-                if not isinstance(data, dict) or not data.get("text"):
+                try:
+                    from pdfsorter_read import EXTRACTION_CACHE_SCHEMA
+                except ImportError:
+                    EXTRACTION_CACHE_SCHEMA = None
+                if (not isinstance(data, dict) or not data.get("text")
+                        or data.get("extract_schema") != EXTRACTION_CACHE_SCHEMA):
                     self._discard(cache_file)
                     return None
                 extraction = Extraction.from_cache_dict(path, data)
@@ -2367,6 +2372,16 @@ class SortEngine:
         # skrivning per sekund; resten sparas vid flush_rules().
         self._last_rules_save = 0.0
         self._rules_dirty = False
+        # Innehållsindex byggs en gång per målmapp och uppdateras efter varje
+        # lyckad sortering. Det gör att olika filnamn/kategorier ändå jämförs
+        # utan att hasha hela arkivet för varje inkommande PDF.
+        self._content_index_root: Optional[Path] = None
+        self._content_index: Dict[int, List[Tuple[Path, Tuple[int, int]]]] = {}
+        self._content_hash_cache: Dict[Path, Tuple[Tuple[int, int], str]] = {}
+        self._content_fingerprint_index: Dict[str, List[Path]] = {}
+        self._content_fingerprint_path: Optional[Path] = None
+        self._persisted_content_fingerprints: Optional[Dict[str, Dict[str, Any]]] = None
+        self._content_index_at = 0.0
 
     def _rules_save(self) -> None:
         now = time.time()
@@ -2406,6 +2421,18 @@ class SortEngine:
             pass
         with LogContext("tid", f"analys {path.name}"):
             ext = read_pdf(path, self.settings)
+            if getattr(ext, "ocr_pages", None):
+                page_notes = []
+                for page in ext.ocr_pages:
+                    number = page.get("page", len(page_notes) + 1)
+                    if int(page.get("chars", 0) or 0) <= 0:
+                        page_notes.append(f"sida {number}: ingen text")
+                    else:
+                        confidence = float(page.get("confidence", -1) or -1)
+                        score = f"{confidence:.0f}%" if confidence >= 0 else "okänd konfidens"
+                        page_notes.append(f"sida {number}: {score}")
+                self.log(f"OCR per sida för {path.name}: "
+                         + "; ".join(page_notes), "info")
             # Säkerhetsrundan 2026-10-16: fingeravtryck på exakt de byte
             # som analyserades. apply() vägrar flytta filen om den hunnit
             # ändras sedan dess (skanner/synk som fortfarande skriver) -
@@ -2420,7 +2447,17 @@ class SortEngine:
                 return Decision(path, ext, [], "ignored",
                                 f"Ignorerad: {reason}")
             with self.lock:
-                return decide(self.rules, ext, self.settings)
+                decision = decide(self.rules, ext, self.settings)
+            breaks = getattr(ext, "document_breaks", [])
+            if breaks and decision.status not in ("error", "ignored"):
+                plats = ", ".join(str(page) for page in breaks)
+                varning = ("PDF:en verkar innehålla flera dokument; "
+                           f"möjliga nya dokument börjar på sida {plats}. "
+                           "Granska och dela PDF:en före sortering.")
+                decision.status = "ask"
+                decision.reason = (f"{decision.reason} · {varning}"
+                                   if decision.reason else varning)
+            return decision
 
     # -- verkställ ---------------------------------------------------------
     def subfolder_for(self, extraction: Extraction,
@@ -2489,6 +2526,168 @@ class SortEngine:
         except OSError:
             return True
 
+    @staticmethod
+    def _content_signature(path: Path) -> Tuple[int, int]:
+        st = path.stat()
+        return st.st_size, getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+
+    def _load_content_fingerprints(self) -> Dict[str, Dict[str, Any]]:
+        if self._persisted_content_fingerprints is not None:
+            return self._persisted_content_fingerprints
+        try:
+            self._content_fingerprint_path = json_dir() / "content_fingerprints.json"
+            data = _read_json(self._content_fingerprint_path, {})
+        except Exception:
+            # Dubblettindexet är en optimering; nekad config-sökväg eller
+            # korrupt cache får aldrig stoppa själva filsorteringen.
+            self._content_fingerprint_path = None
+            data = {}
+        entries = data.get("entries", {}) if isinstance(data, dict) else {}
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        if isinstance(entries, dict):
+            for path, item in entries.items():
+                if (isinstance(path, str) and isinstance(item, dict)
+                        and re.fullmatch(r"[0-9a-f]{64}",
+                                         str(item.get("sha256", "")))):
+                    try:
+                        cleaned[path] = {
+                            "size": int(item["size"]),
+                            "mtime_ns": int(item["mtime_ns"]),
+                            "sha256": str(item["sha256"]),
+                        }
+                    except (KeyError, TypeError, ValueError):
+                        continue
+        self._persisted_content_fingerprints = cleaned
+        return cleaned
+
+    def _save_content_fingerprints(self) -> None:
+        entries = self._load_content_fingerprints()
+        if self._content_fingerprint_path is None:
+            return
+        try:
+            _write_json(self._content_fingerprint_path,
+                        {"schema_version": 1, "entries": entries})
+        except Exception as exc:
+            self.log(f"Kunde inte spara dubblettindexet: {exc}", "warn")
+
+    def _refresh_content_index(self, out_root: Path, force: bool = False) -> None:
+        """Indexera PDF-sökvägar efter storlek; SHA-256 räknas först vid behov."""
+        root = Path(out_root).resolve()
+        now = time.monotonic()
+        if (not force and self._content_index_root == root
+                and now - self._content_index_at < 15.0):
+            return
+        index: Dict[int, List[Tuple[Path, Tuple[int, int]]]] = {}
+        fingerprint_index: Dict[str, List[Path]] = {}
+        persisted = self._load_content_fingerprints()
+        try:
+            if root.is_dir():
+                for base, _dirs, names in os.walk(root):
+                    for name in names:
+                        if Path(name).suffix.casefold() != ".pdf":
+                            continue
+                        path = Path(base) / name
+                        try:
+                            sig = self._content_signature(path)
+                            index.setdefault(sig[0], []).append((path, sig))
+                            key = str(path.resolve())
+                            stored = persisted.get(key)
+                            if stored and (stored["size"], stored["mtime_ns"]) == sig:
+                                digest = stored["sha256"]
+                                self._content_hash_cache[path] = (sig, digest)
+                                fingerprint_index.setdefault(digest, []).append(path)
+                        except OSError:
+                            continue
+        except OSError:
+            pass
+        self._content_index_root = root
+        self._content_index = index
+        self._content_fingerprint_index = fingerprint_index
+        self._content_index_at = now
+        live = {path for entries in index.values() for path, _sig in entries}
+        self._content_hash_cache = {
+            path: entry for path, entry in self._content_hash_cache.items()
+            if path in live
+        }
+
+    def _cached_sha256(self, path: Path, signature: Tuple[int, int]) -> str:
+        hit = self._content_hash_cache.get(path)
+        if hit and hit[0] == signature:
+            return hit[1]
+        digest = sha256_file(path)
+        self._content_hash_cache[path] = (signature, digest)
+        return digest
+
+    def _find_content_duplicate(self, out_root: Path, source: Path
+                                ) -> Tuple[Optional[Path], Optional[str]]:
+        """Hitta identiskt PDF-innehåll var som helst i målmappens träd."""
+        try:
+            src_sig = self._content_signature(source)
+            src_hash = sha256_file(source)
+        except OSError:
+            return None, None
+        self._refresh_content_index(out_root)
+        for candidate in self._content_fingerprint_index.get(src_hash, []):
+            if candidate.exists() and candidate.resolve() != source.resolve():
+                return candidate, src_hash
+        src_resolved = source.resolve()
+        for candidate, _indexed_sig in self._content_index.get(src_sig[0], []):
+            try:
+                if candidate.resolve() == src_resolved:
+                    continue
+                current_sig = self._content_signature(candidate)
+                if current_sig[0] != src_sig[0]:
+                    continue
+                digest = self._cached_sha256(candidate, current_sig)
+                if digest == src_hash:
+                    return candidate, src_hash
+            except OSError:
+                continue
+        return None, src_hash
+
+    def _remember_content_file(self, path: Optional[Path], digest: str = "") -> None:
+        if not path:
+            return
+        try:
+            path = Path(path).resolve()
+            sig = self._content_signature(path)
+            if digest:
+                self._content_hash_cache[path] = (sig, digest)
+                persisted = self._load_content_fingerprints()
+                persisted[str(path)] = {
+                    "size": sig[0], "mtime_ns": sig[1], "sha256": digest,
+                }
+                self._save_content_fingerprints()
+                self._content_fingerprint_index.setdefault(digest, []).append(path)
+            if self._content_index_root is not None:
+                bucket = self._content_index.setdefault(sig[0], [])
+                if not any(p == path for p, _old in bucket):
+                    bucket.append((path, sig))
+        except OSError:
+            pass
+
+    def _forget_content_file(self, path: Path) -> None:
+        try:
+            resolved = Path(path).resolve()
+        except OSError:
+            resolved = Path(path)
+        persisted = self._load_content_fingerprints()
+        persisted.pop(str(resolved), None)
+        self._content_hash_cache.pop(resolved, None)
+        for digest, paths in list(self._content_fingerprint_index.items()):
+            remaining = [candidate for candidate in paths if candidate != resolved]
+            if remaining:
+                self._content_fingerprint_index[digest] = remaining
+            else:
+                self._content_fingerprint_index.pop(digest, None)
+        for size, entries in list(self._content_index.items()):
+            remaining = [entry for entry in entries if entry[0].resolve() != resolved]
+            if remaining:
+                self._content_index[size] = remaining
+            else:
+                self._content_index.pop(size, None)
+        self._save_content_fingerprints()
+
     def _place_file(self, src: Path, out_root: Path, folder: str,
                     action: str, on_conflict: str, dry_run: bool,
                     subfolder: str) -> Tuple[bool, str, Optional[Path]]:
@@ -2538,6 +2737,8 @@ class SortEngine:
             on_conflict = s.get("on_conflict", "rename")
             conflict = ""
             same_content_file: Optional[Path] = None
+            source_hash = ""
+            remove_duplicate_after_place = False
             if not s.get("dry_run", False):
                 dest_dir = Path(s["output_dir"]) / safe_folder_name(folder)
                 if sub:
@@ -2547,27 +2748,19 @@ class SortEngine:
                 namnkrock = dest_dir / decision.path.name
                 if namnkrock.exists():
                     conflict = "name"
-                elif decision.path.exists() and dest_dir.is_dir():
-                    # Innehållsdubblett med annat namn: samma storlek är
-                    # förfiltret, hashen är beviset.
-                    try:
-                        src_st = decision.path.stat()
-                        src_sha = sha256_file(decision.path)
-                        for cand in dest_dir.iterdir():
-                            try:
-                                if (cand.is_file()
-                                        and cand.stat().st_size == src_st.st_size
-                                        and sha256_file(cand) == src_sha):
-                                    same_content_file = cand
-                                    conflict = "content"
-                                    break
-                            except OSError:
-                                continue
-                    except OSError:
-                        pass
+                elif decision.path.exists():
+                    # Innehållsdubblett var som helst under vald målmapp,
+                    # även om filnamn, kategori eller årsmapp skiljer sig.
+                    same_content_file, source_hash = self._find_content_duplicate(
+                        Path(s["output_dir"]), decision.path)
+                    if same_content_file is not None:
+                        conflict = "content"
                 if conflict:
+                    dialog_target = (same_content_file
+                                     if conflict == "content" and same_content_file
+                                     else namnkrock)
                     if self.conflict_asker is not None:
-                        svar = self.conflict_asker(decision.path, namnkrock, conflict)
+                        svar = self.conflict_asker(decision.path, dialog_target, conflict)
                     else:
                         svar = "rename"
                         self.log(f"Dubblett upptäckt ({conflict}) - "
@@ -2576,12 +2769,14 @@ class SortEngine:
                         self.stats["left"] += 1
                         return False, "Överhoppad - dubblettfrågan avbröts"
                     if svar == "replace":
-                        on_conflict = "overwrite"
                         if conflict == "content" and same_content_file is not None:
-                            try:
-                                same_content_file.unlink()
-                            except OSError:
-                                on_conflict = "rename"
+                            # Den nya kopian måste finnas på plats innan den
+                            # gamla tas bort. Ett lås/full disk får aldrig
+                            # göra att användarens enda kopia försvinner.
+                            remove_duplicate_after_place = True
+                            on_conflict = "rename"
+                        else:
+                            on_conflict = "overwrite"
                     else:
                         on_conflict = "rename"
 
@@ -2598,11 +2793,22 @@ class SortEngine:
                 else:
                     self.stats["error"] += 1
                 return False, msg
+            if (remove_duplicate_after_place and same_content_file is not None
+                    and Path(target).resolve() != same_content_file.resolve()):
+                try:
+                    same_content_file.unlink()
+                    self._forget_content_file(same_content_file)
+                except OSError as exc:
+                    self.log(f"Ersättningen är sparad men den äldre dubbletten "
+                             f"kunde inte tas bort ({same_content_file.name}): {exc}",
+                             "warn")
             if not s.get("dry_run", False) and s.get("tag_pdf_metadata", True):
                 try:
                     tag_pdf_metadata(Path(target), category)
                 except Exception:
                     pass
+            if not s.get("dry_run", False):
+                self._remember_content_file(Path(target), source_hash)
             # Filen ligger inte kvar på sin gamla plats - släpp den ur cachen
             # så att minnet inte fylls av poster som aldrig kan träffa igen.
             TEXT_CACHE.forget(decision.path)
@@ -3557,6 +3763,47 @@ class ReviewDialog:
             ttk.Label(head, text=explanation, style="CardMuted.TLabel",
                       wraplength=840, justify="left").grid(
                           row=5, column=0, columnspan=2, sticky="w",
+                          padx=16, pady=(2, 10))
+
+        next_row = 6
+        split_pages = getattr(ext, "document_breaks", [])
+        if split_pages:
+            page_list = ", ".join(str(page) for page in split_pages)
+            ttk.Label(
+                head,
+                text=("⚠ PDF:en verkar innehålla flera dokument. "
+                      f"Möjliga nya dokument börjar på sida {page_list}. "
+                      "Öppna PDF:en och granska/dela vid dessa sidgränser "
+                      "innan du sorterar hela filen."),
+                style="PillWarn.TLabel", wraplength=840, justify="left").grid(
+                    row=next_row, column=0, columnspan=2, sticky="w",
+                    padx=16, pady=(4, 8))
+            next_row += 1
+        ocr_pages = getattr(ext, "ocr_pages", []) or []
+        if ocr_pages:
+            details = []
+            for page in ocr_pages:
+                number = int(page.get("page", len(details) + 1) or len(details) + 1)
+                chars = int(page.get("chars", 0) or 0)
+                confidence = float(page.get("confidence", -1) or -1)
+                if chars <= 0:
+                    line = f"Sida {number}: ingen läsbar text hittades"
+                else:
+                    score = f"{confidence:.0f}%" if confidence >= 0 else "okänd konfidens"
+                    snippet = " ".join(str(page.get("preview", "")).split())[:100]
+                    line = f"Sida {number}: {score} · {snippet}"
+                rotation = int(page.get("rotation", 0) or 0)
+                if rotation:
+                    line += f" · automatisk rotation {rotation}° rättad"
+                details.append(line)
+            scanned = len(ocr_pages)
+            total_pages = int(getattr(ext, "page_count", 0) or 0)
+            heading = (f"OCR per sida ({scanned} av {total_pages} sidor):"
+                       if total_pages and scanned < total_pages else "OCR per sida:")
+            ttk.Label(head, text=heading + "\n" + "\n".join(details),
+                      style="CardMuted.TLabel", wraplength=840,
+                      justify="left").grid(
+                          row=next_row, column=0, columnspan=2, sticky="w",
                           padx=16, pady=(2, 10))
 
         ttk.Separator(self._all).grid(row=1, column=0, sticky="ew", padx=14, pady=(10, 0))
@@ -4697,7 +4944,7 @@ class ConflictDialog:
         vad = ("En fil med samma namn finns redan i målmappen."
                if kind == "name" else
                "En fil med IDENTISKT innehåll (SHA-256) finns redan i "
-               "målmappen, fast med annat namn.")
+               "arkivmappen, fast med annat namn eller i en annan undermapp.")
         tk.Label(self.win,
                  text=f"{vad}\n\n"
                       f"  Ny fil:      {src.name}\n"

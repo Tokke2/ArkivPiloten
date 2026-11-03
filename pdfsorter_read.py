@@ -61,6 +61,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 #: Programmets version. Höjs vid varje leverans.
 VERSION = "1.4.14"
+EXTRACTION_CACHE_SCHEMA = 2
 
 __all__ = [
     # extraktion
@@ -228,6 +229,12 @@ class Extraction:
     #: Medelkonfidens (0-100) från senaste OCR-körningen; -1 = ingen OCR.
     #: Underlag för dialogens procentskala och för --status/--diag.
     ocr_conf: float = -1.0
+    #: OCR-resultat per renderad sida (sidnummer, konfidens, tecken och provtext).
+    #: Sidor utan text behålls så att tomma OCR-resultat blir synliga.
+    ocr_pages: List[Dict[str, Any]] = field(default_factory=list)
+    #: Kort sidstart per extraherad sida, endast för heuristik för sammanfogade
+    #: dokument. Själva fulltexten finns redan i `text` och dupliceras inte.
+    page_starts: List[str] = field(default_factory=list)
     #: Flersidig matchning: token -> antal sidor den förekommer på, bara
     #: tokens som upprepas på minst två sidor (brevhuvud/sidfot som åter-
     #:kommer = starkt avsändarbevis). Tom vid t.ex. pdfminer (inga sidor).
@@ -264,6 +271,11 @@ class Extraction:
         return "\n".join(p for p in (self.text, meta, self.filename_text) if p)
 
     @property
+    def document_breaks(self) -> List[int]:
+        """Troliga sidnummer där ett nytt dokument börjar, som 1-baserade tal."""
+        return _possible_document_breaks(self.page_starts)
+
+    @property
     def page_header(self) -> str:
         """Text i sidornas överkant - logotyp och firmanamn."""
         return self.metadata.get("_page_header", "")
@@ -278,6 +290,7 @@ class Extraction:
     def to_cache_dict(self) -> Dict[str, Any]:
         """Fullständigt serialiserat tillstånd för bestående textcache."""
         return {
+            "extract_schema": EXTRACTION_CACHE_SCHEMA,
             "text": self.text,
             "filename_text": self.filename_text,
             "metadata": {k: v for k, v in self.metadata.items()
@@ -287,6 +300,8 @@ class Extraction:
             "used_ocr": self.used_ocr,
             "ocr_logo": self.ocr_logo,
             "ocr_conf": self.ocr_conf,
+            "ocr_pages": self.ocr_pages,
+            "page_starts": self.page_starts,
             "doc_date": self.doc_date.isoformat() if self.doc_date else None,
             "date_source": self.date_source,
             "token_pages": {t: int(c) for t, c in (self.token_pages or {}).items()},
@@ -307,6 +322,15 @@ class Extraction:
         except (TypeError, ValueError):
             ext.ocr_conf = -1.0
         try:
+            ext.ocr_pages = [dict(row) for row in (d.get("ocr_pages") or [])
+                             if isinstance(row, dict)]
+        except (TypeError, ValueError):
+            ext.ocr_pages = []
+        try:
+            ext.page_starts = [str(x) for x in (d.get("page_starts") or [])]
+        except (TypeError, ValueError):
+            ext.page_starts = []
+        try:
             ext.doc_date = (date.fromisoformat(d["doc_date"])
                             if d.get("doc_date") else None)
         except (ValueError, TypeError):
@@ -323,6 +347,39 @@ class Extraction:
         return (f"<Extraction {self.path.name}: {len(self.text)} tkn, "
                 f"ocr={self.used_ocr}, conf={self.ocr_conf:.0f}, "
                 f"datum={self.doc_date}>")
+
+
+def _possible_document_breaks(page_starts: List[str]) -> List[int]:
+    """Konservativ signal för PDF:er som verkar innehålla flera fakturor.
+
+    Kräver både en dokumenttyp i sidans inledning och ett tydligt, märkt
+    dokumentnummer. Upprepade sidhuvuden med samma nummer ger därför inte
+    förslag om delning. Resultatet är 1-baserade sidnummer.
+    """
+    title = re.compile(
+        r"\b(?:faktura|invoice|kvitto|receipt|kreditfaktura|credit\s+note|"
+        r"orderbekräftelse|orderbekraftelse|purchase\s+order|offert)\b", re.I)
+    identifier = re.compile(
+        r"\b(?:faktura(?:nummer|nr)?|invoice(?:\s*(?:number|no\.?|#))?|"
+        r"kvitto(?:nummer|nr)?|order(?:nummer|nr)?|credit\s+note(?:\s*no\.?)?)"
+        r"[ \t]*[:#.]?[ \t]*([A-Z0-9][A-Z0-9./_-]{2,})", re.I)
+    previous_id = None
+    breaks = []
+    for index, raw in enumerate(page_starts or []):
+        start = "\n".join(line.strip() for line in str(raw).splitlines()
+                           if line.strip())[:1400]
+        lines = start.splitlines()[:10]
+        intro = "\n".join(lines)
+        if not title.search(intro):
+            continue
+        match = identifier.search(intro)
+        if not match:
+            continue
+        doc_id = re.sub(r"[^a-z0-9]", "", match.group(1).casefold())
+        if previous_id is not None and doc_id != previous_id:
+            breaks.append(index + 1)
+        previous_id = doc_id
+    return breaks
 
 
 GENERIC_META = {
@@ -501,6 +558,11 @@ def _x_pymupdf(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, in
                 footer_txt.append(bottom)
 
     text = _clean("\n".join(chunks))
+    meta["_page_starts"] = json.dumps([
+        "\n".join(line.strip() for line in page.splitlines()
+                    if line.strip())[:1200]
+        for page in sidtexter
+    ], ensure_ascii=False)
 
     # Sidhuvud/sidfot från ALLA sidor (ANVÄNDARORDER: matcha på alla blad):
     # avsändarens org.nr upprepas i sidfoten på varje sida, så deduplicerade
@@ -548,6 +610,11 @@ def _x_pypdf(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, int]
             chunks.append(reader.pages[i].extract_text() or "")
         except Exception:
             chunks.append("")
+    meta["_page_starts"] = json.dumps([
+        "\n".join(line.strip() for line in page.splitlines()
+                    if line.strip())[:1200]
+        for page in chunks
+    ], ensure_ascii=False)
     tp = token_page_counts(chunks)
     if tp:
         meta["_token_pages"] = json.dumps(tp, ensure_ascii=False)
@@ -705,36 +772,38 @@ def _binarize(img):
 
 
 def _deskew_angle(img, max_angle: float = 5.0, steps: int = 11) -> float:
-    """Uppskatta sidans skevhet i grader.
+    """Uppskatta sidans skevhet och finjustera vinkeln i cirka 0,25° steg.
 
-    Enkel metod utan OpenCV: rotera en nedskalad kopia i några vinklar och
-    välj den vars horisontella projektionsprofil har högst varians (jämna
-    textrader ger höga, tydliga toppar). Returnerar 0.0 när inget kan mätas.
+    En nedskalad kopia roteras och den med tydligast horisontell
+    projektionsprofil väljs. Grovsökningen hittar intervallet; en andra,
+    smal sökning minskar kvarvarande skevhet utan OpenCV.
     """
     try:
         from PIL import Image
-        # Fort: mät på en liten kopia, inte på hela sidan.
         test = img
         if test.width > 700:
             test = test.resize((700, int(test.height * 700 / test.width)),
                                Image.BILINEAR)
         gray = test.convert("L")
         h = gray.size[1]
-        half = steps // 2
-        best_angle, best_var = 0.0, -1.0
-        for i in range(steps):
-            a = max_angle * (i - half) / half
-            rot = gray.rotate(a, resample=Image.BILINEAR, expand=False,
+
+        def score(angle: float) -> float:
+            rot = gray.rotate(angle, resample=Image.BILINEAR, expand=False,
                               fillcolor=255)
-            # Radprofilen i C-fart: en BOX-nedskalning till 1 pixel bredd är
-            # exakt radmedlen - variansen över dem är projektionsvariansen.
-            # (Den gamla pixelslingan i Python tog sekunder per sida.)
-            vals = [255 - b for b in rot.resize((1, h), Image.BOX).tobytes()]
+            vals = [255 - b for b in
+                    rot.resize((1, h), Image.BOX).tobytes()]
             mean = sum(vals) / len(vals)
-            var = sum((v - mean) ** 2 for v in vals) / len(vals)
-            if var > best_var:
-                best_var, best_angle = var, a
-        return best_angle
+            return sum((v - mean) ** 2 for v in vals) / len(vals)
+
+        steps = max(3, int(steps) | 1)
+        half = steps // 2
+        coarse_step = max_angle / half
+        coarse = [coarse_step * (i - half) for i in range(steps)]
+        best_angle = max(coarse, key=score)
+        fine_step = coarse_step / 4
+        fine = [best_angle + fine_step * (i - 4) for i in range(9)]
+        best_angle = max(fine, key=score)
+        return max(-max_angle, min(max_angle, best_angle))
     except Exception:
         return 0.0
 
@@ -833,19 +902,35 @@ def _ocr_pass(img, langs: str, cfg: str, pytesseract) -> Tuple[float, str]:
             return 0.0, ""
 
 
-def _run_ocr(path: Path, max_pages: int, language: str, quality: str = "high",
-             dpi: int = 300) -> str:
+def _run_ocr_detailed(path: Path, max_pages: int, language: str,
+                      quality: str = "high", dpi: int = 300
+                      ) -> Tuple[str, float, List[Dict[str, Any]]]:
     try:
         import pytesseract
     except Exception:
-        return "", -1.0   # OCR inte installerat - tyst reserv, ingen krasch
+        return "", -1.0, []   # OCR inte installerat - tyst reserv, ingen krasch
     exe = tesseract_binary()
     if exe:
         pytesseract.pytesseract.tesseract_cmd = exe
     langs = _resolve_langs(pytesseract, language)
     images = _render_pages(path, max_pages, dpi=dpi)
     if not images:
-        return "", -1.0
+        return "", -1.0, []
+
+    def _orient(img):
+        """Rätta 90-gradersrotation på OCR-kopian när Tesseract är säker."""
+        try:
+            data = _tess_call(pytesseract.image_to_osd, img, "osd", "--psm 0",
+                              output_type=pytesseract.Output.DICT)
+            angle = int(data.get("rotate", 0) or 0) % 360
+            confidence = float(data.get("orientation_conf", 0) or 0)
+            if angle in (90, 180, 270) and confidence >= 2.0:
+                # Tesseract rapporterar hur mycket bilden ska roteras medurs;
+                # PIL:s positiva vinkel går moturs.
+                return img.rotate((360 - angle) % 360, expand=True), angle
+        except Exception:
+            pass  # OSD-data kan saknas; använd originalets orientering.
+        return img, 0
 
     def ocr_one(img):
         """En sida, flera konfigurationer, bästa konfidens vinner (REQ-N5):
@@ -854,9 +939,12 @@ def _run_ocr(path: Path, max_pages: int, language: str, quality: str = "high",
         för LSTM:n."""
         skapade = [img]
         try:
-            # deskew endast i "high" (snabbhet): standardläget hoppar över
-            # skevhetsanalysen, som är den dyraste förbehandlingsdelen.
-            pre = _preprocess(img, quality, do_deskew=(quality == "high"))
+            oriented, rotation = _orient(img)
+            if oriented is not img:
+                skapade.append(oriented)
+            # Rätvinklig orientering korrigeras före kontrast/deskew. Alla
+            # transformationer gäller bara renderad OCR-bild, aldrig PDF:en.
+            pre = _preprocess(oriented, quality, do_deskew=True)
             skapade.append(pre)
             passes = [(pre, "--oem 1 --psm 3")]
             if quality == "high":
@@ -885,9 +973,9 @@ def _run_ocr(path: Path, max_pages: int, language: str, quality: str = "high",
                 komb = score + min(len(text), 2000) * 0.01
                 if komb > best_score:
                     best_score, best_text = komb, text
-            return best_text, best_score
+            return best_text, best_score, rotation
         except Exception:
-            return "", -1.0
+            return "", -1.0, 0
         finally:
             for im in skapade:
                 try:
@@ -903,26 +991,40 @@ def _run_ocr(path: Path, max_pages: int, language: str, quality: str = "high",
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="pdfsorter-ocr") as pool:
         futs = [pool.submit(ocr_one, im) for im in images]
-        texts: List[str] = []
-        confs: List[float] = []
+        results: List[Tuple[str, float, int]] = []
         for f in futs:
             # 90 s per sida: en patologisk skanning får aldrig hänga appen.
             try:
-                txt, sc = f.result(timeout=90)
+                txt, sc, rotation = f.result(timeout=90)
             except Exception:
-                txt, sc = "", -1.0
+                txt, sc, rotation = "", -1.0, 0
                 f.cancel()
-            if txt:
-                texts.append(txt)
-                if sc > 0:
-                    confs.append(sc)
+            results.append((txt, sc, rotation))
+    texts = [row[0] for row in results]
+    confs = [row[1] for row in results if row[0] and row[1] > 0]
+    page_info = [
+        {"page": i + 1, "chars": len(txt),
+         "confidence": round(sc, 1) if sc > 0 else -1.0,
+         "preview": _clean(txt)[:240], "rotation": rotation}
+        for i, (txt, sc, rotation) in enumerate(results)
+    ]
     conf = sum(confs) / len(confs) if confs else -1.0
     _OCR_LAST["sekunder"] = round(time.time() - t0, 2)
     _OCR_LAST["konfidens"] = round(conf, 1)
     # \f mellan sidorna markerar sidgränsen: extract() räknar flersidiga
     # tokens på dem. _clean och senare normalisering påverkas inte -
     # tecknet överlever städningen och blir blanksteg vid normalisering.
-    return _clean("\n\f\n".join(texts)), conf
+    # Rensa sidorna var för sig; _clean runt hela dokumentet skulle trimma
+    # form feed på kanterna och dölja tomma första/sista OCR-sidor.
+    return "\n\f\n".join(_clean(page) for page in texts), conf, page_info
+
+
+def _run_ocr(path: Path, max_pages: int, language: str,
+             quality: str = "high", dpi: int = 300) -> Tuple[str, float]:
+    """Bakåtkompatibelt OCR-anrop utan per-sida diagnosdata."""
+    text, confidence, _pages = _run_ocr_detailed(
+        path, max_pages, language, quality=quality, dpi=dpi)
+    return text, confidence
 
 
 #: Andel av sidhöjden som räknas som "brevhuvud" - där avsändaren står.
@@ -1118,6 +1220,10 @@ def extract(path: Path, max_pages: int = 0, ocr_enabled: bool = True,
                 if len(text) > len(res.text):
                     res.text, res.metadata, res.pages_read = text, meta, pages
                     res.page_count = total or res.page_count
+                    try:
+                        res.page_starts = json.loads(meta.pop("_page_starts", "[]"))
+                    except (TypeError, ValueError):
+                        res.page_starts = []
                 if len(res.text) >= MIN_TEXT_CHARS:
                     res.error = ""
                     break
@@ -1127,12 +1233,21 @@ def extract(path: Path, max_pages: int = 0, ocr_enabled: bool = True,
         if len(res.text) < MIN_TEXT_CHARS and ocr_enabled and ocr_available():
             # Helt skannad sida - OCR:a allt
             try:
-                ocr_text, conf = _run_ocr(path, max(1, ocr_max_pages),
-                                          ocr_language,
-                                          quality=ocr_quality, dpi=ocr_dpi)
-                if len(ocr_text) > len(res.text):
+                ocr_text, conf, page_info = _run_ocr_detailed(
+                    path, max(1, ocr_max_pages), ocr_language,
+                    quality=ocr_quality, dpi=ocr_dpi)
+                res.ocr_pages = page_info
+                readable_ocr = ocr_text.replace("\f", " ").strip()
+                readable_text = res.text.replace("\f", " ").strip()
+                if len(readable_ocr) > len(readable_text):
                     res.text, res.used_ocr, res.error = ocr_text, True, ""
                     res.ocr_conf = conf
+                    if not res.page_starts:
+                        res.page_starts = [
+                            "\n".join(line.strip() for line in page.splitlines()
+                                        if line.strip())[:1200]
+                            for page in ocr_text.split("\f")
+                        ]
             except Exception as exc:
                 res.error = res.error or f"OCR misslyckades: {exc}"
         elif ocr_enabled and ocr_available():
