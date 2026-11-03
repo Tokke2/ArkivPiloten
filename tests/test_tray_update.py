@@ -56,6 +56,7 @@ def test_tray_menu_has_manual_update_action_and_posts_it_to_ui(monkeypatch):
 def test_tray_tooltip_spells_out_watcher_state_and_review_count(monkeypatch):
     class _Icon:
         title = ""
+        visible = False
 
         def update_menu(self):
             pass
@@ -70,8 +71,50 @@ def test_tray_tooltip_spells_out_watcher_state_and_review_count(monkeypatch):
 
     tray.refresh()
 
+    assert tray.icon.visible is True
     assert tray.icon.title == (
         "ArkivPiloten · Bevakning PÅ · 2 väntar på granskning")
+
+
+def test_tray_start_waits_for_visible_native_icon(monkeypatch):
+    import threading
+
+    stopped = threading.Event()
+
+    class _Icon:
+        def __init__(self, *args):
+            self.visible = False
+            self.title = ""
+
+        def run(self, setup=None):
+            if setup:
+                setup(self)
+            stopped.wait(2)
+
+        def stop(self):
+            stopped.set()
+
+        def update_menu(self):
+            pass
+
+    monkeypatch.setattr(S.sys, "platform", "win32")
+    monkeypatch.setattr(S, "tray_available", lambda: True)
+    monkeypatch.setattr(S, "make_icon_image", lambda *a, **k: object())
+    monkeypatch.setitem(sys.modules, "pystray", SimpleNamespace(
+        Icon=_Icon, MenuItem=_FakeItem, Menu=_FakeMenu))
+    app = SimpleNamespace(
+        watcher=None, queue=[], _post=lambda callback: None,
+        show_window=lambda: None, _check_updates_from_tray=lambda: None,
+        _sort_now=lambda: None, _toggle_watch=lambda: None,
+        show_review=lambda: None, open_output=lambda: None, quit_app=lambda: None,
+    )
+    tray = S.TrayIcon(app)
+
+    assert tray.start() is True
+    assert tray.icon.visible is True
+    assert tray._thread is not None and tray._thread.is_alive()
+
+    tray.stop()
 
 
 def test_tray_update_shows_window_then_starts_manual_check():

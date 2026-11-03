@@ -10666,6 +10666,40 @@ def _self_check() -> int:
     return 1 if fel else 0
 
 
+def _tray_runtime_status(app: Any) -> str:
+    """Körningstillstånd för systemfältet, för supportens AI-rapport."""
+    tray = getattr(app, "tray", None)
+    icon = getattr(tray, "icon", None) if tray is not None else None
+    if icon is None:
+        icon_state, visible = "ej skapad", "nej"
+    else:
+        icon_state = "skapad"
+        value = getattr(icon, "visible", None)
+        visible = ("ja" if value is True else "nej" if value is False
+                   else "okänd")
+    if tray is None:
+        loop = "saknas"
+    elif getattr(tray, "_detached", False):
+        loop = "separerad"
+    else:
+        thread = getattr(tray, "_thread", None)
+        loop = ("igång" if thread and thread.is_alive()
+                else "stoppad" if thread else "ingen tråd")
+    watcher = getattr(app, "watcher", None)
+    bevakning = "PÅ" if watcher and getattr(watcher, "running", False) else "AV"
+    queue = len(getattr(app, "queue", ()) or ())
+    settings = getattr(app, "settings", {}) or {}
+    backend_fn = globals().get("tray_backend_name")
+    try:
+        backend = backend_fn() if callable(backend_fn) else "modul saknas"
+    except Exception:
+        backend = "okänd"
+    backend = backend or "okänd"
+    return (f"Systemfält (körning): aktiverat={bool(settings.get('tray_enabled', True))}, "
+            f"ikon={icon_state}, synlig={visible}, loop={loop}, backend={backend}, "
+            f"bevakning={bevakning}, väntar={queue}")
+
+
 def _diag_extra() -> List[str]:
     """Statusrader till AI-rapporten - lokala fakta, inga nätanrop.
 
@@ -10691,7 +10725,7 @@ def _diag_extra() -> List[str]:
                 ("strictness", "min_keywords", "action", "dry_run",
                  "ask_when_unsure", "check_updates", "auto_update",
                  "update_checks_per_day", "silent_restart",
-                 "last_update_check", "last_update_seen",
+                 "last_update_check", "last_update_seen", "tray_enabled",
                  "minimize_to_tray", "close_to_tray") if k in s))
         rader.append(f"Mappar: in={s.get('input_dir', '')} "
                      f"ut={s.get('output_dir', '')} "
@@ -10708,6 +10742,12 @@ def _diag_extra() -> List[str]:
                      f" · systemfält: {'ja' if tray_available() else 'nej'}")
     except Exception:
         pass
+    app = globals().get("_TAB_WHEEL_APP")
+    if app is not None:
+        try:
+            rader.append(_tray_runtime_status(app))
+        except Exception as exc:
+            rader.append(f"Systemfält (körning): status kunde inte läsas ({exc})")
     try:
         regler = Rules.load()
         rader.append(f"Regler: {len(regler.categories)} kategorier, "

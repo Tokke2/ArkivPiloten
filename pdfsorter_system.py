@@ -1684,6 +1684,8 @@ class TrayIcon:
         self.icon = None
         self._thread: Optional[threading.Thread] = None
         self._detached = False
+        self._ready = threading.Event()
+        self._startup_error: Optional[BaseException] = None
 
     # -- meny -------------------------------------------------------------
     def _build_menu(self):
@@ -1716,6 +1718,8 @@ class TrayIcon:
     def start(self) -> bool:
         if not tray_available() or self.icon is not None:
             return False
+        self._ready.clear()
+        self._startup_error = None
         try:
             import pystray
             image = make_icon_image(64)
@@ -1725,26 +1729,53 @@ class TrayIcon:
             if sys.platform == "darwin":
                 # pystray/_base.py: "run() must be called from the main
                 # thread". Att starta NSApplication i en bakgrundstråd
-                # gjorde att menykonen aldrig dök upp, medan appen trodde
-                # att den fanns och gömde fönstret (osynlig app vid
-                # autostart). run_detached() låter Tk äga huvudloopen.
-                self.icon.run_detached()
+                # gjorde att menykonen aldrig dök upp. run_detached() låter
+                # Tk äga huvudloopen; setup-bekräftelsen visar att ikonen
+                # faktiskt skapades innan fönstret tillåts gömmas.
+                self.icon.run_detached(setup=self._setup_icon)
                 self._detached = True
-                return True
-            self._thread = threading.Thread(target=self._run, daemon=True,
-                                            name="pdfsorter-tray")
-            self._thread.start()
+            else:
+                self._thread = threading.Thread(target=self._run, daemon=True,
+                                                name="pdfsorter-tray")
+                self._thread.start()
+
+            # Starta inte appen dold utifrån enbart en lyckad Thread.start():
+            # vänta tills pystray har byggt sin native-ikon och visat den.
+            if not self._ready.wait(timeout=3.0):
+                self._startup_error = TimeoutError(
+                    "pystray startade inte systemfältsikonen inom 3 sekunder")
+            if self._startup_error is not None:
+                session_error("systemfält", self._startup_error)
+                self.stop()
+                return False
+            if not self._detached and not (self._thread and self._thread.is_alive()):
+                session_error("systemfält", RuntimeError(
+                    "pystray-tråden avslutades direkt efter start"))
+                self.stop()
+                return False
             return True
-        except Exception:
-            self.icon = None
+        except Exception as exc:
+            session_error("systemfält", exc)
+            self.stop()
             return False
+
+    def _setup_icon(self, icon) -> None:
+        """Visa ikonen efter att pystray har initierat sin native-backend."""
+        try:
+            icon.visible = True
+        except Exception as exc:
+            self._startup_error = exc
+        finally:
+            self._ready.set()
 
     def _run(self) -> None:
         try:
-            self.icon.run()
+            self.icon.run(setup=self._setup_icon)
         except Exception as exc:
-            # Tidigare svaldes felet tyst - användaren såg bara att
-            # ikonen försvann utan förklaring. Nu syns det i loggen.
+            # Rapportera även en asynkron backend-failure; start() väntar på
+            # setup-signalen och låter appen stanna synlig om detta misslyckas.
+            self._startup_error = exc
+            self._ready.set()
             session_error("systemfält", exc)
 
     def refresh(self) -> None:
@@ -1757,6 +1788,7 @@ class TrayIcon:
             img = make_icon_image(64, active=running, badge=n)
             if img is not None:
                 self.icon.icon = img
+            self.icon.visible = True
             status = "Bevakning PÅ" if running else "Bevakning AV"
             delar = [APP_NAME, status]
             if n:
