@@ -75,6 +75,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -3473,6 +3474,92 @@ def open_externally(path: Path) -> None:
         session_error("ui", exc)
 
 
+def create_pdf_split_copies(path: Path, break_pages: List[int],
+                            output_dir: Path) -> List[Path]:
+    """Skapa separata PDF-kopior vid föreslagna sidstarter.
+
+    Sidnummer i break_pages är 1-baserade. Originalfilen öppnas endast för
+    läsning; alla deldokument skrivs först till temporärfiler och flyttas
+    sedan till unika målnamn. Misslyckas något steg lämnas originalet orört
+    och redan skapade delkopior rullas tillbaka.
+    """
+    if not has_pymupdf():
+        raise RuntimeError("Delning kräver PyMuPDF (pymupdf).")
+    pymupdf = _open_pymupdf()
+    source = Path(path)
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    temporaries: List[Path] = []
+    reserved: List[Path] = []
+    created: List[Path] = []
+    document = None
+    try:
+        document = pymupdf.open(str(source))
+        total = len(document)
+        starts = sorted({int(page) for page in break_pages
+                         if 1 < int(page) <= total})
+        if not starts:
+            raise ValueError("Inga giltiga sidgränser att dela vid.")
+        boundaries = [0, *(page - 1 for page in starts), total]
+        ranges = list(zip(boundaries[:-1], boundaries[1:]))
+        if len(ranges) < 2 or any(first >= last for first, last in ranges):
+            raise ValueError("Sidgränserna gav inga giltiga dokumentdelar.")
+
+        for first, last in ranges:
+            fd, temp_name = tempfile.mkstemp(
+                prefix=".arkivpiloten-split-", suffix=".pdf", dir=destination)
+            os.close(fd)
+            temporary = Path(temp_name)
+            temporaries.append(temporary)
+            part = pymupdf.open()
+            try:
+                part.insert_pdf(document, from_page=first, to_page=last - 1)
+                try:
+                    part.set_metadata(document.metadata or {})
+                except Exception:
+                    pass
+                part.save(str(temporary), garbage=3, deflate=True)
+            finally:
+                part.close()
+            check = pymupdf.open(str(temporary))
+            try:
+                if len(check) != last - first:
+                    raise IOError("En delad PDF fick fel sidantal.")
+            finally:
+                check.close()
+
+        for part_no, temporary in enumerate(temporaries, 1):
+            base = destination / f"{source.stem} - del {part_no}.pdf"
+            target = None
+            for _attempt in range(10000):
+                candidate = unique_target(base)
+                try:
+                    fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                                 0o666)
+                except FileExistsError:
+                    continue
+                os.close(fd)
+                target = candidate
+                reserved.append(target)
+                break
+            if target is None:
+                raise FileExistsError(f"Kunde inte skapa ett unikt namn för {base.name}")
+            os.replace(temporary, target)
+            reserved.remove(target)
+            created.append(target)
+        return created
+    except Exception:
+        for output in (*created, *reserved, *temporaries):
+            try:
+                output.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    finally:
+        if document is not None:
+            document.close()
+
+
 def human_size(n: float) -> str:
     for unit in ("B", "kB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -3655,6 +3742,7 @@ class ReviewDialog:
                  suggested_sender: str = ""):
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk, self.ttk, self.messagebox = tk, ttk, messagebox
+        self.filedialog = filedialog
         self.theme = theme
         self.C = theme.c if theme else COLORS
         self.decision = decision
@@ -3778,6 +3866,12 @@ class ReviewDialog:
                 style="PillWarn.TLabel", wraplength=840, justify="left").grid(
                     row=next_row, column=0, columnspan=2, sticky="w",
                     padx=16, pady=(4, 8))
+            next_row += 1
+            ttk.Button(
+                head, text="Skapa separata PDF-kopior…",
+                command=self._split_suggested).grid(
+                    row=next_row, column=0, sticky="w",
+                    padx=16, pady=(0, 10))
             next_row += 1
         ocr_pages = getattr(ext, "ocr_pages", []) or []
         if ocr_pages:
@@ -4093,6 +4187,50 @@ class ReviewDialog:
                 note += "  ⚠ finns i " + ", ".join(owners[:2])
             ttk.Label(self.inner, text=note, style="CardMuted.TLabel"
                       ).grid(row=i, column=2, sticky="w", padx=(10, 14))
+
+    def _split_suggested(self) -> None:
+        """Skapa användarvalda delkopior; original-PDF:en lämnas orörd."""
+        breaks = getattr(self.decision.extraction, "document_breaks", [])
+        if not breaks:
+            return
+        output = self.filedialog.askdirectory(
+            parent=self.win, title="Välj mapp för separata PDF-kopior",
+            initialdir=str(self.decision.path.parent),
+        )
+        if not output:
+            return
+        pages = int(getattr(self.decision.extraction, "page_count", 0)
+                    or len(getattr(self.decision.extraction, "page_starts", []))
+                    or max(breaks))
+        ranges = []
+        first = 1
+        for boundary in [*breaks, pages + 1]:
+            last = int(boundary) - 1
+            ranges.append(f"sida {first}" if first == last
+                          else f"sidor {first}–{last}")
+            first = int(boundary)
+        if not self.messagebox.askyesno(
+                APP_NAME,
+                f"Skapa {len(ranges)} separata PDF-kopior ({'; '.join(ranges)}) i vald mapp?\n\n"
+                "Originalfilen lämnas oförändrad.",
+                parent=self.win):
+            return
+        try:
+            files = create_pdf_split_copies(
+                self.decision.path, breaks, Path(output))
+            self.messagebox.showinfo(
+                APP_NAME,
+                f"Skapade {len(files)} separata PDF-kopior.\n\n"
+                + "\n".join(str(path) for path in files)
+                + "\n\nOriginalfilen är oförändrad.",
+                parent=self.win,
+            )
+        except Exception as exc:
+            self.messagebox.showerror(
+                APP_NAME,
+                f"PDF:en kunde inte delas. Originalfilen är oförändrad.\n\n{exc}",
+                parent=self.win,
+            )
 
     # -- förhandsvisning (REQ-N7) -----------------------------------------
     def _start_preview_load(self) -> None:

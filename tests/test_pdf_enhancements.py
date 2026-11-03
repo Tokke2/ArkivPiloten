@@ -206,3 +206,66 @@ def test_replace_keeps_old_duplicate_if_new_placement_fails(monkeypatch, tmp_pat
     assert not ok
     assert old.read_bytes() == b"same bytes"
     assert source.exists()
+
+
+def _make_pdf(path, pages=4):
+    pymupdf = R._open_pymupdf()
+    document = pymupdf.open()
+    for page_no in range(1, pages + 1):
+        page = document.new_page()
+        page.insert_text((72, 72), f"Page {page_no}")
+    document.save(path)
+    document.close()
+
+
+def test_split_suggestion_creates_safe_unique_copies_and_preserves_source(tmp_path):
+    source = tmp_path / "bundle.pdf"
+    output = tmp_path / "split"
+    _make_pdf(source)
+
+    first = P.create_pdf_split_copies(source, [3], output)
+    second = P.create_pdf_split_copies(source, [3], output)
+
+    assert [path.name for path in first] == [
+        "bundle - del 1.pdf", "bundle - del 2.pdf"]
+    assert [path.name for path in second] == [
+        "bundle - del 1 (2).pdf", "bundle - del 2 (2).pdf"]
+    pymupdf = R._open_pymupdf()
+    source_doc = pymupdf.open(source)
+    parts = [pymupdf.open(path) for path in first]
+    try:
+        assert len(source_doc) == 4
+        assert [len(part) for part in parts] == [2, 2]
+        assert [part[0].get_text().strip() for part in parts] == [
+            "Page 1", "Page 3"]
+    finally:
+        source_doc.close()
+        for part in parts:
+            part.close()
+
+
+def test_split_failure_rolls_back_created_copies_and_keeps_source(monkeypatch, tmp_path):
+    source = tmp_path / "bundle.pdf"
+    output = tmp_path / "split"
+    _make_pdf(source)
+    real_replace = P.os.replace
+    replacements = 0
+
+    def fail_second_replace(src, dst):
+        nonlocal replacements
+        replacements += 1
+        if replacements == 2:
+            raise OSError("simulated write failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(P.os, "replace", fail_second_replace)
+
+    try:
+        P.create_pdf_split_copies(source, [3], output)
+    except OSError as exc:
+        assert "simulated" in str(exc)
+    else:
+        raise AssertionError("expected simulated failure")
+
+    assert source.exists()
+    assert list(output.iterdir()) == []
