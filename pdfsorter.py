@@ -97,6 +97,7 @@ except Exception:                     # pragma: no cover - trasig installation
 
 APP_NAME = "ArkivPiloten"
 APP_VERSION = "1.4.14"
+COPYRIGHT_NOTICE = "© 2026 Rickard Längkvist"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -6233,6 +6234,7 @@ class App:
         rader.append(f"Inställningar och data: {config_dir()}")
         rader.append(f"Loggar: {session_dir()}")
         rader.append("")
+        rader.append(COPYRIGHT_NOTICE)
         rader.append("Gratis - och förblir gratis.")
         return "\n".join(rader)
 
