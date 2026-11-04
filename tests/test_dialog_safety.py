@@ -325,3 +325,85 @@ def test_current_session_file_is_never_archived(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "_SESSION_PATH", gammal)
     assert S.archive_old_logs(3) == 0
     assert gammal.exists()
+
+
+def test_yesterdays_session_logs_are_archived_by_filename_date(monkeypatch,
+                                                               tmp_path):
+    import datetime as dt
+    bas = tmp_path / "logs"
+    yesterday = dt.date.today() - dt.timedelta(days=1)
+    month = bas / yesterday.strftime("%Y-%m")
+    name = f"app_{yesterday:%Y%m%d}_235900_abc.log"
+    yesterday_log = _loggfil(month, name, 0)  # mtime is recent, filename is decisive
+    today = dt.date.today()
+    today_log = _loggfil(
+        bas / today.strftime("%Y-%m"), f"app_{today:%Y%m%d}_080000_def.log", 20)
+    monkeypatch.setattr(S, "session_dir", lambda: bas)
+    monkeypatch.setattr(S, "_SESSION_PATH", None)
+
+    assert S.archive_old_logs(1) == 1
+    assert not yesterday_log.exists()
+    assert today_log.exists()
+    archived = list((bas / "arkiv" / f"{yesterday:%Y}" / f"{yesterday:%m}").glob("*.gz"))
+    assert len(archived) == 1
+
+
+def test_error_code_log_keeps_stable_open_codes_out_of_daily_archive(monkeypatch,
+                                                                     tmp_path):
+    import datetime as dt
+    session = io.StringIO()
+    bas = tmp_path / "logs"
+    bas.mkdir()
+    monkeypatch.setattr(S, "_SESSION_FH", session)
+    monkeypatch.setattr(S, "_SESSION_PATH", None)
+    monkeypatch.setattr(S, "session_dir", lambda: bas)
+
+    S.session_log("motor", "PDFTextError: kunde inte läsa sidan", "err")
+    S.session_log("motor", "PDFTextError: kunde inte läsa sidan", "err")
+
+    code_log = bas / "felkoder.log"
+    contents = code_log.read_text(encoding="utf-8")
+    import re
+    codes = re.findall(r"FELKOD:([0-9a-f]{8}) \[ÖPPEN\]", contents)
+    assert len(codes) == 2 and codes[0] == codes[1]
+    old = dt.datetime.now().timestamp() - 40 * 86400
+    os.utime(code_log, (old, old))
+    monkeypatch.setattr(S, "_SESSION_PATH", None)
+    assert S.archive_old_logs(1) == 0
+    assert code_log.exists() and "[ÖPPEN]" in code_log.read_text(encoding="utf-8")
+
+
+def test_error_code_stays_open_until_marked_fixed_and_history_is_kept(
+        monkeypatch, tmp_path):
+    from pdfsorter_diag import parse_error_code_log
+
+    logs = tmp_path / "logs"
+    monkeypatch.setattr(S, "session_dir", lambda: logs)
+    monkeypatch.setattr(S, "session_log", lambda *_args, **_kwargs: None)
+    S._append_consolidated_error("12:00:00.000", "motor", [
+        "PDFTextError: kunde inte läsa sidan", "traceback line",
+    ])
+    path = logs / "felkoder.log"
+    opened = parse_error_code_log(path.read_text(encoding="utf-8"))
+    assert len(opened) == 1
+    code = opened[0]["fp"]
+
+    assert S.mark_error_code_resolved(code, "åtgärdad i ny version")
+    contents = path.read_text(encoding="utf-8")
+    assert "[ÖPPEN]" in contents and "[ÅTGÄRDAD]" in contents
+    assert parse_error_code_log(contents) == []
+
+
+def test_daily_archive_rechecks_once_after_calendar_day_changes(monkeypatch):
+    import datetime as dt
+    yesterday = dt.date.today() - dt.timedelta(days=1)
+    today = dt.date.today()
+    archived = []
+    monkeypatch.setattr(S, "_LAST_LOG_ARCHIVE_DATE", yesterday)
+    monkeypatch.setattr(S, "archive_old_logs", lambda days: archived.append(days) or 0)
+
+    S._archive_logs_on_new_day(today)
+    S._archive_logs_on_new_day(today)
+
+    assert archived == [1]
+    assert S._LAST_LOG_ARCHIVE_DATE == today

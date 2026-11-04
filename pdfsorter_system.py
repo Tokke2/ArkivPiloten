@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import io
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -71,6 +72,7 @@ __all__ = [
     # sessionslogg (logga allt, REQ-N1)
     "SESSION_ID", "start_session", "session_log", "session_error",
     "session_path", "session_dir", "log_dir", "latest_session_log",
+    "mark_error_code_resolved",
     "install_excepthooks", "close_session",
 ]
 
@@ -2507,6 +2509,7 @@ def _month_log_path(name: str) -> Path:
 # den som läser direkt ska se vad som hände och varför.
 
 import uuid as _uuid
+from datetime import date as _date
 from datetime import datetime as _dt
 
 #: Unikt id för körningen. Sätts av start_session(); innan dess tomt.
@@ -2520,6 +2523,8 @@ _SESSION_LOCK = threading.RLock()
 _SESSION_MAX_BYTES = 8_000_000           # rotera efter 8 MB
 _SESSION_PART = 1
 _SESSION_BASE: Optional[Path] = None     # roteringsnamn utgår härifrån
+_LAST_LOG_ARCHIVE_DATE: Optional[_date] = None
+_LOG_ARCHIVE_LOCK = threading.Lock()
 _OLD_EXCEPTHOOK: Optional[Any] = None
 _OLD_THREADHOOK: Optional[Any] = None
 
@@ -2775,18 +2780,18 @@ def swish_payload(number: str, amount: Optional[int] = None) -> str:
     return url
 
 
-def archive_old_logs(days: int = 3) -> int:
-    """Arkivera sessionsloggar äldre än `days` dagar (ANVÄNDARORDER
-    2026-10-15: "efter 3 dagar ska det arkiveras i årsmapp/månadsmapp").
+def archive_old_logs(days: int = 1) -> int:
+    """Arkivera sessionsloggar från och med angivet antal kalenderdagar bakåt.
 
-    Flyttas till logs/arkiv/<ÅÅÅÅ>/<MM>/ - inget raderas någonsin.
-    Returnerar antal flyttade filer. Körs vid varje sessionsstart.
+    Standardvärdet 1 flyttar gårdagens och äldre sessionsloggar till
+    logs/arkiv/<ÅÅÅÅ>/<MM>/. Dagens logg och felkodernas permanenta logg
+    arkiveras aldrig. Datumet i sessionsfilens namn styr, inte mtime.
     """
     flyttade = 0
     try:
-        import time as _time
-        gräns = _time.time() - days * 86400
+        from datetime import timedelta
         idag = _dt.now().date()
+        gränsdatum = idag - timedelta(days=max(1, int(days)))
         bas = session_dir()
         if not bas.is_dir():
             return 0
@@ -2795,43 +2800,49 @@ def archive_old_logs(days: int = 3) -> int:
                 continue
             for fil in list(månadsmap.glob("app_*.log")):
                 try:
-                    # Dagens loggning arkiveras ALDRIG - varken den pågående
-                    # sessionens fil eller en fil som skapades i dag. En
-                    # pågående session kan ha gammal mtime om appen stått
-                    # stilla länge; då skulle den annars flyttas (och på
-                    # Linux gzippas medan appen fortfarande skriver i den).
-                    if _SESSION_PATH is not None and fil == _SESSION_PATH:
+                    if _SESSION_PATH is not None and fil.resolve() == _SESSION_PATH.resolve():
                         continue
-                    m = re.match(r"app_(\d{8})_", fil.name)
-                    if (m and _dt.strptime(m.group(1), "%Y%m%d").date()
-                            == idag):
+                    match = re.match(r"app_(\d{8})_", fil.name)
+                    if match:
+                        try:
+                            loggdatum = _dt.strptime(match.group(1), "%Y%m%d").date()
+                        except ValueError:
+                            loggdatum = _dt.fromtimestamp(fil.stat().st_mtime).date()
+                    else:
+                        loggdatum = _dt.fromtimestamp(fil.stat().st_mtime).date()
+                    if loggdatum > gränsdatum:
                         continue
+
                     st = fil.stat()
-                    if _dt.fromtimestamp(st.st_mtime).date() == idag:
-                        continue
-                    if st.st_mtime >= gräns:
-                        continue
-                    stamp = _dt.fromtimestamp(st.st_mtime)
-                    dest = bas / "arkiv" / f"{stamp:%Y}" / f"{stamp:%m}"
+                    dest = bas / "arkiv" / f"{loggdatum:%Y}" / f"{loggdatum:%m}"
                     dest.mkdir(parents=True, exist_ok=True)
                     mål = dest / (fil.name + ".gz")
                     if mål.exists():
-                        mål = dest / (fil.stem + f"_{int(st.st_mtime)}"
-                                      + ".log.gz")
+                        mål = dest / (fil.stem + f"_{st.st_mtime_ns}" + ".log.gz")
+                    suffix = 2
+                    grundmål = mål
+                    while mål.exists():
+                        mål = grundmål.with_name(
+                            f"{grundmål.stem} ({suffix}){grundmål.suffix}")
+                        suffix += 1
                     import gzip
-                    data = fil.read_bytes()
-                    with gzip.open(mål, "wb") as fo:
-                        fo.write(data)
+                    try:
+                        with gzip.open(mål, "xb") as fo:
+                            with open(fil, "rb") as source:
+                                shutil.copyfileobj(source, fo)
+                    except Exception:
+                        mål.unlink(missing_ok=True)
+                        raise
                     fil.unlink()
                     flyttade += 1
                 except Exception as exc:
-                    # Tyst aldrig: arkiveringsfel syns i sessionsloggen
                     session_log("logg", f"Kunde inte arkivera {fil.name}: "
                                 f"{type(exc).__name__}: {exc}", "warn")
                     continue
         if flyttade:
-            session_log("logg", f"Arkiverade {flyttade} äldre loggfil(er) "
-                        f"till logs/arkiv/ÅR/MÅNAD")
+            session_log("logg", f"Arkiverade {flyttade} sessionslogg(ar) "
+                        f"från {gränsdatum:%Y-%m-%d} och äldre till "
+                        "logs/arkiv/ÅR/MÅNAD; felkodloggar lämnades kvar")
     except Exception:
         pass
     return flyttade
@@ -2876,6 +2887,7 @@ def start_session(banner_lines: Optional[List[str]] = None) -> Optional[Path]:
     aldrig sänka appen). Varje efterföljande session_log() hamnar i filen.
     """
     global SESSION_ID, _SESSION_FH, _SESSION_PATH, _SESSION_PART, _SESSION_BASE
+    global _LAST_LOG_ARCHIVE_DATE
     SESSION_ID = _uuid.uuid4().hex[:12]
     stamp = _dt.now()
     month = session_dir() / stamp.strftime("%Y-%m")
@@ -2889,8 +2901,9 @@ def start_session(banner_lines: Optional[List[str]] = None) -> Optional[Path]:
     with _SESSION_LOCK:
         _SESSION_FH, _SESSION_PATH, _SESSION_PART = fh, path, 1
         _SESSION_BASE = path
+    _LAST_LOG_ARCHIVE_DATE = stamp.date()
     migrate_legacy_logs()          # engångsflytt av äldre kraschlogg
-    archive_old_logs(3)            # >3 dagar -> logs/arkiv/ÅR/MÅNAD
+    archive_old_logs(1)            # gårdagens + äldre sessionsloggar -> arkiv
     bar = "=" * 78
     rader = [bar,
              f"{APP_NAME} {APP_VERSION} - sessionslogg  (session {SESSION_ID})",
@@ -2941,6 +2954,17 @@ def close_session() -> None:
         _SESSION_FH, _SESSION_PATH = None, None
 
 
+def _archive_logs_on_new_day(today: Optional[_date] = None) -> None:
+    """Arkivera gårdagens färdiga sessioner en gång per ny kalenderdag."""
+    global _LAST_LOG_ARCHIVE_DATE
+    current = today or _dt.now().date()
+    with _LOG_ARCHIVE_LOCK:
+        if _LAST_LOG_ARCHIVE_DATE == current:
+            return
+        _LAST_LOG_ARCHIVE_DATE = current
+    archive_old_logs(1)
+
+
 def session_log(category: str, message: str, level: str = "info") -> None:
     """Skriv en rad till sessionsloggen. Trådsäker, kastar aldrig.
 
@@ -2951,6 +2975,7 @@ def session_log(category: str, message: str, level: str = "info") -> None:
     """
     if _SESSION_FH is None:
         return
+    _archive_logs_on_new_day()
     nu = _dt.now()
     ts = nu.strftime("%H:%M:%S.") + f"{nu.microsecond // 1000:03d}"
     lvl = _LEVELS.get(level, "INFO").ljust(5)
@@ -2972,16 +2997,34 @@ def session_log(category: str, message: str, level: str = "info") -> None:
 
 def _append_consolidated_error(ts: str, category: str,
                                lines: List[str]) -> None:
-    """Lägg alla fångade FEL-rader i den gemensamma felsökningsloggen."""
+    """Spara feltexten och dess stabila kod i två egna, icke-arkiverade loggar."""
+    message = str(lines[0] if lines else "okänt fel")
+    traceback_text = "\n".join(str(line) for line in (lines[1:] if lines else []))
     try:
         target = session_dir() / "fel-samlat.log"
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "a", encoding="utf-8", buffering=1) as fh:
-            fh.write(f"{ts}  FEL   {category} {lines[0]}\n")
+            fh.write(f"{ts}  FEL   {category} {message}\n")
             for line in lines[1:]:
                 fh.write(f"{'':22}{line}\n")
     except Exception:
         # Fel i felsökningsloggen får aldrig hindra appens normala loggning.
+        pass
+
+    try:
+        if _diag is not None:
+            code = _diag.fingerprint(message, traceback_text)
+        else:
+            code = hashlib.sha1(
+                (message + "\n" + traceback_text).encode("utf-8", "replace")
+            ).hexdigest()[:8]
+        code_log = session_dir() / "felkoder.log"
+        code_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(code_log, "a", encoding="utf-8", buffering=1) as fh:
+            fh.write(f"\n===== {_dt.now().isoformat(timespec='seconds')} =====\n")
+            fh.write(f"FELKOD:{code} [ÖPPEN] {category.strip()} {message}\n")
+    except Exception:
+        # Felkodloggen är separat, men får aldrig stoppa den vanliga loggen.
         pass
 
 
@@ -3001,6 +3044,25 @@ def session_error(category: str, exc: BaseException) -> None:
 def session_path() -> Optional[Path]:
     """Körningens aktuella loggfil (roterad del om flera)."""
     return _SESSION_PATH
+
+
+def mark_error_code_resolved(code: str, note: str = "") -> bool:
+    """Markera en felkod som åtgärdad utan att radera dess logghistorik."""
+    value = str(code or "").strip().casefold()
+    if not re.fullmatch(r"[0-9a-f]{8}", value):
+        return False
+    try:
+        target = session_dir() / "felkoder.log"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8", buffering=1) as fh:
+            fh.write(f"\n===== {_dt.now().isoformat(timespec='seconds')} =====\n")
+            fh.write(f"FELKOD:{value} [ÅTGÄRDAD] {str(note).strip()}\n")
+        session_log("logg", f"Felkod {value} markerad åtgärdad; historiken bevaras")
+        return True
+    except OSError as exc:
+        session_log("logg", f"Kunde inte markera felkod {value} som åtgärdad: {exc}",
+                    "warn")
+        return False
 
 
 def latest_session_log() -> Optional[Path]:

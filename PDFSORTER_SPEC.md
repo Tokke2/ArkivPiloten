@@ -1890,8 +1890,12 @@ Varje session får ett SESSION_ID (uuid[:12]) som skrivs i startbanderollen.
   och `show_window` garderas med `winfo_exists()` (tydlig logg i stället
   för TclError-spam); `App.run()` avslutar processen hårt när mainloop
   tar slut med dött fönster (zombieskydd, flush först).
-  (b) `archive_old_logs(3)` vid varje start: sessionsloggar äldre än
-  3 dagar flyttas till `logs/arkiv/<ÅR>/<MÅNAD>/` - inget raderas.
+  (b) `archive_old_logs(1)` vid varje start: sessionsloggar från gårdagen
+  och äldre flyttas till `logs/arkiv/<ÅR>/<MÅNAD>/`, baserat på datumet i
+  filnamnet. Dagens logg lämnas kvar. `felkoder.log`, `fel-samlat.log` och
+  månadsvisa `errors.log` arkiveras aldrig; stabila felkoder med status
+  `ÖPPEN` finns kvar separat i `felkoder.log` tills de markeras åtgärdade
+  med `--mark-felkod-atgardad KOD`. Historiken raderas inte.
 - AC-1.11 **Autoinstall vid start (ANVÄNDARORDER 2026-10-06: "saknade
   python-tillbehör installeras/uppdateras automatiskt, visa progress
   bar"):** vid start kontrolleras pypdf/Pillow/pytesseract/pystray;

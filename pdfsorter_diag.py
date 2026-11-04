@@ -396,6 +396,32 @@ def _block(ts: str, rader: List[str], område: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def parse_error_code_log(text: str, område: str = "felkoder.log") -> List[Dict[str, Any]]:
+    """Returnera felkoder som fortfarande är öppna, med koden som fingeravtryck."""
+    states: Dict[str, Dict[str, Any]] = {}
+    ts = ""
+    for line in text.splitlines():
+        block = _RE_BLOCK.match(line)
+        if block:
+            ts = block.group("ts")
+            continue
+        match = re.match(
+            r"FELKOD:([0-9a-f]{8}) \[(ÖPPEN|ÅTGÄRDAD)\](?:\s+(.*))?", line)
+        if not match:
+            continue
+        code, status, detail = match.groups()
+        if status == "ÅTGÄRDAD":
+            states.pop(code, None)
+            continue
+        category, _, message = (detail or "app okänt fel").partition(" ")
+        states[code] = {
+            "fp": code, "tid": ts, "nivå": "FEL",
+            "område": category or område, "meddelande": message or detail,
+            "spårning": "", "ram": "",
+        }
+    return list(states.values())
+
+
 def _nya_filer(logs_dir: Path, max_files: int) -> List[Path]:
     """De nyaste loggfilerna: sessionsloggar, errors.log, krasch.log."""
     kandidater: List[Path] = []
@@ -493,13 +519,16 @@ def collect(logs_dir: Optional[Path] = None, max_files: int = DEFAULT_MAX_FILES,
                 ofullständiga.append({"fil": p.name,
                                       "storlek": läst["storlek"],
                                       "läst": läst["läst"]})
-            if p.name.lower().startswith(("errors", "krasch")):
+            lower_name = p.name.lower()
+            if lower_name.startswith("felkoder"):
+                poster = parse_error_code_log(text, p.name)
+            elif lower_name.startswith(("errors", "krasch")):
                 poster = parse_error_blocks(text, p.name)
             else:
                 poster = parse_session_log(text)
             for post in poster:
-                fp = fingerprint(post["meddelande"],
-                                 post.get("spårning", ""))
+                fp = post.get("fp") or fingerprint(
+                    post["meddelande"], post.get("spårning", ""))
                 post["fp"] = fp
                 sedd = samlade.get(fp)
                 if sedd is None:

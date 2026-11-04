@@ -3114,6 +3114,7 @@ try:
     session_path = _sys_mod.session_path
     session_dir = _sys_mod.session_dir
     latest_session_log = _sys_mod.latest_session_log
+    mark_error_code_resolved = _sys_mod.mark_error_code_resolved
     install_excepthooks = _sys_mod.install_excepthooks
     close_session = _sys_mod.close_session
     set_process_dpi_aware = _sys_mod.set_process_dpi_aware
@@ -3244,6 +3245,9 @@ except Exception as _sys_err:                       # noqa: BLE001
 
     def latest_session_log():
         return None
+
+    def mark_error_code_resolved(_code, _note=""):
+        return False
 
     def install_excepthooks() -> None:
         return None
@@ -11489,6 +11493,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Visa vilka PDF-motorer och tillägg som hittats")
     p.add_argument("--diagnostik", action="store_true",
                    help="Skriv ut ett komplett diagnostikpaket för support")
+    p.add_argument("--mark-felkod-atgardad", metavar="KOD",
+                   help="Markera en felkod som åtgärdad (8 hextecken); historiken sparas")
     p.add_argument("--ai-rapport", action="store_true",
                    help="Skriv ut ALLA fel samlade i ett block - klart att "
                         "klistra in i en AI-chatt eller felanmälan")
@@ -11525,6 +11531,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Installera/uppdatera alla Python-tillägg från requirements.txt och avsluta")
     p.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     args = p.parse_args(argv)
+
+    if args.mark_felkod_atgardad:
+        ok = mark_error_code_resolved(args.mark_felkod_atgardad)
+        print(("Felkoden markerades som åtgärdad; historiken finns kvar i logs/felkoder.log."
+               if ok else "Ogiltig felkod eller kunde inte skriva logs/felkoder.log."))
+        return 0 if ok else 2
 
     if getattr(args, "ai_rapport", False):
         rapport = build_ai_report(djup=bool(getattr(args, "djup", False)))
