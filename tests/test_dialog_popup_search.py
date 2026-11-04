@@ -27,6 +27,32 @@ def _dialog(state, scheduled, focus_calls):
     return dialog
 
 
+def test_open_dropdown_installs_live_search_key_binding():
+    calls = []
+    bound = []
+    tk = SimpleNamespace(call=lambda *args: calls.append(args))
+    combo = SimpleNamespace(
+        tk=tk,
+        _bind=lambda what, sequence, func, add=None:
+            bound.append((what, sequence, func, add)),
+    )
+    dialog = SimpleNamespace(
+        combo=combo,
+        win=SimpleNamespace(register=lambda fn: "pick-callback"),
+        _popdown_lb_path=lambda: ".combo.popdown.f.l",
+        _combo_pick=lambda event=None: "break",
+        _combo_popup_keypress=lambda event: "break",
+        _return_bound_listbox=None,
+    )
+
+    P.ReviewDialog._bind_popdown_return(dialog)
+
+    assert any(call[1:3] == (".combo.popdown.f.l", "<Return>")
+               for call in calls)
+    assert bound == [(("bind", ".combo.popdown.f.l"), "<KeyPress>",
+                      dialog._combo_popup_keypress, "+")]
+
+
 def test_mouse_opened_dropdown_returns_focus_to_search_field():
     state = {"open": False}
     scheduled = []

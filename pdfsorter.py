@@ -4464,8 +4464,12 @@ class ReviewDialog:
         except Exception:
             pass
 
-    def _combo_search(self, event=None) -> None:
-        """Filtrera listan medan användaren skriver."""
+    def _combo_search(self, event=None, *, keep_popup: bool = False) -> None:
+        """Filtrera listan medan användaren skriver.
+
+        ``keep_popup`` används när tangenten kommer från den redan öppna
+        Tk-rullgardinen: uppdatera dess rader utan att stänga den.
+        """
         if event is not None:
             if getattr(event, "keysym", "") in (
                     "Up", "Down", "Return", "Escape", "Tab",
@@ -4487,35 +4491,44 @@ class ReviewDialog:
             self._sync()
             self.new_entry.delete(0, "end")
             self._combo_show_hint()
+            self._combo_refresh_popup(keep_popup)
             return
         träffar = _filter_categories(text, self._all_categories)
         # Visa de filtrerade träffarna direkt i en egen lista. Den lämnar
         # tangentbordsfokus i comboboxen till skillnad från Tk:s popdown.
+        # När native-rullgardinen redan är öppen används den i stället, så
+        # två överlappande träfflistor inte visas samtidigt.
+        native_open = keep_popup and self._popdown_open()
         self.combo["values"] = träffar
-        self._combo_render_suggestions(träffar)
+        self._combo_render_suggestions([] if native_open else träffar)
         self._combo_show_hint(text)
         if träffar:
             self.mode.set("existing")
             self._sync()
             self.new_entry.delete(0, "end")
             self.combo._ta_seed = text
-            if self._popdown_open():
-                try:
-                    self.combo.tk.call("ttk::combobox::Unpost", self.combo)
-                except Exception:
-                    pass
         else:
             # Skrivet namn finns inte bland kategorierna -> ny mapp.
             self.combo._ta_seed = ""
-            if self._popdown_open():
-                try:
-                    self.combo.tk.call("ttk::combobox::Unpost", self.combo)
-                except Exception:
-                    pass
             self.mode.set("new")
             self._sync()
             self.new_entry.delete(0, "end")
             self.new_entry.insert(0, text)
+        self._combo_refresh_popup(keep_popup)
+
+    def _combo_refresh_popup(self, keep_open: bool = False) -> None:
+        """Uppdatera den öppna listan, eller stäng den vid vanlig fritext."""
+        if not self._popdown_open():
+            return
+        try:
+            if keep_open:
+                self.combo.tk.call(
+                    "ttk::combobox::ConfigureListbox", self.combo)
+                self._popdown_clear_selection()
+            else:
+                self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+        except Exception:
+            pass
 
     def _popdown_open(self) -> bool:
         try:
@@ -4571,19 +4584,66 @@ class ReviewDialog:
             return ""
 
     def _bind_popdown_return(self) -> None:
-        """Ge popdown-Enter samma säkra semantik som skrivfältet."""
+        """Ge popdown samma sökning och Enter-semantik som skrivfältet."""
         lb = self._popdown_lb_path()
         if not lb:
             return
         try:
             if getattr(self, "_return_bound_listbox", None) == lb:
                 return
-            callback = self.win.register(self._combo_pick)
-            script = f'if {{[{callback}] == "break"}} break'
-            self.combo.tk.call("bind", lb, "<Return>", script)
+            pick = self.win.register(self._combo_pick)
+            self.combo.tk.call(
+                "bind", lb, "<Return>",
+                f'if {{[{pick}] == "break"}} break')
+            # Interceptera tangenttryck innan Listboxens inbyggda typeahead,
+            # annars hoppar markören men sökfältet filtreras inte. Tkinter
+            # sköter säkert escapningen av tecken som mellanslag och citattecken.
+            self.combo._bind(("bind", lb), "<KeyPress>",
+                             self._combo_popup_keypress, add="+")
             self._return_bound_listbox = lb
         except Exception:
             pass
+
+    def _combo_popup_keypress(self, event, keysym=None, state=None) -> str:
+        """Sök även när fokus ligger i den redan öppna native-rullgardinen."""
+        if keysym is None and state is None and not isinstance(event, str):
+            char = getattr(event, "char", "")
+            keysym = getattr(event, "keysym", "")
+            state = getattr(event, "state", 0)
+        else:
+            char = event
+        try:
+            modifiers = int(state or 0)
+        except (TypeError, ValueError):
+            modifiers = 0
+        if modifiers & (0x4 | 0x8):  # Ctrl/Alt-kombinationer lämnas åt Tk.
+            return ""
+        keysym = str(keysym or "")
+        if keysym == "Escape":
+            return self._combo_reset()
+        if keysym == "Return":
+            return self._combo_pick()
+        if keysym == "BackSpace":
+            text = "" if getattr(self.combo, "_replace_on_type", False) \
+                else self.combo.get()[:-1]
+            self.combo.set(text)
+            self.combo._replace_on_type = False
+            self._combo_search(keep_popup=True)
+            return "break"
+        if keysym in ("Delete", "Tab", "Up", "Down", "Left", "Right",
+                      "Home", "End", "Prior", "Next", "Shift_L",
+                      "Shift_R", "Control_L", "Control_R", "Alt_L",
+                      "Alt_R"):
+            return ""
+        char = str(char or "")
+        if char and char.isprintable():
+            text = "" if getattr(self.combo, "_replace_on_type", False) \
+                else self.combo.get()
+            self.combo.set(text + char)
+            self.combo._replace_on_type = False
+            self._combo_search(keep_popup=True)
+            return "break"
+        return ""
 
     def _combo_schedule_popup_bind(self, event=None) -> None:
         """Native arrow opens after the click; keep a visible, editable caret."""

@@ -206,6 +206,8 @@ class _Stub:
     _combo_prepare_search = P.ReviewDialog._combo_prepare_search
     _combo_select_suggestion = P.ReviewDialog._combo_select_suggestion
     _combo_search = P.ReviewDialog._combo_search
+    _combo_popup_keypress = P.ReviewDialog._combo_popup_keypress
+    _combo_refresh_popup = P.ReviewDialog._combo_refresh_popup
     _combo_pick = P.ReviewDialog._combo_pick
     _combo_reset = P.ReviewDialog._combo_reset
     _combo_reset_values = P.ReviewDialog._combo_reset_values
@@ -264,6 +266,42 @@ def test_typing_p_i_l_keeps_narrowing_to_pil():
     assert stub.combo["values"] == ["Pilkington"]
     assert stub.suggestions == ["Pilkington"]
     assert stub.combo._ta_seed == "pil"
+
+
+def test_typing_in_open_popup_filters_without_closing_it():
+    stub = _Stub()
+    stub.popdown_open = True
+    stub.combo.text = "Pilkington"
+    stub.combo._replace_on_type = True
+
+    for ch in "pil":
+        assert stub._combo_popup_keypress(ch, ch, "0") == "break"
+
+    assert stub.combo.get() == "pil"
+    assert stub.combo["values"] == ["Pilkington"]
+    assert stub.suggestions == []
+    assert stub.popdown_open is True
+    assert stub.unposted == 0
+
+    stub._combo_popup_keypress("", "BackSpace", "0")
+    assert stub.combo.get() == "pi"
+    assert stub.combo["values"] == ["Pilkington"]
+    assert stub.popdown_open is True
+
+
+def test_open_popup_typing_can_clear_query_and_restore_all_categories():
+    stub = _Stub()
+    stub.popdown_open = True
+    stub.combo.text = "pil"
+    stub.combo._replace_on_type = False
+
+    for _ in range(3):
+        stub._combo_popup_keypress("", "BackSpace", "0")
+
+    assert stub.combo.get() == ""
+    assert stub.combo["values"] == NAMES
+    assert stub.popdown_open is True
+    assert stub.unposted == 0
 
 
 def test_enter_picks_the_unique_hit_and_restores_the_list():
