@@ -1857,10 +1857,9 @@ Varje session får ett SESSION_ID (uuid[:12]) som skrivs i startbanderollen.
   `✗ FEL (N ms): exc` till sessionsloggen. Används runt per-fil-analys
   (`tid`) och batchsortering; undantag loggas och propagerar.
 - AC-1.9 **Loggmigrering (LÅNAT MÖNSTER L7, leverans 2026-09-17):**
-  `migrate_legacy_logs()` körs vid sessionsstart: äldre `krasch.log` i
-  config-roten flyttas till `logs/krasch.log`; finns redan en ny
-  parkeras den gamla som `krasch-gammal.log` (nyast vinner, inget
-  raderas).
+  `migrate_legacy_logs()` körs vid sessionsstart: äldre `.log`-filer i
+  config-roten flyttas till `logs/` eller `logs/äldre/`; namnkonflikter
+  får ett numrerat namn. Inget skrivs över eller raderas.
 - AC-1.10 **Tilläggsdialog vid start (ANVÄNDARORDER 2026-09-28):**
   strax efter start erbjuder appen installation av saknade valfria
   tillägg (Tesseract OCR, pytesseract, PyMuPDF, pdftoppm, pystray) med

@@ -70,7 +70,7 @@ __all__ = [
     "crash_report",
     # sessionslogg (logga allt, REQ-N1)
     "SESSION_ID", "start_session", "session_log", "session_error",
-    "session_path", "session_dir", "latest_session_log",
+    "session_path", "session_dir", "log_dir", "latest_session_log",
     "install_excepthooks", "close_session",
 ]
 
@@ -1428,8 +1428,8 @@ def _mac_plist_bytes() -> bytes:
         "ProgramArguments": argv,
         "RunAtLoad": True,
         "WorkingDirectory": workdir,
-        "StandardOutPath": str(config_dir() / "logs" / "autostart.log"),
-        "StandardErrorPath": str(config_dir() / "logs" / "autostart.log"),
+        "StandardOutPath": str(log_dir() / "autostart.log"),
+        "StandardErrorPath": str(log_dir() / "autostart.log"),
         "ProcessType": "Interactive",
         "LimitLoadToSessionType": "Aqua",
     }
@@ -1485,7 +1485,7 @@ def set_autostart(enabled: bool) -> Tuple[bool, str]:
                 return True, "Borttagen"
             plist.parent.mkdir(parents=True, exist_ok=True)
             try:
-                (config_dir() / "logs").mkdir(parents=True, exist_ok=True)
+                log_dir().mkdir(parents=True, exist_ok=True)
             except OSError:
                 pass
             _atomic_text(plist, _mac_plist_bytes().decode("utf-8"))
@@ -2492,7 +2492,7 @@ def crash_report(exc: BaseException) -> None:
 def _month_log_path(name: str) -> Path:
     """Månadens loggfil: logs/<ÅÅÅÅ-MM>/<name>.log (REQ-N1)."""
     from datetime import datetime
-    return config_dir() / "logs" / datetime.now().strftime("%Y-%m") / f"{name}.log"
+    return log_dir() / datetime.now().strftime("%Y-%m") / f"{name}.log"
 
 
 # --------------------------------------------------------------------------
@@ -2527,9 +2527,14 @@ _LEVELS = {"info": "INFO", "ok": "OK", "warn": "VARN", "err": "FEL",
            "fel": "FEL", "debug": "DEBUG"}
 
 
-def session_dir() -> Path:
-    """Appens log-mapp - ALLA loggar bor här (användarorder)."""
+def log_dir() -> Path:
+    """Appens enda loggmapp: en egen `logs/`-undermapp i appens datamapp."""
     return config_dir() / "logs"
+
+
+def session_dir() -> Path:
+    """Bakåtkompatibelt namn; pekar alltid på appens gemensamma loggmapp."""
+    return log_dir()
 
 
 class LogContext:
@@ -2833,28 +2838,35 @@ def archive_old_logs(days: int = 3) -> int:
 
 
 def migrate_legacy_logs() -> None:
-    """Flytta gamla krasch.log från config-roten in i logs/ (L7).
+    """Flytta äldre rotloggar till logs/ utan att skriva över något.
 
-    Körs en gång per session av start_session(). Nyast vinner: finns redan
-    en krasch.log i logs/ parkeras den gamla som krasch-gammal.log,
-    annars flyttas den. Raderas aldrig.
+    Den gamla appversionen kunde lämna .log-filer direkt i appmappen.
+    Nya och kolliderande historikfiler hamnar i logs/äldre/. Inget raderas.
     """
     try:
-        gammal = config_dir() / "krasch.log"
-        if not gammal.exists():
-            return
-        ny = session_dir() / "krasch.log"
-        if ny.exists():
-            parkerad = config_dir() / "krasch-gammal.log"
-            os.replace(gammal, parkerad)
-            session_log("logg", f"Äldre krasch.log parkerad: {parkerad}")
-        else:
-            ny.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(gammal, ny)
-            session_log("logg", f"Äldre krasch.log flyttad till log-mappen: {ny}")
+        root = config_dir()
+        base = log_dir()
+        gamla = [path for path in root.glob("*.log") if path.is_file()]
     except OSError as exc:
-        session_log("logg", f"Migrering av gammal krasch.log misslyckades: {exc}",
-                    "warn")
+        session_log("logg", f"Kunde inte läsa äldre loggar: {exc}", "warn")
+        return
+    for old in gamla:
+        try:
+            if old.name.casefold() == "krasch.log" and not (base / old.name).exists():
+                target = base / old.name
+            else:
+                target = base / "äldre" / old.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            original = target
+            number = 2
+            while target.exists():
+                target = original.with_name(f"{original.stem} ({number}){original.suffix}")
+                number += 1
+            os.replace(old, target)
+            session_log("logg", f"Äldre rotlogg flyttad till log-mappen: {target}")
+        except OSError as exc:
+            session_log("logg", f"Kunde inte flytta {old.name} till log-mappen: {exc}",
+                        "warn")
 
 
 def start_session(banner_lines: Optional[List[str]] = None) -> Optional[Path]:
@@ -3928,7 +3940,7 @@ def _self_test() -> int:
     print(f"  Systemfält:     {'ja' if tray_available() else 'nej (pip install pystray)'}")
     print(f"  Autostart:      {'stöds' if autostart_supported() else 'stöds ej'}"
           f" - just nu {'på' if autostart_enabled() else 'av'}")
-    print(f"  Loggmapp:       {config_dir() / 'logs'}")
+    print(f"  Loggmapp:       {log_dir()}")
     print(f"  Hjälptext:      {len(HELP_CONTENT)} block, "
           f"{len(help_as_text())} tecken")
     print(f"  Uppdatering:    enbart GitHub Releases ({UPDATE_REPO}) - "
@@ -3976,7 +3988,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  Autostartkonflikt: {namn} -> {varde[:80]}")
         j = config_dir() / "json" / "history.journal"
         print(f"  Historikjournal: {j.stat().st_size if j.exists() else 0} B")
-        logg = config_dir() / "logs"
+        logg = log_dir()
         print(f"  Loggmapp:        {logg if logg.exists() else 'tom'}")
         senaste = latest_session_log()
         print(f"  Sessionslogg:    {senaste or 'ingen än'}")
