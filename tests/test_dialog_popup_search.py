@@ -86,3 +86,41 @@ def test_keyboard_opened_dropdown_returns_focus_to_search_field():
     scheduled[-1]()
 
     assert focus_calls == ["focus", ("icursor", "end")]
+
+
+class _SearchCombo:
+    def __init__(self, text):
+        self.text = text
+        self.values = []
+        self._ta_seed = ""
+
+    def get(self):
+        return self.text
+
+    def __setitem__(self, key, value):
+        assert key == "values"
+        self.values = list(value)
+
+
+def test_typing_in_search_field_keeps_an_already_open_dropdown_posted():
+    combo = _SearchCombo("li")
+    refreshed = []
+    rendered = []
+    dialog = SimpleNamespace(
+        combo=combo,
+        _popdown_open=lambda: True,
+        _all_categories=["Lindab", "Lidingö", "Ekonomikontor"],
+        _combo_render_suggestions=rendered.append,
+        _combo_show_hint=lambda *args: None,
+        mode=SimpleNamespace(set=lambda value: None),
+        _sync=lambda: None,
+        new_entry=SimpleNamespace(delete=lambda *args: None),
+        _combo_refresh_popup=refreshed.append,
+    )
+
+    P.ReviewDialog._combo_search(
+        dialog, SimpleNamespace(keysym="n", state=0))
+
+    assert combo.values == ["Lindab", "Lidingö"]
+    assert rendered == [[]]  # the native popup is used; no second list appears
+    assert refreshed == [True]  # do not unpost the dropdown while typing

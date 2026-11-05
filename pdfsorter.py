@@ -4542,6 +4542,11 @@ class ReviewDialog:
         ``keep_popup`` används när tangenten kommer från den redan öppna
         Tk-rullgardinen: uppdatera dess rader utan att stänga den.
         """
+        # Focus stays in the editable field while Tk's native list is open.
+        # A normal KeyRelease from that field must therefore refresh, not close,
+        # the already-posted list. Popup keypresses pass keep_popup explicitly.
+        if event is not None and self._popdown_open():
+            keep_popup = True
         if event is not None:
             if getattr(event, "keysym", "") in (
                     "Up", "Down", "Return", "Escape", "Tab",
