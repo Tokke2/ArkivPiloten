@@ -51,6 +51,25 @@ def test_package_updates_are_scheduled_weekly_not_run_on_each_start():
     assert "if ($WeeklyUpdate -or -not $exe)" in policy
     assert "if ($WeeklyUpdate) {" in policy
     assert "-DaysOfWeek Monday" in scheduler
-    assert "AddHours(8)" in scheduler
+    assert "$nextMonday = $now.Date.AddDays($daysUntilMonday).AddHours(8)" in scheduler
+    assert "if ($nextMonday -le $now) { $nextMonday = $nextMonday.AddDays(7) }" in scheduler
+    assert "-At $nextMonday" in scheduler
     assert "-StartWhenAvailable" in scheduler
     assert "Interactive" in scheduler
+
+
+def test_python_itself_is_not_updated_on_normal_launcher_start():
+    launcher = (ROOT / "ArkivPiloten - Installera senaste Python och starta.bat")
+    startup = launcher.read_text(encoding="utf-8")
+    updater = (ROOT / "arkivpiloten_python.ps1").read_text(encoding="utf-8")
+
+    assert "arkivpiloten_python.ps1" in startup
+    assert "-WeeklyUpdate" not in startup
+    assert "if ($WeeklyUpdate -or -not $exe) { $latest = Get-LatestPythonVersion }" in updater
+    assert "if ($WeeklyUpdate -and $exe -and $latest -and $cur" in updater
+
+
+def test_manual_addon_update_remains_available_in_help_dialog():
+    source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
+    assert '_action("Uppdatera tillägg", _uppdatera_paket)' in source
+    assert "Du kan uppdatera tilläggen manuellt här." in source

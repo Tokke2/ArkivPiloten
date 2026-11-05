@@ -5304,6 +5304,7 @@ _UI_EN = {
     "Den här och återstående filer blir kvar i kön.":
         "This file and the remaining files will stay in the review queue.",
     "Tillägg och OCR…": "Packages and OCR…",
+    "Uppdatera tillägg": "Update add-ons",
     "Stoppar efter pågående fil…": "Stopping after the current file…",
     "Starta bevakning": "Start watching", "Stoppa bevakning": "Stop watching",
     "●  Bevakning av": "●  Watching off",
@@ -10863,7 +10864,9 @@ class App:
                       justify="left").pack(
                 anchor="w", padx=16, pady=(6, 0))
             status = tk.StringVar(value=(
-                "Automatisk Python- och paketuppdatering sker måndagar kl. 08:00."
+                "Ingen Python-uppdatering körs när appen startar. "
+                "Automatiska Python- och tilläggsuppdateringar körs "
+                "måndagar kl. 08:00. Du kan uppdatera tilläggen manuellt här."
             ))
             ttk.Label(win, textvariable=status, style="Faint.TLabel",
                       wraplength=wrap, justify="left").pack(
@@ -10874,8 +10877,8 @@ class App:
                 paket = [e["nyckel"] for e in missing_extensions()
                          if e["slag"] == "pip"]
                 if not paket:
-                    status.set("Inga Python-paket saknas. Välj 'Uppdatera "
-                               "Python-paket' om du vill uppdatera dem nu.")
+                    status.set("Inga Python-tillägg saknas. Välj 'Uppdatera "
+                               "tillägg' om du vill installera senaste versionerna nu.")
                     return
                 status.set(f"Installerar {', '.join(paket)} …")
 
@@ -10956,7 +10959,7 @@ class App:
                     args=(self.PIP_PAKET, et2, bar2, win2, True),
                     daemon=True, name="pdfsorter-pipupgrade").start()
 
-            _action("Uppdatera paket", _uppdatera_paket)
+            _action("Uppdatera tillägg", _uppdatera_paket)
             if sys.platform.startswith("win"):
                 _action("Installera Tesseract", _auto_tess)
 

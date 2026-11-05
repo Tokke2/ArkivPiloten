@@ -24,8 +24,16 @@ try {
 
     $action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments `
         -WorkingDirectory $appDir
+    # A newly created task must not run immediately just because the app
+    # started on Monday after 08:00. Its first occurrence is always in the
+    # future; later missed weekly runs can still use StartWhenAvailable.
+    $now = Get-Date
+    $daysUntilMonday = ([int][DayOfWeek]::Monday -
+        [int]$now.DayOfWeek + 7) % 7
+    $nextMonday = $now.Date.AddDays($daysUntilMonday).AddHours(8)
+    if ($nextMonday -le $now) { $nextMonday = $nextMonday.AddDays(7) }
     $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday `
-        -At ([datetime]::Today.AddHours(8))
+        -At $nextMonday
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
         -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries -RestartCount 3 `
