@@ -9,7 +9,7 @@ $statePath = Join-Path $appDir 'cache\python-packages-state.txt'
 $taskName = 'ArkivPiloten Python weekly update'
 $powershell = Join-Path $PSHOME 'powershell.exe'
 
-$arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $pythonScript +
+$arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $pythonScript +
     '" -WeeklyUpdate -RequirementsPath "' + $requirements +
     '" -LogPath "' + $logPath + '" -StatePath "' + $statePath + '"'
 

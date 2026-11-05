@@ -2720,11 +2720,14 @@ class SortEngine:
         return result
 
     def apply(self, decision: Decision, category: str, matched: List[str],
-              decided_by: str = "auto", learned: Optional[List[str]] = None) -> Tuple[bool, str]:
+              decided_by: str = "auto", learned: Optional[List[str]] = None,
+              cancel_event: Optional[threading.Event] = None) -> Tuple[bool, str]:
         # Hela verkställandet serialiseras: parallella sorteringstrådar får
         # aldrig tävla om målnamn (REQ-D2 - filer skrivs aldrig över).
         s = self.settings
         with self.lock:
+            if cancel_event is not None and cancel_event.is_set():
+                return False, "Avbruten innan filen flyttades; den ligger kvar."
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
                 return False, ("Filen ändrades efter analysen - lämnas "
@@ -2880,9 +2883,13 @@ class SortEngine:
             self.stats["sorted"] += 1
             return True, str(target)
 
-    def send_to_unmatched(self, decision: Decision) -> Tuple[bool, str]:
+    def send_to_unmatched(self, decision: Decision,
+                          cancel_event: Optional[threading.Event] = None
+                          ) -> Tuple[bool, str]:
         """Flytta till _Osorterat om en sådan mapp är konfigurerad."""
         with self.lock:
+            if cancel_event is not None and cancel_event.is_set():
+                return False, "Avbruten innan filen flyttades; den ligger kvar."
             if (not self.settings.get("dry_run", False)
                     and self._fil_ändrad(decision)):
                 self.stats["left"] += 1
@@ -3574,27 +3581,33 @@ def human_size(n: float) -> str:
 
 
 def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None:
-    """Anpassa fönstret till skärmstorleken (ANVÄNDARORDER 2026-08-26).
+    """Storleksanpassa och centrera ett fönster inom den synliga skärmen.
 
-    Fönstret blir aldrig större än skärmen, centreras, och minsta storlek
-    krymps på små skärmar så att inget fönster blir oåtkomligt. På en stor
-    skärm får fönstret sin tänkta storlek; på en liten anpassas den nedåt.
+    Minsta mått anpassas också till små skärmar. Innehåll som inte ryms ska
+    i första hand kunna rullas eller visas med radbrytning, inte klippas bort.
     """
     try:
-        sw = win.winfo_screenwidth()
-        sh = win.winfo_screenheight()
+        sw = max(320, int(win.winfo_screenwidth()))
+        sh = max(320, int(win.winfo_screenheight()))
     except Exception:
-        sw, sh = want_w + 240, want_h + 240
-    w = min(want_w, sw - 120)
-    h = min(want_h, sh - 100)
-    w = max(w, min(min_w, sw - 20), 640)
-    h = max(h, min(min_h, sh - 20), 480)
-    win.minsize(min(min_w, sw - 20), min(min_h, sh - 20))
+        sw, sh = max(320, want_w + 80), max(320, want_h + 120)
+    margin_x = min(48, max(8, sw // 40))
+    margin_y = min(72, max(8, sh // 30))
+    avail_w = max(1, sw - 2 * margin_x)
+    avail_h = max(1, sh - 2 * margin_y)
+    min_w_fit = min(max(1, min_w), avail_w)
+    min_h_fit = min(max(1, min_h), avail_h)
+    w = max(min_w_fit, min(max(1, want_w), avail_w))
+    h = max(min_h_fit, min(max(1, want_h), avail_h))
+    try:
+        win.minsize(min_w_fit, min_h_fit)
+    except Exception:
+        pass
     x = max(0, (sw - w) // 2)
     y = max(0, (sh - h) // 2)
     win.geometry(f"{w}x{h}+{x}+{y}")
     session_log("fönster", f"Geometri: skärm {sw}x{sh}, fönster {w}x{h}+{x}+{y} "
-                f"(önskat {want_w}x{want_h}, min {min_w}x{min_h})")
+                f"(önskat {want_w}x{want_h}, min {min_w_fit}x{min_h_fit})")
 
 
 # --------------------------------------------------------------------------
@@ -4123,17 +4136,58 @@ class ReviewDialog:
         btns = ttk.Frame(self.win)
         btns.grid(row=1, column=0, sticky="ew", padx=14, pady=12)
         btns.columnconfigure(2, weight=1)
-        ttk.Button(btns, text="Förhandsgranska PDF",
-                   command=lambda: open_externally(decision.path)).grid(row=0, column=0)
-        ttk.Button(btns, text="Hoppa över",
-                   command=self._skip).grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(btns, text="Ignorera filen",
-                   command=self._ignore_file).grid(row=0, column=2, padx=8)
-        ttk.Button(btns, text="Lägg i _Osorterat",
-                   command=self._unmatched).grid(row=0, column=3, padx=(0, 8))
+        actions = [
+            ttk.Button(btns, text="Förhandsgranska PDF",
+                       command=lambda: open_externally(decision.path)),
+            ttk.Button(btns, text="Hoppa över", command=self._skip),
+            ttk.Button(btns, text="Ignorera filen", command=self._ignore_file),
+            ttk.Button(btns, text="Lägg i _Osorterat", command=self._unmatched),
+        ]
         ok = ttk.Button(btns, text="Spara & flytta", style="Accent.TButton",
                         command=self._ok)
-        ok.grid(row=0, column=4)
+        actions.append(ok)
+        for col in range(5):
+            btns.columnconfigure(col, weight=1)
+
+        self._stop_review_button = ttk.Button(
+            btns, text="Avsluta granskning", command=self._stop_review)
+        stop_hint = ttk.Label(
+            btns, text="Den här och återstående filer blir kvar i kön.",
+            style="CardMuted.TLabel", wraplength=520, justify="left")
+
+        self._review_buttons_compact = None
+        def layout_review_buttons(_event=None):
+            compact = btns.winfo_width() < 780
+            if compact == self._review_buttons_compact:
+                return
+            self._review_buttons_compact = compact
+            if compact:
+                for index, button in enumerate(actions):
+                    button.grid_configure(row=index // 3, column=index % 3,
+                                          columnspan=1, sticky="ew",
+                                          padx=4, pady=3)
+                stop_row = 2
+                stop_hint.configure(wraplength=max(180, btns.winfo_width() - 170))
+                self._stop_review_button.grid_configure(
+                    row=stop_row, column=0, columnspan=1, sticky="w",
+                    padx=4, pady=(8, 0))
+                stop_hint.grid_configure(row=stop_row, column=1,
+                                         columnspan=2, sticky="w",
+                                         padx=4, pady=(8, 0))
+            else:
+                for index, button in enumerate(actions):
+                    button.grid_configure(row=0, column=index, columnspan=1,
+                                          sticky="ew", padx=(0 if index == 0 else 6, 0),
+                                          pady=0)
+                stop_hint.configure(wraplength=560)
+                self._stop_review_button.grid_configure(
+                    row=1, column=0, columnspan=1, sticky="w",
+                    padx=0, pady=(10, 0))
+                stop_hint.grid_configure(row=1, column=1, columnspan=4,
+                                         sticky="w", padx=8, pady=(10, 0))
+
+        btns.bind("<Configure>", layout_review_buttons, add="+")
+        self.win.after_idle(layout_review_buttons)
         ok.focus_set()
 
         self._sync()
@@ -4949,6 +5003,11 @@ class ReviewDialog:
         self.result = None
         self._close()
 
+    def _stop_review(self) -> None:
+        """Avsluta hela granskningsomgången utan att tömma den kvarvarande kön."""
+        self.result = {"stop_review": True}
+        self._close()
+
     def _ignore_file(self) -> None:
         """Markera just DENNA fil som ignorerad: appen känns igen den på
         innehållet (hash) och frågar aldrig igen, oavsett namn eller mapp."""
@@ -5137,7 +5196,8 @@ class ConflictDialog:
                            and app.theme.dark)))
         self.win.title(f"{APP_NAME} - dubblett")
         self.win.transient(parent)
-        self.win.resizable(False, False)
+        self.win.resizable(True, True)
+        _fit_geometry(self.win, 640, 300, 460, 230)
         try:
             self.win.configure(background=(app.C if app else COLORS)["bg"])
         except Exception:
@@ -5148,14 +5208,14 @@ class ConflictDialog:
                if kind == "name" else
                "En fil med IDENTISKT innehåll (SHA-256) finns redan i "
                "arkivmappen, fast med annat namn eller i en annan undermapp.")
-        tk.Label(self.win,
-                 text=f"{vad}\n\n"
-                      f"  Ny fil:      {src.name}\n"
-                      f"  I målmappen: {target.name}\n\n"
-                      f"Vad vill du göra?",
-                 justify="left", anchor="w",
-                 background=c["bg"], foreground=c["text"],
-                 font=("TkDefaultFont", 10)).pack(padx=18, pady=(16, 8))
+        ttk.Label(self.win,
+                  text=f"{vad}\n\n"
+                       f"Ny fil: {src.name}\n"
+                       f"Befintlig målfil: {target.name}\n\n"
+                       "Välj hur dubbletten ska hanteras:",
+                  justify="left", anchor="w",
+                  wraplength=max(240, min(560, self.win.winfo_screenwidth() - 80)),
+                  style="TLabel").pack(fill="x", padx=18, pady=(16, 8))
 
         self.var_remember = tk.BooleanVar(value=False)
         ttk.Checkbutton(self.win, variable=self.var_remember,
@@ -5216,6 +5276,12 @@ _UI_EN = {
     "Sortera": "Sort", "Matchningar": "Rules", "Inställningar": "Settings",
     "Granska": "Review", "Historik": "History", "Hjälp": "Help",
     "Sortera nu": "Sort now", "Sorterar…": "Sorting…",
+    "Avbryt sortering": "Stop sorting", "Stoppar…": "Stopping…",
+    "Avsluta granskning": "Stop reviewing",
+    "Den här och återstående filer blir kvar i kön.":
+        "This file and the remaining files will stay in the review queue.",
+    "Tillägg och OCR…": "Packages and OCR…",
+    "Stoppar efter pågående fil…": "Stopping after the current file…",
     "Starta bevakning": "Start watching", "Stoppa bevakning": "Stop watching",
     "●  Bevakning av": "●  Watching off",
     "TESTKÖRNING": "DRY RUN", "Spara": "Save", "Spara ändringar": "Save changes",
@@ -5731,6 +5797,7 @@ class App:
         self.queue: List[Decision] = []          # osäkra filer som väntar
         self._queued_paths: set = set()
         self._busy = False
+        self._sort_cancel_event: Optional[threading.Event] = None
         self._ui_calls: List[Callable[[], None]] = []
         self._ui_lock = threading.Lock()
         #: UI-tråden: används för att avgöra om en dialog kan visas direkt
@@ -5916,10 +5983,9 @@ class App:
                     "(den var på när appen uppdaterades)")
             self.root.after(400, lambda: self._start_watch(quiet=True))
 
-        # Vid start: installera saknade Python-tillägg automatiskt med
-        # progress bar (ANVÄNDARORDER 2026-10-06); därefter dialog för
-        # det som inte är pip (Tesseract/svenska). Aldrig blockerande.
-        self.root.after(900, self._autoinstallera_tillagg)
+        # På Windows säkerställs bara att veckouppgiften finns. Ingen kontroll
+        # eller pip-uppdatering av tillägg körs vid vanlig appstart.
+        self.root.after(900, self._ensure_weekly_python_update_task)
 
         # En vanlig manuell start visas normalt. OS-autostarten använder
         # --tray och startar fortfarande gömd; användarens val kan även
@@ -6499,55 +6565,115 @@ class App:
         outbox.columnconfigure(0, weight=1)
         outbox.columnconfigure(1, weight=1)
 
+        self._sort_top_compact = None
+        def layout_folder_cards(_event=None):
+            compact = top.winfo_width() < 920
+            if compact == self._sort_top_compact:
+                return
+            self._sort_top_compact = compact
+            if compact:
+                incard.grid_configure(row=0, column=0, padx=0,
+                                      pady=(0, T.GAP))
+                outcard.grid_configure(row=1, column=0, padx=0, pady=0)
+                top.columnconfigure(0, weight=1, uniform="m")
+                top.columnconfigure(1, weight=0, uniform="m")
+            else:
+                incard.grid_configure(row=0, column=0,
+                                      padx=(0, T.GAP), pady=0)
+                outcard.grid_configure(row=0, column=1, padx=0, pady=0)
+                top.columnconfigure(0, weight=3, uniform="m")
+                top.columnconfigure(1, weight=2, uniform="m")
+
+        top.bind("<Configure>", layout_folder_cards, add="+")
+        self.root.after_idle(layout_folder_cards)
+
         # -- rad 2: handlingsraden ----------------------------------------
         # Det viktigaste på hela fliken. Egen vit yta så att knappen
         # "Sortera nu" läses som fönstrets primära åtgärd.
         actcard = ttk.Frame(f, style="Card.TFrame")
         actcard.grid(row=1, column=0, sticky="ew", padx=T.PAD, pady=(T.GAP, 0))
-        actcard.columnconfigure(2, weight=1)
-
+        actcard.columnconfigure(3, weight=1)
         self.btn_sort = ttk.Button(actcard, text="Sortera nu",
                                    style="Accent.TButton", command=self._sort_now)
-        self.btn_sort.grid(row=0, column=0, padx=(T.INNER, 8), pady=T.INNER)
+        self.btn_cancel_sort = ttk.Button(
+            actcard, text="Avbryt sortering", state="disabled",
+            command=self._cancel_sorting)
         self.btn_watch = ttk.Button(actcard, text="Starta bevakning",
                                     command=self._toggle_watch)
-        self.btn_watch.grid(row=0, column=1, pady=T.INNER)
-
         watch_status = ttk.Frame(actcard, style="CardInner.TFrame")
-        watch_status.grid(row=0, column=2, sticky="w", padx=14)
         self.lbl_watch = ttk.Label(watch_status, text="● Bevakning: AV",
                                    style="PillMuted.TLabel")
-        self.lbl_watch.pack(anchor="w")
         self.lbl_watch_activity = ttk.Label(
             watch_status, text="Senast hittad: aldrig · autosorterad: aldrig",
-            style="CardMuted.TLabel")
+            style="CardMuted.TLabel", wraplength=360, justify="left")
+        self.lbl_watch.pack(anchor="w")
         self.lbl_watch_activity.pack(anchor="w", pady=(2, 0))
 
-        # Tre siffror som svarar på "hur går det?" utan att man läser loggen.
+        # Tre siffror svarar på hur körningen går utan att behöva läsa loggen.
         stats = ttk.Frame(actcard, style="CardInner.TFrame")
-        stats.grid(row=0, column=3, sticky="e", padx=(0, 8))
         self.stat_labels: Dict[str, Any] = {}
         for i, (key, caption) in enumerate((("sorted", "sorterade"),
                                             ("queue", "att granska"),
                                             ("errors", "fel"))):
             cell = ttk.Frame(stats, style="CardInner.TFrame")
-            cell.grid(row=0, column=i, padx=(0 if i == 0 else 22, 0))
+            cell.grid(row=0, column=i, padx=(0 if i == 0 else 16, 0))
             num = ttk.Label(cell, text="0", style="CardHead.TLabel")
             num.pack()
             ttk.Label(cell, text=caption, style="CardMuted.TLabel").pack()
             self.stat_labels[key] = num
 
         self.progress = ttk.Progressbar(actcard, mode="determinate", length=170)
-        self.progress.grid(row=0, column=4, padx=(14, 0))
-
-        # Statuspiller: testkörning och procent syns vid en blick, i tema-
-        # systemets egna pillytor i stället för utspridda färgattribut.
         self.pill_dry = ttk.Label(actcard, text="TESTKÖRNING",
                                   style="PillWarn.TLabel")
-        self.pill_dry.grid(row=0, column=5, padx=(10, 0))
-        self.lbl_progress = ttk.Label(actcard, text="", width=6,
-                                      style="CardMuted.TLabel")
-        self.lbl_progress.grid(row=0, column=6, padx=(6, T.INNER))
+        self.lbl_progress = ttk.Label(actcard, text="", width=16,
+                                      style="CardMuted.TLabel", anchor="e")
+
+        self._action_compact = None
+        def layout_actions(_event=None):
+            compact = actcard.winfo_width() < 860
+            if compact == self._action_compact:
+                return
+            self._action_compact = compact
+            if compact:
+                self.btn_sort.grid_configure(row=0, column=0, padx=(T.INNER, 6))
+                self.btn_cancel_sort.grid_configure(row=0, column=1, padx=6)
+                self.btn_watch.grid_configure(row=0, column=2, padx=6)
+                watch_status.grid_configure(row=1, column=0, columnspan=3,
+                                            sticky="ew", padx=T.INNER,
+                                            pady=(0, 4))
+                stats.grid_configure(row=2, column=0, columnspan=2,
+                                     sticky="w", padx=T.INNER)
+                self.progress.grid_configure(row=2, column=2, padx=(6, T.INNER))
+                self.progress.configure(length=120)
+                self.pill_dry.grid_configure(row=3, column=0, padx=T.INNER)
+                self.lbl_progress.grid_configure(row=3, column=1, columnspan=2,
+                                                 sticky="e", padx=T.INNER)
+                for col in range(3):
+                    actcard.columnconfigure(col, weight=1 if col == 2 else 0)
+                actcard.columnconfigure(3, weight=0)
+            else:
+                self.btn_sort.grid_configure(row=0, column=0,
+                                             padx=(T.INNER, 8))
+                self.btn_cancel_sort.grid_configure(row=0, column=1, padx=6)
+                self.btn_watch.grid_configure(row=0, column=2, padx=6)
+                watch_status.grid_configure(row=0, column=3, columnspan=1,
+                                            sticky="w", padx=14, pady=0)
+                stats.grid_configure(row=1, column=0, sticky="w",
+                                     padx=(T.INNER, 8))
+                self.progress.grid_configure(row=1, column=1,
+                                             padx=(8, 0), sticky="ew")
+                self.progress.configure(length=170)
+                self.pill_dry.grid_configure(row=1, column=2, padx=(10, 0))
+                self.lbl_progress.grid_configure(row=1, column=3,
+                                                 padx=(6, T.INNER), sticky="e")
+                actcard.columnconfigure(0, weight=0)
+                actcard.columnconfigure(1, weight=0)
+                actcard.columnconfigure(2, weight=0)
+                actcard.columnconfigure(3, weight=1)
+
+        actcard.bind("<Configure>", layout_actions, add="+")
+        self.root.after_idle(layout_actions)
+
 
         # -- rad 3: loggen -------------------------------------------------
         logcard = T.card(f, "Logg", "senaste händelserna")
@@ -6556,7 +6682,7 @@ class App:
         logf = logcard.body
         logf.columnconfigure(0, weight=1)
         logf.rowconfigure(0, weight=1)
-        self.logbox = tk.Text(logf, height=10, wrap="none", state="disabled",
+        self.logbox = tk.Text(logf, height=10, wrap="word", state="disabled",
                               font=T.f_mono, borderwidth=0,
                               background=self.C["surface"],
                               foreground=self.C["text"],
@@ -7779,42 +7905,72 @@ class App:
             self._log("Inga PDF-filer i de bevakade mapparna.", "warn")
             return
         self._busy = True
+        self._sort_cancel_event = threading.Event()
         self.btn_sort.configure(state="disabled", text="Sorterar…")
+        self.btn_cancel_sort.configure(state="normal", text="Avbryt sortering")
         self.progress.configure(maximum=len(files), value=0)
-        self.lbl_progress.configure(text="0 %")
+        self.lbl_progress.configure(text=f"0 av {len(files)}")
         self._log(f"— Startar: {len(files)} filer "
                   f"{'(TESTKÖRNING)' if self.settings['dry_run'] else ''} —", "info")
-        threading.Thread(target=self._sort_worker, args=(files,), daemon=True).start()
+        threading.Thread(target=self._sort_worker,
+                         args=(files, self._sort_cancel_event),
+                         daemon=True, name="pdfsorter-sort").start()
 
-    def _sort_worker(self, files: List[Path]) -> None:
+    def _cancel_sorting(self) -> None:
+        """Stoppa den manuella batchen efter en redan pågående fil."""
+        event = self._sort_cancel_event
+        if not self._busy or event is None or event.is_set():
+            return
+        event.set()
+        self.btn_cancel_sort.configure(state="disabled", text="Stoppar…")
+        self.lbl_progress.configure(text="Stoppar efter pågående fil…")
+        self._log("Avbryt begärt. En fil som redan flyttas kan slutföras; "
+                  "övriga filer lämnas kvar. Redan flyttade filer återställs inte.",
+                  "warn")
+
+    def _sort_worker(self, files: List[Path],
+                     cancel_event: Optional[threading.Event] = None) -> None:
         # Parallell analys: PDF-läsningen är den långsamma delen och är
         # oberoende mellan filer, så flera läses samtidigt. Själva flytten
         # serialiserar motorn internt - "skriv aldrig över" gäller alltså
         # även när trådar tävlade om samma målnamn.
         total = len(files)
         workers = max(2, min(8, os.cpu_count() or 2))
+        cancel_event = cancel_event or threading.Event()
         done = 0
         done_lock = threading.Lock()
 
         def job(path: Path) -> None:
             nonlocal done
-            if not path.exists():
+            if cancel_event.is_set() or not path.exists():
                 return
+            attempted = False
             try:
+                attempted = True
                 decision = self.engine.analyze(path)
-                self._handle(decision, from_watch=False)
+                if not cancel_event.is_set():
+                    self._handle(decision, from_watch=False,
+                                 cancel_event=cancel_event)
             except Exception as exc:
-                self._log_threadsafe(f"{path.name}  ✖ {type(exc).__name__}: {exc}", "err")
-            with done_lock:
-                done += 1
-                v = done
-            self._post(lambda v=v: (
-                self.progress.configure(value=v),
-                self.lbl_progress.configure(text=f"{v * 100 // total} %")))
+                if not cancel_event.is_set():
+                    self._log_threadsafe(
+                        f"{path.name}  ✖ {type(exc).__name__}: {exc}", "err")
+            finally:
+                if attempted:
+                    with done_lock:
+                        done += 1
+                        value = done
+                    def update_progress(value=value):
+                        if not self.root.winfo_exists():
+                            return
+                        self.progress.configure(value=value)
+                        suffix = " · stoppar" if cancel_event.is_set() else ""
+                        self.lbl_progress.configure(
+                            text=f"{value}/{total}{suffix}")
+                    self._post(update_progress)
 
-        # Hängningsskydd: även om något oväntat kastas här måste
-        # _finish_run nås, annars förblir _busy sann och "Sortera nu"
-        # låses för alltid.
+        # Uppgifter som ännu inte börjat analysera lämnas orörda efter stopp.
+        # Ett redan pågående beslut får nå en säker gräns innan det avslutas.
         with LogContext("tid", f"batchsortering {total} filer, "
                         f"{workers} trådar"):
             try:
@@ -7827,18 +7983,32 @@ class App:
                 self._fel(exc, "batchsortering")
                 self._log_threadsafe(f"Sorteringen avbröts: {exc}", "err")
             finally:
-                self._post(self._finish_run)
+                with done_lock:
+                    completed = done
+                cancelled = cancel_event.is_set()
+                self._post(lambda: self._finish_run(
+                    cancelled=cancelled, completed=completed, total=total))
 
-    def _finish_run(self) -> None:
+    def _finish_run(self, cancelled: bool = False,
+                    completed: int = 0, total: int = 0) -> None:
         self._busy = False
+        self._sort_cancel_event = None
         self.btn_sort.configure(state="normal", text="Sortera nu")
+        self.btn_cancel_sort.configure(state="disabled", text="Avbryt sortering")
         self.lbl_progress.configure(text="")
         self.engine.flush_rules()          # debouncade skrivningar i hamn
         self._log(f"    Textcache: {TEXT_CACHE.stats()}", "info")
         s = self.engine.stats
-        self._log(f"— Klart: {s['sorted']} sorterade, {len(self.queue)} väntar på granskning, "
-                  f"{s['error']} fel —", "info")
         sorted_n = s["sorted"]
+        if cancelled:
+            self._log(
+                f"— Avbruten: {completed} av {total} filer analyserade; "
+                f"{sorted_n} sorterades, {len(self.queue)} väntar på granskning. "
+                "Redan flyttade filer behålls; övriga ligger kvar. —", "warn")
+        else:
+            self._log(f"— Klart: {sorted_n} sorterade, "
+                      f"{len(self.queue)} väntar på granskning, "
+                      f"{s['error']} fel —", "info")
         self._update_stats(sorted_n=sorted_n, errors=s["error"])
         self.engine.stats.clear()
         self._refresh_queue()
@@ -7849,11 +8019,15 @@ class App:
             self._notify(f"{sorted_n} filer sorterade"
                          + (f", {len(self.queue)} väntar på granskning"
                             if self.queue else ""))
-        if self.queue and self.settings.get("ask_when_unsure", True) and self.visible:
+        if (not cancelled and self.queue
+                and self.settings.get("ask_when_unsure", True) and self.visible):
             self._process_queue()
 
-    def _handle(self, decision: Decision, from_watch: bool) -> None:
+    def _handle(self, decision: Decision, from_watch: bool,
+                cancel_event: Optional[threading.Event] = None) -> None:
         """Ta hand om ett beslut (körs i bakgrundstråd)."""
+        if cancel_event is not None and cancel_event.is_set():
+            return
         name = decision.path.name
         if decision.status == "ignored":
             self._log_threadsafe(f"{name}  ⊘ {decision.reason} - lämnas orörd",
@@ -7864,7 +8038,11 @@ class App:
             return
         if decision.status == "auto":
             best = decision.best
-            ok, msg = self.engine.apply(decision, best.name, best.matched, "auto")
+            ok, msg = self.engine.apply(
+                decision, best.name, best.matched, "auto",
+                cancel_event=cancel_event)
+            if not ok and msg.startswith("Avbruten"):
+                return
             if ok:
                 tag = " (OCR)" if decision.extraction.used_ocr else ""
                 # Felsökningsdesign: logga VAR träffarna satt, så att en
@@ -7891,7 +8069,10 @@ class App:
 
         # osäker
         if not self.settings.get("ask_when_unsure", True):
-            ok, msg = self.engine.send_to_unmatched(decision)
+            ok, msg = self.engine.send_to_unmatched(
+                decision, cancel_event=cancel_event)
+            if not ok and msg.startswith("Avbruten"):
+                return
             self._log_threadsafe(f"{name}  ⚠ {decision.reason} → "
                                  f"{'_Osorterat' if ok else msg}", "warn")
             return
@@ -8635,8 +8816,11 @@ class App:
         win.title(titel)
         win.configure(background=self.C["bg"])
         win.transient(self.root)
-        win.resizable(False, False)
-        ttk.Label(win, text=fråga).pack(padx=18, pady=(16, 8), anchor="w")
+        win.resizable(True, False)
+        _fit_geometry(win, 620, 250, 440, 210)
+        ttk.Label(win, text=fråga, wraplength=max(
+            260, min(540, win.winfo_screenwidth() - 80)),
+            justify="left").pack(padx=18, pady=(16, 8), anchor="w", fill="x")
         combo = ttk.Combobox(win, state="readonly", values=val, width=34)
         combo.current(0)
         combo.pack(padx=18, fill="x")
@@ -8847,6 +9031,7 @@ class App:
         existing = self.rules.all_keyword_texts()
         all_learned: List[str] = []
         last_category = ""
+        stopped_review = False
         i = start
         while i < len(self.queue):
             # Fönstret kan ha rivits medan förra dialogen var öppen (t.ex.
@@ -8893,7 +9078,14 @@ class App:
                 return
             finally:
                 self._review_dialog = None
-            if res is None:                        # hoppa över
+            if res and res.get("stop_review"):
+                stopped_review = True
+                kvar = len(self.queue) - i
+                self._log(f"Granskningen avslutades på begäran. "
+                          f"{kvar} filer ligger kvar i kön.", "warn")
+                self._refresh_queue()
+                break
+            if res is None:                        # hoppa över en fil
                 session_log("granska", f"Hoppade över {decision.path.name} "
                             "- filen ligger kvar i kön")
                 i += 1
@@ -8961,7 +9153,8 @@ class App:
         self._refresh_history()
 
         # Skanna om resten i bakgrunden - inmappar och _Osorterat
-        if all_learned and self.settings.get("rescan_after_learn", True):
+        if (all_learned and not stopped_review
+                and self.settings.get("rescan_after_learn", True)):
             self.rescan_after_learn(all_learned, last_category)
 
     def _apply_rule_to_queue(self, upto: int) -> int:
@@ -9538,22 +9731,44 @@ class App:
         bar = ttk.Frame(f)
         bar.grid(row=1, column=0, sticky="ew",
                  padx=self.theme.PAD, pady=(self.theme.GAP, self.theme.GAP))
-        ttk.Button(bar, text="Spara hjälpen som textfil…",
-                   command=self._save_help).pack(side="left")
-        ttk.Button(bar, text="Öppna inställningsmappen",
-                   command=lambda: open_externally(config_dir())).pack(side="left", padx=6)
-        ttk.Button(bar, text="Kopiera AI-rapport (alla fel)",
-                   command=self._copy_ai_report).pack(side="left", padx=6)
-        ttk.Button(bar, text="Kopiera diagnostik för support",
-                   command=self._copy_support_log).pack(side="left", padx=6)
-        ttk.Button(bar, text="Öppna log-mappen",
-                   command=self._open_log_dir).pack(side="left", padx=6)
-        ttk.Button(bar, text="Stöd projektet 💖",
-                   command=self._visa_stod).pack(side="left", padx=6)
-        ttk.Button(bar, text="Sök efter uppdateringar…",
-                   command=lambda: self._check_updates_gui(manual=True)).pack(side="left", padx=6)
-        ttk.Label(bar, text=f"{APP_NAME} {APP_VERSION}",
-                  style="Faint.TLabel").pack(side="right")
+        actions = [
+            ("Spara hjälpen som textfil…", self._save_help),
+            ("Öppna inställningsmappen", lambda: open_externally(config_dir())),
+            ("Kopiera AI-rapport (alla fel)", self._copy_ai_report),
+            ("Kopiera diagnostik för support", self._copy_support_log),
+            ("Öppna log-mappen", self._open_log_dir),
+            ("Stöd projektet 💖", self._visa_stod),
+            ("Tillägg och OCR…",
+             lambda: self._tillaggserbjudande(force=True)),
+            ("Sök efter uppdateringar…",
+             lambda: self._check_updates_gui(manual=True)),
+        ]
+        buttons = [ttk.Button(bar, text=label, command=command)
+                   for label, command in actions]
+        version = ttk.Label(bar, text=f"{APP_NAME} {APP_VERSION}",
+                             style="Faint.TLabel")
+        last_columns = None
+
+        def layout_help_bar(_event=None):
+            nonlocal last_columns
+            width = max(1, bar.winfo_width())
+            columns = 4 if width >= 900 else 2 if width >= 560 else 1
+            if columns == last_columns:
+                return
+            last_columns = columns
+            for col in range(4):
+                bar.columnconfigure(col, weight=0, uniform="")
+            for col in range(columns):
+                bar.columnconfigure(col, weight=1, uniform="help-actions")
+            for index, button in enumerate(buttons):
+                button.grid(row=index // columns, column=index % columns,
+                            sticky="ew", padx=4, pady=3)
+            version.grid(row=(len(buttons) + columns - 1) // columns,
+                         column=columns - 1, sticky="e", padx=4,
+                         pady=(2, 0))
+
+        bar.bind("<Configure>", layout_help_bar, add="+")
+        self.root.after_idle(layout_help_bar)
 
     # -- uppdatering från Git (2026-10-16) ------------------------------
     def _schedule_tick(self) -> None:
@@ -9884,7 +10099,8 @@ class App:
         brand_window(win)
         win.title("Inlärning per kategori")
         win.transient(self.root)
-        win.geometry("720x390")
+        win.resizable(True, True)
+        _fit_geometry(win, 920, 560, 620, 340)
         win.columnconfigure(0, weight=1)
         win.rowconfigure(0, weight=1)
         tree = ttk.Treeview(win, columns=("category", "files", "features", "accuracy", "updated"),
@@ -9896,7 +10112,12 @@ class App:
                                   ("updated", "SENAST UPPDATERAD", 180)):
             tree.heading(key, text=title)
             tree.column(key, width=width, anchor="w")
-        tree.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=10, pady=10)
+        tree.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        tree_y = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree_y.grid(row=0, column=1, sticky="ns", padx=(0, 10), pady=10)
+        tree_x = ttk.Scrollbar(win, orient="horizontal", command=tree.xview)
+        tree_x.grid(row=1, column=0, sticky="ew", padx=10)
+        tree.configure(yscrollcommand=tree_y.set, xscrollcommand=tree_x.set)
 
         def refresh() -> None:
             tree.delete(*tree.get_children())
@@ -9947,13 +10168,13 @@ class App:
 
         refresh()
         ttk.Button(win, text="Återställ kategori",
-                   command=reset_selected).grid(row=1, column=0, sticky="w",
-                                                 padx=10, pady=(0, 10))
+                   command=reset_selected).grid(row=2, column=0, sticky="w",
+                                                 padx=10, pady=10)
         ttk.Button(win, text="Återställ från historik",
-                   command=restore_selected).grid(row=1, column=1, sticky="w",
-                                                   padx=4, pady=(0, 10))
+                   command=restore_selected).grid(row=2, column=1, sticky="w",
+                                                   padx=4, pady=10)
         ttk.Button(win, text="Stäng", command=win.destroy).grid(
-            row=1, column=2, sticky="e", padx=10, pady=(0, 10))
+            row=2, column=2, sticky="e", padx=10, pady=10)
 
     def _cache_cleanup_tick(self) -> None:
         """Starta max en smart rensning per 24 timmar även vid lång drift."""
@@ -10351,23 +10572,42 @@ class App:
         brand_window(win)
         win.title("ArkivPiloten — stöd")
         win.transient(self.root)
-        win.resizable(False, False)
+        win.resizable(True, True)
+        _fit_geometry(win, 640, 760, 460, 420)
         try:
             win.configure(background=self.C["bg"])
             win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
         except Exception:
             pass
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(0, weight=1)
+        outer = ttk.Frame(win)
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0,
+                           background=self.C["bg"])
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scroll.set)
+        content = ttk.Frame(canvas)
+        content_id = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind("<Configure>", lambda _e: canvas.configure(
+            scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(
+            content_id, width=e.width))
         lang = tk.StringVar(value="sv")
 
         def T_(nyckel):
             return self.STOD_TEXT[lang.get()][nyckel]
 
-        rub = ttk.Label(win, text="", style="Head.TLabel")
+        rub = ttk.Label(content, text="", style="Head.TLabel")
         rub.pack(anchor="w", padx=18, pady=(16, 2))
-        und = ttk.Label(win, text="", style="CardMuted.TLabel",
+        und = ttk.Label(content, text="", style="CardMuted.TLabel",
                         wraplength=430)
         und.pack(anchor="w", padx=18)
-        sprakrad = ttk.Frame(win)
+        sprakrad = ttk.Frame(content)
         sprakrad.pack(anchor="w", padx=18, pady=(10, 0))
         ttk.Label(sprakrad, text="Språk / Language:",
                   style="CardMuted.TLabel").pack(side="left")
@@ -10376,8 +10616,8 @@ class App:
         ttk.Radiobutton(sprakrad, text="EN", value="en",
                         variable=lang).pack(side="left")
 
-        body = ttk.Frame(win)
-        body.pack(fill="both", padx=18, pady=10)
+        body = ttk.Frame(content)
+        body.pack(fill="both", expand=True, padx=18, pady=10)
         tiers = []
         for nyckel in ("t1", "t2", "t3"):
             f = ttk.Frame(body, style="Card.TFrame")
@@ -10428,7 +10668,7 @@ class App:
             except Exception as exc:
                 qr_lbl.configure(image="", text=f"QR-fel: {exc}")
 
-        tack = ttk.Label(win, text="", style="TLabel")
+        tack = ttk.Label(content, text="", style="TLabel", wraplength=560)
         tack.pack(anchor="w", padx=18, pady=(0, 14))
 
         def oversatt(*_):
@@ -10506,77 +10746,82 @@ class App:
         win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
         win.title(rubrik)
         win.transient(self.root)
-        win.resizable(False, False)
+        win.resizable(True, True)
+        _fit_geometry(win, 560, 190, 380, 150)
+        win.columnconfigure(0, weight=1)
         try:
             win.configure(background=self.C["bg"])
         except Exception:
             pass
-        ttk.Label(win, text=rubrik, style="TLabel").pack(
-            anchor="w", padx=16, pady=(14, 6))
+        ttk.Label(win, text=rubrik, style="TLabel", wraplength=500,
+                  justify="left").pack(
+            anchor="w", fill="x", padx=16, pady=(14, 6))
         bar = ttk.Progressbar(win, mode="indeterminate", length=380)
-        bar.pack(padx=16)
+        bar.pack(fill="x", padx=16)
         bar.start(12)
         etikett = ttk.Label(win, text="Startar …", style="Faint.TLabel",
-                            wraplength=400)
+                            wraplength=500, justify="left")
         etikett.pack(anchor="w", padx=16, pady=(8, 14))
         return win, bar, etikett
 
-    def _autoinstallera_tillagg(self) -> None:
-        """Installera saknade pip-paket automatiskt vid start, med
-        progress bar. Uppdatering via knappen i tilläggsdialogen."""
-        try:
-            st = backend_status()
-            saknas = []
-            if not st["pypdf"]:
-                saknas.append("pypdf")
+    def _ensure_weekly_python_update_task(self) -> None:
+        """Säkerställ veckoschemat utan att kontrollera paket vid appstart."""
+        if not sys.platform.startswith("win"):
+            return
+        script = Path(__file__).resolve().parent / \
+            "arkivpiloten_schedule_python_updates.ps1"
+        if not script.is_file():
+            return
+
+        def ensure() -> None:
+            args = ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden",
+                    "-ExecutionPolicy", "Bypass", "-File", str(script)]
+            kwargs = {"capture_output": True, "text": True, "timeout": 45}
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             try:
-                from PIL import Image  # noqa: F401
-            except Exception:
-                saknas.append("Pillow")
-            if not st["pytesseract"]:
-                saknas.append("pytesseract")
-            if not tray_available():
-                saknas.append("pystray")
-            if not saknas:
-                self._tillaggserbjudande()
-                return
-            self._h("tillägg", f"Autoinstallerar saknade paket: {saknas}")
-            win, bar, etikett = self._visa_progress(
-                f"Installerar Python-tillägg ({', '.join(saknas)}) …")
-            threading.Thread(target=self._pip_jobba,
-                             args=(tuple(saknas), etikett, bar, win),
-                             daemon=True, name="pdfsorter-autopip").start()
-            self.root.after(4000, self._tillaggserbjudande)
-        except Exception as exc:
-            self._h("tillägg", f"Autoinstall kunde inte starta: {exc}", "warn")
-            self._tillaggserbjudande()
+                result = subprocess.run(args, **kwargs)
+                if result.returncode:
+                    detail = (result.stderr or result.stdout or "").strip()
+                    self._h("tillägg", "Kunde inte säkerställa veckouppgiften"
+                            + (f": {detail[-500:]}" if detail else ""), "warn")
+            except Exception as exc:
+                self._h("tillägg", f"Kunde inte kontrollera veckoschemat: {exc}",
+                        "warn")
 
-    # -- tilläggserbjudande vid start (ANVÄNDARORDER 2026-09-28) -------
-    def _tillaggserbjudande(self) -> None:
-        """Erbjud installation av saknade tillägg vid start.
+        threading.Thread(target=ensure, daemon=True,
+                         name="weekly-python-task").start()
 
-        Skannade PDF:er kräver Tesseract; utan det ser användaren bara
-        röda felrader. Dialogen erbjuder pip-installation av Python-
-        paketen och hämtlänk till Tesseract, med ny kontroll efteråt.
-        Aldrig blockerande: hela bygget ligger i try/except och kan
-        stängas av med 'Visa inte igen'.
+    # -- manuell tilläggskontroll ---------------------------------------
+    def _tillaggserbjudande(self, force: bool = False) -> None:
+        """Visa tilläggs- och OCR-verktyg efter ett uttryckligt klick.
+
+        Ingen paketkontroll eller pip-installation sker automatiskt vid
+        appstart; den automatiska uppdateringen körs via veckoschemat.
         """
         try:
             saknade = missing_extensions()
-            if not saknade or self.settings.get("extensions_offer_hidden"):
+            if ((not saknade and not force)
+                    or (self.settings.get("extensions_offer_hidden") and not force)):
                 return
             tk, ttk = self.tk, self.ttk
             win = tk.Toplevel(self.root)
             brand_window(win)
-            win.title(f"{APP_NAME} - komplettera installationen")
+            win.title(f"{APP_NAME} - tillägg och OCR")
             win.transient(self.root)
-            win.resizable(False, False)
+            win.resizable(True, True)
+            _fit_geometry(win, 760, 560, 500, 420)
             try:
                 win.configure(background=self.C["bg"])
             except Exception:
                 pass
-            ttk.Label(win, text="Dessa tillägg saknas - appen fungerar "
-                      "bättre med dem:", style="TLabel").pack(
+            wrap = max(240, min(560, win.winfo_screenwidth() - 160))
+            rubrik = ("Saknade tillägg kan begränsa PDF-läsning och OCR:"
+                      if saknade else
+                      "Tillägg och OCR är installerade. Du kan kontrollera "
+                      "dem eller uppdatera paketen manuellt:")
+            ttk.Label(win, text=rubrik, style="TLabel", wraplength=wrap,
+                      justify="left").pack(
                 anchor="w", padx=16, pady=(14, 4))
             lista = tk.Listbox(win, height=min(6, len(saknade) + 1),
                                exportselection=False, activestyle="none",
@@ -10584,23 +10829,30 @@ class App:
                                foreground=self.C["text"],
                                highlightthickness=0)
             lista.pack(fill="x", padx=16)
-            for e in saknade:
-                lista.insert("end", f"{e['namn']}  -  {e['beskr']}")
-            ttk.Label(win, text="Tesseract: installera med standardsökväg "
-                      "och bocka i Swedish under språkvalet.",
-                      style="Faint.TLabel", wraplength=420).pack(
+            if saknade:
+                for e in saknade:
+                    lista.insert("end", f"{e['namn']}  -  {e['beskr']}")
+            else:
+                lista.insert("end", "Inga saknade tillägg upptäcktes.")
+            ttk.Label(win, text="Tesseract krävs för OCR av skannade PDF:er. "
+                      "Om det saknas kan du installera eller välja sökväg här.",
+                      style="Faint.TLabel", wraplength=wrap,
+                      justify="left").pack(
                 anchor="w", padx=16, pady=(6, 0))
-            status = tk.StringVar(value="")
+            status = tk.StringVar(value=(
+                "Automatisk Python- och paketuppdatering sker måndagar kl. 08:00."
+            ))
             ttk.Label(win, textvariable=status, style="Faint.TLabel",
-                      wraplength=440).pack(anchor="w", padx=16, pady=(4, 0))
+                      wraplength=wrap, justify="left").pack(
+                anchor="w", padx=16, pady=(4, 0))
             dolda = tk.BooleanVar(value=False)
 
             def _pip_installera():
                 paket = [e["nyckel"] for e in missing_extensions()
                          if e["slag"] == "pip"]
                 if not paket:
-                    status.set("Inga Python-paket saknas - hämta Tesseract "
-                               "och klicka sedan 'Kontrollera igen'.")
+                    status.set("Inga Python-paket saknas. Välj 'Uppdatera "
+                               "Python-paket' om du vill uppdatera dem nu.")
                     return
                 status.set(f"Installerar {', '.join(paket)} …")
 
@@ -10647,8 +10899,19 @@ class App:
 
             btns = ttk.Frame(win)
             btns.pack(fill="x", padx=16, pady=12)
-            ttk.Button(btns, text="Installera Python-paket",
-                       command=_pip_installera).pack(side="left")
+            for col in range(3):
+                btns.columnconfigure(col, weight=1, uniform="addon-actions")
+            action_buttons = []
+
+            def _action(text, command):
+                button = ttk.Button(btns, text=text, command=command)
+                index = len(action_buttons)
+                button.grid(row=index // 3, column=index % 3, sticky="ew",
+                            padx=4, pady=3)
+                action_buttons.append(button)
+                return button
+
+            _action("Installera Python-paket", _pip_installera)
 
             def _auto_tess():
                 status.set("Installerar Tesseract + svenska … detta kan ta "
@@ -10670,11 +10933,9 @@ class App:
                     args=(self.PIP_PAKET, et2, bar2, win2, True),
                     daemon=True, name="pdfsorter-pipupgrade").start()
 
-            ttk.Button(btns, text="Uppdatera Python-paket",
-                       command=_uppdatera_paket).pack(side="left", padx=8)
+            _action("Uppdatera paket", _uppdatera_paket)
             if sys.platform.startswith("win"):
-                ttk.Button(btns, text="Installera Tesseract automatiskt",
-                           command=_auto_tess).pack(side="left", padx=8)
+                _action("Installera Tesseract", _auto_tess)
 
                 def _hamta_svenska():
                     status.set("Hämtar svenskt språkpaket …")
@@ -10690,9 +10951,7 @@ class App:
                                      name="pdfsorter-swe").start()
 
                 if any(e["slag"] == "sprak" for e in saknade):
-                    ttk.Button(btns, text="Hämta svenska",
-                               command=_hamta_svenska).pack(
-                        side="left", padx=8)
+                    _action("Hämta svenska", _hamta_svenska)
 
                 def _spara_tess(hit: str) -> None:
                     self.settings["tesseract_path"] = hit
@@ -10730,17 +10989,12 @@ class App:
                                      name="pdfsorter-tesssok").start()
 
                 if any(e["nyckel"] == "tesseract" for e in saknade):
-                    ttk.Button(btns, text="Sök datorn",
-                               command=_sok_datorn).pack(side="left", padx=8)
-                    ttk.Button(btns, text="Bläddra…",
-                               command=_bladdra).pack(side="left")
-            ttk.Button(btns, text="Hämta Tesseract…",
-                       command=lambda: open_externally(
-                           Path(TESSERACT_URL)) or None).pack(side="left", padx=8)
-            ttk.Button(btns, text="Kontrollera igen",
-                       command=_kolla_igen).pack(side="left")
-            ttk.Button(btns, text="Stäng", command=_stang).pack(
-                side="right", padx=(8, 0))
+                    _action("Sök efter Tesseract", _sok_datorn)
+                    _action("Bläddra…", _bladdra)
+            _action("Tesseract-webbplats",
+                    lambda: open_externally(Path(TESSERACT_URL)) or None)
+            _action("Kontrollera igen", _kolla_igen)
+            _action("Stäng", _stang)
             ttk.Checkbutton(win, variable=dolda,
                             text="Visa inte detta igen").pack(
                 anchor="w", padx=16, pady=(0, 12))
