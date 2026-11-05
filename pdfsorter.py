@@ -3803,15 +3803,33 @@ class ReviewDialog:
 
         pad = dict(padx=14, pady=(10, 0))
         ext = decision.extraction
+        wrap_widgets = []
+
+        def wrapped_label(parent, **options):
+            options["wraplength"] = max(
+                220, min(840, self.win.winfo_width() - 150))
+            label = ttk.Label(parent, **options)
+            wrap_widgets.append(label)
+            return label
+
+        def resize_wrapped_text(_event=None):
+            width = max(220, min(840, self.win.winfo_width() - 150))
+            for label in wrap_widgets:
+                try:
+                    label.configure(wraplength=width)
+                except Exception:
+                    pass
+
+        self.win.bind("<Configure>", resize_wrapped_text, add="+")
 
         # -- filinfo -------------------------------------------------------
         head = ttk.Frame(self._all, style="Card.TFrame")
         head.grid(row=0, column=0, sticky="ew", **pad)
         head.columnconfigure(0, weight=1)
 
-        ttk.Label(head, text=decision.path.name, style="CardTitle.TLabel",
-                  wraplength=820, justify="left").grid(
-                      row=0, column=0, sticky="w", padx=16, pady=(14, 0))
+        wrapped_label(head, text=decision.path.name,
+                      style="CardTitle.TLabel", justify="left").grid(
+                          row=0, column=0, sticky="w", padx=16, pady=(14, 0))
         ttk.Label(head, text=f"{index} / {total}",
                   style="PillMuted.TLabel").grid(
                       row=0, column=1, sticky="e", padx=16, pady=(14, 0))
@@ -3846,10 +3864,10 @@ class ReviewDialog:
                          f"föreslår: {hint[0]} ({hint[1]} liknande filer)")
             else:
                 guess = "Ingen kategori matchade den här filen"
-        ttk.Label(head, text=guess, style="PillWarn.TLabel",
-                  wraplength=820, justify="left").grid(
-                      row=2, column=0, columnspan=2, sticky="w",
-                      padx=16, pady=(10, 0))
+        wrapped_label(head, text=guess, style="PillWarn.TLabel",
+                      justify="left").grid(
+                          row=2, column=0, columnspan=2, sticky="w",
+                          padx=16, pady=(10, 0))
 
         # Var i dokumentet träffarna låg - förklarar ofta tveksamheten
         if best and best.matched:
@@ -3860,28 +3878,28 @@ class ReviewDialog:
                       ).grid(row=4, column=0, columnspan=2, sticky="w",
                              padx=16, pady=(2, 14))
         if decision.reason and best:
-            ttk.Label(head, text="→ " + decision.reason,
-                      style="CardMuted.TLabel").grid(row=3, column=0,
-                                                     columnspan=2, sticky="w",
-                                                     padx=16)
+            wrapped_label(head, text="→ " + decision.reason,
+                          style="CardMuted.TLabel", justify="left").grid(
+                              row=3, column=0, columnspan=2, sticky="w",
+                              padx=16)
         explanation = category_explanation(best, getattr(decision, "learned_hint", None))
         if explanation:
-            ttk.Label(head, text=explanation, style="CardMuted.TLabel",
-                      wraplength=840, justify="left").grid(
-                          row=5, column=0, columnspan=2, sticky="w",
-                          padx=16, pady=(2, 10))
+            wrapped_label(head, text=explanation, style="CardMuted.TLabel",
+                          justify="left").grid(
+                              row=5, column=0, columnspan=2, sticky="w",
+                              padx=16, pady=(2, 10))
 
         next_row = 6
         split_pages = getattr(ext, "document_breaks", [])
         if split_pages:
             page_list = ", ".join(str(page) for page in split_pages)
-            ttk.Label(
+            wrapped_label(
                 head,
                 text=("⚠ PDF:en verkar innehålla flera dokument. "
                       f"Möjliga nya dokument börjar på sida {page_list}. "
                       "Öppna PDF:en och granska/dela vid dessa sidgränser "
                       "innan du sorterar hela filen."),
-                style="PillWarn.TLabel", wraplength=840, justify="left").grid(
+                style="PillWarn.TLabel", justify="left").grid(
                     row=next_row, column=0, columnspan=2, sticky="w",
                     padx=16, pady=(4, 8))
             next_row += 1
@@ -3912,9 +3930,8 @@ class ReviewDialog:
             total_pages = int(getattr(ext, "page_count", 0) or 0)
             heading = (f"OCR per sida ({scanned} av {total_pages} sidor):"
                        if total_pages and scanned < total_pages else "OCR per sida:")
-            ttk.Label(head, text=heading + "\n" + "\n".join(details),
-                      style="CardMuted.TLabel", wraplength=840,
-                      justify="left").grid(
+            wrapped_label(head, text=heading + "\n" + "\n".join(details),
+                          style="CardMuted.TLabel", justify="left").grid(
                           row=next_row, column=0, columnspan=2, sticky="w",
                           padx=16, pady=(2, 10))
 
@@ -4188,6 +4205,7 @@ class ReviewDialog:
 
         btns.bind("<Configure>", layout_review_buttons, add="+")
         self.win.after_idle(layout_review_buttons)
+        self.win.after_idle(resize_wrapped_text)
         ok.focus_set()
 
         self._sync()
