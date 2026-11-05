@@ -3193,6 +3193,7 @@ UPDATE_FILES = (
     # den som behöver den slipper leta.
     "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
     "ArkivPiloten - Installera senaste Python och starta.bat",
+    "arkivpiloten_python.ps1",
     "README.md", "PDFSORTER_SPEC.md", "Stöd ArkivPiloten.html",
     "swish_qr.png", "desktop.ini", UPDATE_MANIFEST_NAME,
 )

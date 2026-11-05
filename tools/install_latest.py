@@ -60,6 +60,7 @@ FILES = (
     "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
     "ArkivPiloten.png", "ArkivPiloten.ico",
     "ArkivPiloten - Installera senaste Python och starta.bat",
+    "arkivpiloten_python.ps1",
     "README.md", "PDFSORTER_SPEC.md", "Stöd ArkivPiloten.html",
     "swish_qr.png", "desktop.ini", "BUILD-MANIFEST.json",
 )

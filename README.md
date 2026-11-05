@@ -59,7 +59,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 ## Quick start (Windows)
 
 1. Double-click **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — it installs the latest stable Python if needed (per-user, no admin required), upgrades pip, installs **all** Python add-ons from `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) with retry and import verification, installs Tesseract OCR with Swedish + English via winget (best effort), runs the app's own `--status` check, and then starts the app. Autostart is enabled by default (press N to opt out; timeout defaults to yes).
+   — it checks for Python first. If none is found, it installs the latest stable version per-user; patch updates reuse the existing installation, and a new major/minor series is installed alongside the old one only when required. It then upgrades pip, installs **all** Python add-ons from `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) with retry and import verification, installs Tesseract OCR with Swedish + English via winget (best effort), runs the app's own `--status` check, and starts the app. Autostart is enabled by default (press N to opt out; timeout defaults to yes).
 2. Done. The app starts without a console window, and will start with Windows minimized to the tray on future logins.
 
 ### Manual install
@@ -266,7 +266,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 ## Kom igång (Windows)
 
 1. Dubbelklicka på **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — den installerar senaste stabila Python vid behov (per användare, ingen admin krävs), uppgraderar pip, installerar **alla** Python-tillägg från `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) med retry och importkontroll, installerar Tesseract OCR med svenska + engelska via winget (bästa försök), kör appens egen `--status`-kontroll och startar sedan appen. Autostart är på som standard (tryck N för att välja bort; vid tidsgräns blir svaret ja).
+   — den kontrollerar först om Python finns. Saknas Python installeras senaste stabila version per användare; en patchuppdatering återanvänder befintlig installation, medan en ny huvud-/underversion läggs bredvid den gamla endast när det behövs. Sedan uppgraderar den pip, installerar **alla** Python-tillägg från `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) med retry och importkontroll, installerar Tesseract OCR med svenska + engelska via winget (bästa försök), kör appens egen `--status`-kontroll och startar appen. Autostart är på som standard (tryck N för att välja bort; vid tidsgräns blir svaret ja).
 2. Klart. Appen startar utan konsolfönster, och startar vid framtida inloggningar minimerad i systemfältet.
 
 ### Uppgradera från gamla 1.0.0 / 1.1.0
