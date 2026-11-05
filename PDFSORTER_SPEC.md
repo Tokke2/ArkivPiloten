@@ -1982,16 +1982,20 @@ varje korrigering.
   prediktion, min_files-grind, dödläge, Lös-auto, hint, avstängd,
   träning-via-apply + journal/historik) + e2e-regression (auto 9,55).
 
-### REQ-N2 (B) — requirements.txt med pinnade versioner
-En `requirements.txt` bredvid `pdfsorter.py` med `==`-pinnade versioner för
-`pymupdf`, `pypdf`, `pdfminer.six`, `pystray`, `Pillow` och `pytesseract`.
+### REQ-N2 (B) — requirements.txt och veckovis uppdatering
+En `requirements.txt` bredvid `pdfsorter.py` listar Python-tilläggen. Från
+2026-11-05 versionslåses de inte: den veckovisa Windows-uppgiften hämtar
+senaste version som är kompatibel med installerad Python. Appens egna
+programuppdateringar distribueras fortfarande enbart via GitHub Releases.
 **AC-N2:**
-- AC-2.1 Filen finns och pinningen motsvarar testad kombination.
-  **Leverans 2026-08-26:** testad kombination (pypdf, Pillow) pinnad;
-  övriga valfria paket anges som kommenterad installationsväg, eftersom
-  appens reservvägar (REQ-A2) gör dem valfria per miljö.
-- AC-2.2 Kommentar anger att samtliga beroenden är valfria (appens
-  reservvägar gäller fortfarande, REQ-A2).
+- AC-2.1 Första installationen installerar tilläggen en gång; därefter
+  kontrolleras/uppdateras Python och tillägg måndagar kl. 08:00 via Windows
+  Schemaläggaren, inte vid varje appstart. En missad körning startar när
+  datorn är tillgänglig igen.
+- AC-2.2 Tilläggen använder vald delad Python-miljö (ingen separat venv);
+  andra program som använder samma Python-miljö kan därför påverkas.
+- AC-2.3 Appens start kan fortsätta om ett valfritt tillägg saknas och visar
+  diagnostik enligt appens reservvägar (REQ-A2).
 
 ### REQ-N3 (B) — Diagnostikvy i GUI och --status
 `get_diagnostics()` samlar version, PDF-motorer, OCR-status, textcachens

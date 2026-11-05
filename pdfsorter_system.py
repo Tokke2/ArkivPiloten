@@ -3193,7 +3193,7 @@ UPDATE_FILES = (
     # den som behöver den slipper leta.
     "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
     "ArkivPiloten - Installera senaste Python och starta.bat",
-    "arkivpiloten_python.ps1",
+    "arkivpiloten_python.ps1", "arkivpiloten_schedule_python_updates.ps1",
     "README.md", "PDFSORTER_SPEC.md", "Stöd ArkivPiloten.html",
     "swish_qr.png", "desktop.ini", UPDATE_MANIFEST_NAME,
 )
@@ -3955,8 +3955,9 @@ def lookup_company_name_online(orgnr: str, timeout: float = 6.0) -> Optional[str
 def update_python_packages(root: Optional[Path] = None,
                            timeout: int = 1800) -> Tuple[bool, str]:
     """Installera/uppdatera ALLA Python-tillägg från appens
-    requirements.txt (pinnade versioner) med den Python som kör appen.
-    Verifierar importerna efteråt och rapporterar per paket."""
+    requirements.txt med den Python som kör appen. Versionerna är
+    obundna så pip väljer senaste kompatibla version. Verifierar
+    importerna efteråt och rapporterar per paket."""
     root = Path(root) if root else _main_script.parent
     req = root / "requirements.txt"
     if req.is_file():

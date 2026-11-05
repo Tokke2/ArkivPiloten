@@ -59,7 +59,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 ## Quick start (Windows)
 
 1. Double-click **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — it checks for Python first. If none is found, it installs the latest stable version per-user; patch updates reuse the existing installation, and a new major/minor series is installed alongside the old one only when required. It then upgrades pip, installs **all** Python add-ons from `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) with retry and import verification, installs Tesseract OCR with Swedish + English via winget (best effort), runs the app's own `--status` check, and starts the app. Autostart is enabled by default (press N to opt out; timeout defaults to yes).
+   — at ordinary launches it reuses installed Python without checking online; if none exists, it installs the latest stable version. Required add-ons are bootstrapped once, then a Windows scheduled task checks and updates Python and its packages weekly on Monday at 08:00 (a missed run starts when the PC is available again). Patch updates reuse the same installation; a new major/minor series may be installed alongside it. Packages use the selected shared Python environment, so other programs using that interpreter may also be affected. The launcher also checks/installs Tesseract OCR (best effort), runs the detailed status check only during first-time package setup, asks about autostart (default yes), and starts the app.
 2. Done. The app starts without a console window, and will start with Windows minimized to the tray on future logins.
 
 ### Manual install
@@ -266,7 +266,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 ## Kom igång (Windows)
 
 1. Dubbelklicka på **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — den kontrollerar först om Python finns. Saknas Python installeras senaste stabila version per användare; en patchuppdatering återanvänder befintlig installation, medan en ny huvud-/underversion läggs bredvid den gamla endast när det behövs. Sedan uppgraderar den pip, installerar **alla** Python-tillägg från `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) med retry och importkontroll, installerar Tesseract OCR med svenska + engelska via winget (bästa försök), kör appens egen `--status`-kontroll och startar appen. Autostart är på som standard (tryck N för att välja bort; vid tidsgräns blir svaret ja).
+   — vid vanliga starter återanvänder den installerad Python utan nätverkskontroll; saknas Python installeras senaste stabila version. Nödvändiga tillägg grundinstalleras en gång. Därefter kontrollerar och uppdaterar en schemalagd Windows-uppgift Python och dess paket varje måndag kl. 08:00; en missad körning startar när datorn och användarsessionen blir tillgängliga. Patchar återanvänder samma installation, medan en ny huvud-/underversion kan installeras bredvid. Paketen använder vald delad Python-miljö och kan därför påverka andra program som använder samma interpreter. Startfilen kontrollerar/installerar även Tesseract OCR (bästa försök), kör detaljerad statuskontroll bara vid första paketinstallationen, frågar om autostart (standard ja) och startar appen.
 2. Klart. Appen startar utan konsolfönster, och startar vid framtida inloggningar minimerad i systemfältet.
 
 ### Uppgradera från gamla 1.0.0 / 1.1.0

@@ -2,18 +2,13 @@
 setlocal EnableExtensions EnableDelayedExpansion
 rem ======================================================================
 rem ArkivPiloten - ENDA startfilen (utokad installationsrunda 2026-10-16).
-rem 1) Hittar Python forst; uppdaterar befintlig installation inom samma
-rem    versionsserie och installerar en ny serie bredvid vid behov.
-rem    Nyinstallation sker bara om Python saknas helt.
-rem 2) Uppgraderar pip och installerar ALLA Python-tillagg fran
-rem    requirements.txt (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray,
-rem    pytesseract) - med retry och importkontroll efterat.
-rem 3) Ser till att Tesseract OCR (systemprogram) finns med spraken
-rem    svenska + engelska for skannade PDF:er (winget, basta forsok).
-rem 4) Kor appens egen statuskontroll sa att anvandaren ser vad som hittats.
-rem 5) Fragar om autostart (standard ja, kan stangas av).
+rem 1) Hittar befintlig Python; latest kontrolleras bara om den saknas.
+rem 2) Python och tillagg uppdateras veckovis, mandagar kl. 08:00.
+rem    Forsta korningen installerar bara tillagg som appen behover.
+rem 3) Kontrollerar Tesseract OCR (winget, basta forsok).
+rem 4) Fragar om autostart (standard ja, kan stangas av).
 rem Fungerar fran valfri mapp/USB - allt utgar fran denna fils plats.
-rem 6) Startar appen utan konsol-fonster.
+rem 5) Startar appen utan konsol-fonster.
 rem Misslyckas ett tillagg startar appen anda och visar i Hjalp-menyn
 rem (Komplettera installationen) vad som saknas.
 rem ======================================================================
@@ -29,7 +24,7 @@ set "LOG=%~dp0logs\install.log"
 echo ================================================== >> "%LOG%"
 echo ArkivPiloten installation %DATE% %TIME% >> "%LOG%"
 
-echo [1/5] Ser till att senaste stabila Python finns ...
+echo [1/6] Kontrollerar att Python finns ...
 set "PSSCRIPT=%~dp0arkivpiloten_python.ps1"
 set "PYEXE="
 if not exist "%PSSCRIPT%" (
@@ -46,17 +41,42 @@ if "%PYEXE%"=="" (
 echo       Python: %PYEXE%
 echo Python: %PYEXE% >> "%LOG%"
 
-echo [2/5] Installerar ALLA Python-tillagg (kan ta en stund) ...
-"%PYEXE%" -m pip install --upgrade --disable-pip-version-check pip
-"%PYEXE%" -m pip install --upgrade --prefer-binary --disable-pip-version-check -r "%~dp0requirements.txt"
-if errorlevel 1 (
-    echo       Forsok 1 misslyckades - provar igen ...
-    "%PYEXE%" -m pip install --upgrade --prefer-binary --disable-pip-version-check -r "%~dp0requirements.txt"
+set "PKGSTATE=%~dp0cache\python-packages-state.txt"
+if not exist "%PKGSTATE%" (
+    echo [2/6] Kontrollerar Python-tillagg forsta gangen ...
+    "%PYEXE%" -c "import importlib.util as u,sys;mods=['fitz','pypdf','pdfminer','PIL','pystray','pytesseract'];sys.exit(any(u.find_spec(m) is None for m in mods))" >nul 2>&1
+    if errorlevel 1 (
+        echo       Nagra tillagg saknas - installerar dem en gang ...
+        "%PYEXE%" -m pip install --upgrade --disable-pip-version-check pip >> "%LOG%" 2>&1
+        "%PYEXE%" -m pip install --upgrade --prefer-binary --disable-pip-version-check -r "%~dp0requirements.txt" >> "%LOG%" 2>&1
+        if errorlevel 1 (
+            echo       Forsta forsok misslyckades - provar en gang till ...
+            "%PYEXE%" -m pip install --upgrade --prefer-binary --disable-pip-version-check -r "%~dp0requirements.txt" >> "%LOG%" 2>&1
+            if errorlevel 1 echo       VARNING: tillaggsinstallationen misslyckades; veckokontrollen forsoker igen.
+        )
+    ) else (
+        echo       Tillaeggen finns redan; versionsuppdatering sker mandag kl. 08:00.
+    )
+    rem Markera engangskontrollen sa tillagg inte kontrolleras vid varje appstart.
+    > "%PKGSTATE%" echo bootstrap-attempted
+    "%PYEXE%" "%~dp0pdfsorter.py" --status
+) else (
+    echo [2/6] Python-tillagg uppdateras schemalagt mandagar kl. 08:00.
 )
-echo       Kontrollerar att paketen gar att importera:
-"%PYEXE%" -c "import importlib.util as u; mods=[('PyMuPDF','fitz'),('pypdf','pypdf'),('pdfminer.six','pdfminer'),('Pillow','PIL'),('pystray','pystray'),('pytesseract','pytesseract')]; [print('         OK     ' + n) if u.find_spec(m) else print('         SAKNAS ' + n + '  (appen visar hur du kompletterar)') for n,m in mods]"
 
-echo [3/5] Kontrollerar Tesseract OCR (for skannade PDF:er) ...
+echo [3/6] Schemalagger tillaggskontroll till mandagar kl. 08:00 ...
+set "SCHEDULESCRIPT=%~dp0arkivpiloten_schedule_python_updates.ps1"
+if exist "%SCHEDULESCRIPT%" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%SCHEDULESCRIPT%"
+    if errorlevel 1 (
+        echo       VARNING: kunde inte skapa veckoschemat; se logs\python-packages-update.log.
+        echo Kunde inte skapa veckoschemat %DATE% %TIME% >> "%LOG%"
+    )
+) else (
+    echo       VARNING: schemalaggningsskriptet saknas.
+)
+
+echo [4/6] Kontrollerar Tesseract OCR (for skannade PDF:er) ...
 set "TESS="
 where tesseract >nul 2>&1 && for /f "delims=" %%i in ('where tesseract') do if not defined TESS set "TESS=%%i"
 if not defined TESS if exist "%ProgramFiles%\Tesseract-OCR\tesseract.exe" set "TESS=%ProgramFiles%\Tesseract-OCR\tesseract.exe"
@@ -83,9 +103,6 @@ if defined TESS (
     echo         https://ub-mannheim.github.io/tesseract/
     echo       eller via appen: Hjalp, Komplettera installationen.
 )
-
-echo [4/5] Kor ArkivPilotens statuskontroll ...
-"%PYEXE%" "%~dp0pdfsorter.py" --status
 
 set "PYW=%PYEXE:python.exe=pythonw.exe%"
 if not exist "%PYW%" set "PYW=%PYEXE%"

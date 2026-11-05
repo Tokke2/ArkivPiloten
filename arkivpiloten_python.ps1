@@ -1,4 +1,14 @@
+param(
+    [switch]$WeeklyUpdate,
+    [string]$RequirementsPath,
+    [string]$LogPath,
+    [string]$StatePath
+)
+
 $ErrorActionPreference = 'Stop'
+if (-not $RequirementsPath) { $RequirementsPath = Join-Path $PSScriptRoot 'requirements.txt' }
+if (-not $LogPath) { $LogPath = Join-Path $PSScriptRoot 'logs\python-packages-update.log' }
+if (-not $StatePath) { $StatePath = Join-Path $PSScriptRoot 'cache\python-packages-state.txt' }
 
 function Get-PythonVersion([string]$exe) {
     if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { return $null }
@@ -82,11 +92,15 @@ function Install-Python([string]$version, [string]$targetDir, [int]$allUsers,
     }
 }
 
-$latest = Get-LatestPythonVersion
 $exe = Find-Python
+$latest = $null
+# Python-version och internet kontrolleras bara i veckokörningen,
+# eller om Python saknas helt. Vanlig start återanvänder befintlig Python.
+if ($WeeklyUpdate -or -not $exe) { $latest = Get-LatestPythonVersion }
 $cur = Get-PythonVersion $exe
 
-if ($exe -and $latest -and $cur -and ([version]$cur -lt [version]$latest)) {
+if ($WeeklyUpdate -and $exe -and $latest -and $cur -and
+        ([version]$cur -lt [version]$latest)) {
     $currentTrack = ($cur.Split('.')[0..1] -join '.')
     $latestTrack = ($latest.Split('.')[0..1] -join '.')
     $allUsers = 0
@@ -151,6 +165,75 @@ if ($exe -and $latest -and $cur -and ([version]$cur -lt [version]$latest)) {
                 $exe = Find-Python
             } catch { }
         }
+    }
+}
+
+if ($WeeklyUpdate) {
+    try {
+        $logDir = Split-Path -Parent $LogPath
+        if ($logDir) { $null = New-Item -ItemType Directory -Path $logDir -Force }
+        "`r`n=== Python-tilläggsuppdatering $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" |
+            Out-File -FilePath $LogPath -Append -Encoding utf8
+
+        if (-not $exe -or -not (Test-Path -LiteralPath $exe)) {
+            throw 'Ingen fungerande Python hittades.'
+        }
+        if (-not (Test-Path -LiteralPath $RequirementsPath)) {
+            throw "requirements.txt saknas: $RequirementsPath"
+        }
+
+        "Python: $exe" | Out-File -FilePath $LogPath -Append -Encoding utf8
+        if ($latest) {
+            "Senaste Python: $latest" | Out-File -FilePath $LogPath -Append -Encoding utf8
+        } else {
+            "Python-version kunde inte kontrolleras; paket uppdateras ändå." |
+                Out-File -FilePath $LogPath -Append -Encoding utf8
+        }
+
+        & $exe -m pip install --upgrade --disable-pip-version-check pip 2>&1 |
+            Out-File -FilePath $LogPath -Append -Encoding utf8
+        $pipExit = $LASTEXITCODE
+        if ($pipExit -ne 0) {
+            "VARNING: pip kunde inte uppdateras (kod $pipExit); försöker ändå med tilläggen." |
+                Out-File -FilePath $LogPath -Append -Encoding utf8
+        }
+
+        $packagesOk = $false
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            & $exe -m pip install --upgrade --prefer-binary `
+                --disable-pip-version-check -r $RequirementsPath 2>&1 |
+                Out-File -FilePath $LogPath -Append -Encoding utf8
+            if ($LASTEXITCODE -eq 0) { $packagesOk = $true; break }
+            "Försök $attempt misslyckades." |
+                Out-File -FilePath $LogPath -Append -Encoding utf8
+        }
+        if (-not $packagesOk) { throw 'Tilläggsuppdateringen misslyckades två gånger.' }
+
+        & $exe -c "import importlib.util as u;mods=['fitz','pypdf','pdfminer','PIL','pystray','pytesseract'];missing=[m for m in mods if u.find_spec(m) is None];print('Saknas:', ', '.join(missing) if missing else 'inget');raise SystemExit(bool(missing))" 2>&1 |
+            Out-File -FilePath $LogPath -Append -Encoding utf8
+        if ($LASTEXITCODE -ne 0) { throw 'Importkontrollen av Python-tilläggen misslyckades.' }
+
+        $stateDir = Split-Path -Parent $StatePath
+        if ($stateDir) { $null = New-Item -ItemType Directory -Path $stateDir -Force }
+        Set-Content -LiteralPath $StatePath -Value $exe -Encoding utf8
+        'Uppdatering och importkontroll lyckades.' |
+            Out-File -FilePath $LogPath -Append -Encoding utf8
+    } catch {
+        $message = "FEL: $($_.Exception.Message)"
+        [Console]::Error.WriteLine($message)
+        if ($LogPath) {
+            $message | Out-File -FilePath $LogPath -Append -Encoding utf8
+        }
+        # Spara ändå att veckokörningen försöktes, så pip inte körs igen
+        # vid varje appstart efter ett tillfälligt nätverks-/rättighetsfel.
+        if ($exe) {
+            try {
+                $stateDir = Split-Path -Parent $StatePath
+                if ($stateDir) { $null = New-Item -ItemType Directory -Path $stateDir -Force }
+                Set-Content -LiteralPath $StatePath -Value $exe -Encoding utf8
+            } catch { }
+        }
+        exit 1
     }
 }
 

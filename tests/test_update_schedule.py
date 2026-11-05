@@ -416,8 +416,12 @@ def _info_med_ny_version(**kw):
 def _tyst_uppdatering(monkeypatch, app, resultat=(True, "Installerat")):
     monkeypatch.setattr(P.threading, "Thread", _InlineThread)
     monkeypatch.setattr(P, "perform_update", lambda *a, **k: resultat)
-    monkeypatch.setattr(P, "update_python_packages", lambda *a, **k: (True, ""))
+    package_updates = []
+    monkeypatch.setattr(
+        P, "update_python_packages",
+        lambda *a, **k: package_updates.append(True) or (True, ""))
     monkeypatch.setattr(P, "session_log", lambda *a, **k: None)
+    app.package_updates = package_updates
     app._planera_omstart = lambda tyst=True: app.omstarter.append(tyst)
     return app
 
@@ -430,6 +434,7 @@ def test_silent_update_installs_and_restarts_without_any_dialog(
     assert app.messagebox.fragor == []          # ingen fråga
     assert app.messagebox.varningar == []
     assert app.omstarter == [True]              # tyst omstart
+    assert app.package_updates == []             # paketuppdatering sker veckovis
     assert app.settings["last_update_check"]    # tiden sparad
     assert any("Tyst uppdatering" in t for _n, t in app.handelser)
 

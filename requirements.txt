@@ -1,17 +1,14 @@
-# ArkivPiloten - ALLA Python-tillagg (REQ-N2, utokad 2026-10-16).
-# Installeraren (bat-filen) och appen sjalv installerar hela den har
-# listan - inte bara ett minimum - sa att lasning, OCR och systemfalt
-# fungerar fullt ut direkt. Appen startar anda om nagot paket saknas
-# och talar da om i statusraden vad som saknas.
+# ArkivPiloten - alla Python-tillägg som installeras vid första setup.
+# Versionsnummer är avsiktligt inte låsta: den schemalagda uppgiften hämtar
+# senaste version som är kompatibel med installerad Python varje måndag 08:00.
+# Appens uppdateringar kommer fortfarande enbart från GitHub Releases.
+# Paket installeras i vald delad Python-miljö (ingen separat venv).
 #
-# OCR kraver dessutom systemprogrammet Tesseract (med spraken swe+eng)
-# - det installeras av bat-filen via winget, eller fran appen via
-# Hjalp -> Komplettera installationen.
-#
-# Pinnade versioner (senast testade kombinationen):
-PyMuPDF==1.28.2
-pypdf==6.21.0
-pdfminer.six==20260107
-Pillow==12.3.0
-pystray==0.19.5
-pytesseract==0.3.13
+# OCR kräver dessutom systemprogrammet Tesseract (språken swe+eng), som
+# startfilen försöker installera via winget.
+PyMuPDF
+pypdf
+pdfminer.six
+Pillow
+pystray
+pytesseract

@@ -10143,8 +10143,6 @@ class App:
 
         def install():
             ok, msg = perform_update()
-            if ok:
-                update_python_packages()
 
             def done():
                 self._h("uppdatering", msg, "ok" if ok else "warn")
@@ -11691,10 +11689,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(msg)
         if not ok:
             return 1
-        ok2, msg2 = update_python_packages()
-        print(msg2)
         session_log("uppdatering", "Klar via --update (starta om appen)", "ok")
-        return 0 if ok2 else 1
+        return 0
 
     if args.export_archive:
         out = Path(load_settings().get("output_dir", "") or "")
