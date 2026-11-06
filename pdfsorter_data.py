@@ -297,64 +297,55 @@ def lock_path() -> Path:
 # skriver tillbaka hela filen när något ändras - den som sparar sist vinner,
 # och den andres kategorier försvinner utan felmeddelande.
 #
-# Låset är en fil med PID och starttid. Att bara kolla om filen finns räcker
-# inte: efter en krasch ligger den kvar och skulle låsa ute användaren för
-# alltid. Därför kontrolleras att processen faktiskt lever.
+# OS-låset är den auktoritativa kontrollen. PID-filen används bara för
+# diagnostik och för att känna igen en process från äldre versioner, som
+# ännu bara använde PID-fil och därför inte kände till OS-mutexen.
 
 def _process_lever(pid: int) -> bool:
-    """Kör processen med det här PID:et fortfarande?
-
-    Ett återanvänt PID kan ge falskt positivt, men konsekvensen är bara att
-    appen ber användaren stänga det andra fönstret - inte dataförlust.
-    """
+    """Kontrollera legacy-ägarens PID vid övergång från äldre versioner."""
     if pid <= 0:
         return False
     if sys.platform.startswith("win"):
         try:
             import ctypes
-            PROCESS_QUERY_LIMITED = 0x1000
-            h = ctypes.windll.kernel32.OpenProcess(
-                PROCESS_QUERY_LIMITED, False, pid)
-            if not h:
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
                 return False
-            kod = ctypes.c_ulong()
-            ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(kod))
-            ctypes.windll.kernel32.CloseHandle(h)
-            return kod.value == 259          # STILL_ACTIVE
+            code = ctypes.c_ulong()
+            ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return code.value == 259
         except Exception:
             return False
     try:
-        os.kill(pid, 0)                      # signal 0 = finns processen?
+        os.kill(pid, 0)
         return True
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True                          # finns, men ägs av någon annan
+        return True
     except OSError:
         return False
 
 
 class InstanceLock:
-    """Ser till att bara en ArkivPiloten kör mot samma konfiguration.
+    """OS-lås som garanterar en enda GUI-instans per datamapp.
 
-    Används som kontexthanterare eller manuellt:
-
-        lås = InstanceLock()
-        if not lås.acquire():
-            print(f"Kör redan (PID {lås.other_pid})")
-        ...
-        lås.release()
-
-    Låsfilen tas bort vid avslut. Ligger den kvar efter en krasch upptäcks
-    det genom att processen inte längre finns, och låset övertas.
+    En PID-fil räcker inte: två nästan samtidiga starter kan båda läsa en
+    tom fil och båda tro att de vann. Windows använder därför en namngiven
+    mutex; macOS/Linux använder ett icke-blockerande flock-lås. OS:et släpper
+    låset automatiskt även om processen kraschar. PID-filen behålls bara som
+    diagnostisk information och tas inte bort vid avslut.
     """
 
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else lock_path()
         self.acquired = False
-        #: PID för den instans som redan håller låset, när acquire() nekar
         self.other_pid: int = 0
         self.other_started: str = ""
+        self.lock_error = ""
+        self._fh = None
+        self._win_mutex = None
 
     def _read(self) -> Dict[str, Any]:
         try:
@@ -365,49 +356,157 @@ class InstanceLock:
                 UnicodeDecodeError):
             return {}
 
+    @staticmethod
+    def _read_handle(fh) -> Dict[str, Any]:
+        try:
+            fh.seek(0)
+            data = json.loads(fh.read().decode("utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+
+    def _remember_owner(self, data: Dict[str, Any]) -> None:
+        try:
+            self.other_pid = int(data.get("pid", 0) or 0)
+        except (TypeError, ValueError):
+            self.other_pid = 0
+        self.other_started = str(data.get("started", ""))
+
+    def _write_owner(self) -> None:
+        """Write diagnostics through the locked file, without replacing its inode."""
+        if self._fh is None:
+            return
+        data = json.dumps({
+            "lock_protocol": 2,
+            "pid": os.getpid(),
+            "started": now_iso(),
+            "host": _värdnamn(),
+        }, ensure_ascii=False, indent=2).encode("utf-8")
+        try:
+            self._fh.seek(0)
+            self._fh.truncate()
+            self._fh.write(data)
+            self._fh.flush()
+            os.fsync(self._fh.fileno())
+        except OSError as exc:
+            # OS-låset är redan vårt; metadata är bara diagnostik.
+            self.lock_error = f"Låset säkrat men PID-informationen kunde inte sparas: {exc}"
+
+    def _acquire_windows_mutex(self) -> bool:
+        import ctypes
+        import hashlib
+        from ctypes import wintypes
+
+        path_key = os.path.normcase(str(self.path.resolve())).casefold()
+        digest = hashlib.sha256(path_key.encode("utf-8", errors="replace"))\
+            .hexdigest()[:24]
+        name = "Local\\ArkivPiloten-" + digest
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel32.CreateMutexW
+        create.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
+        create.restype = wintypes.HANDLE
+        ctypes.set_last_error(0)
+        handle = create(None, True, name)
+        error = ctypes.get_last_error()
+        if not handle:
+            raise ctypes.WinError(error)
+        if error == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            kernel32.CloseHandle(handle)
+            self._remember_owner(self._read_handle(self._fh))
+            return False
+        self._win_mutex = (kernel32, handle, wintypes.HANDLE)
+        return True
+
     def acquire(self) -> bool:
-        """Ta låset. False om en annan levande instans redan har det."""
+        """Returnera False om en annan process äger OS-låset eller låsning misslyckas."""
         if self.acquired:
             return True
-        gammal = self._read()
-        pid = int(gammal.get("pid", 0) or 0)
-        if pid and pid != os.getpid() and _process_lever(pid):
-            self.other_pid = pid
-            self.other_started = str(gammal.get("started", ""))
+        self.lock_error = ""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            self._fh = os.fdopen(fd, "r+b")
+            legacy = self._read_handle(self._fh)
+            try:
+                legacy_pid = int(legacy.get("pid", 0) or 0)
+            except (TypeError, ValueError):
+                legacy_pid = 0
+            if (not legacy.get("lock_protocol") and legacy_pid
+                    and legacy_pid != os.getpid()
+                    and _process_lever(legacy_pid)):
+                self._remember_owner(legacy)
+                self._fh.close()
+                self._fh = None
+                return False
+        except OSError as exc:
+            self.lock_error = str(exc)
+            self._fh = None
             return False
 
-        # Ingen levande ägare - skriv vårt eget lås. Två processer kan
-        # nå hit samtidigt (autostart + dubbelklick samma sekund); den som
-        # skriver sist vinner filen. Därför bekräftas efteråt att det är
-        # VÅRT pid som står i låset - annars vann den andra och vi ger oss.
         try:
-            _write_json(self.path, {
-                "pid": os.getpid(),
-                "started": now_iso(),
-                "host": _värdnamn(),
-            })
-        except OSError:
-            # Går låset inte att skriva ska appen ändå starta - ett lås som
-            # inte kan skapas är ett mindre problem än en app som vägrar gå.
-            self.acquired = True
-            return True
-        vann = self._read()
-        vinnar_pid = int(vann.get("pid", 0) or 0)
-        if vinnar_pid and vinnar_pid != os.getpid():
-            self.other_pid = vinnar_pid
-            self.other_started = str(vann.get("started", ""))
+            if sys.platform.startswith("win"):
+                won = self._acquire_windows_mutex()
+            else:
+                import fcntl
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                won = True
+        except (ImportError, OSError) as exc:
+            self._remember_owner(self._read_handle(self._fh))
+            if isinstance(exc, OSError):
+                import errno
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    self.lock_error = str(exc)
+            else:
+                self.lock_error = str(exc)
+            self._fh.close()
+            self._fh = None
+            return False
+        except Exception as exc:
+            self.lock_error = str(exc)
+            try:
+                self._fh.close()
+            except Exception:
+                pass
+            self._fh = None
+            return False
+
+        if not won:
+            self._fh.close()
+            self._fh = None
             return False
         self.acquired = True
+        self._write_owner()
         return True
 
     def release(self) -> None:
-        """Släpp låset, men bara om det fortfarande är vårt."""
+        """Släpp OS-låset. Metadatafilen lämnas kvar för nästa start."""
         if not self.acquired:
             return
         self.acquired = False
-        if self._read().get("pid") == os.getpid():
+        if self._win_mutex is not None:
+            kernel32, handle, handle_type = self._win_mutex
+            self._win_mutex = None
             try:
-                self.path.unlink()
+                kernel32.ReleaseMutex.argtypes = (handle_type,)
+                kernel32.ReleaseMutex(handle)
+            except Exception:
+                pass
+            try:
+                kernel32.CloseHandle.argtypes = (handle_type,)
+                kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+        fh, self._fh = self._fh, None
+        if fh is not None:
+            if not sys.platform.startswith("win"):
+                try:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except (ImportError, OSError):
+                    pass
+            try:
+                fh.close()
             except OSError:
                 pass
 
@@ -1775,50 +1874,42 @@ def _check() -> int:
             print(f"  FEL torrkorning: {msg}")
             fel += 1
 
-        # -- enkelinstanslås --
+        # -- OS-baserat enkelinstanslås --
         lås1 = InstanceLock(rot / "test.lock")
         if not lås1.acquire():
-            print("  FEL forsta acquire nekades")
+            print("  FEL första acquire nekades")
             fel += 1
         if not lås1.acquire():
-            print("  FEL samma process ska fa laset igen")
+            print("  FEL ägaren kunde inte återbekräfta sitt lås")
             fel += 1
+        lås2 = InstanceLock(rot / "test.lock")
+        if lås2.acquire():
+            print("  FEL två instanser fick samma OS-lås")
+            lås2.release()
+            fel += 1
+        if lås2.other_pid != os.getpid():
+            print(f"  FEL other_pid {lås2.other_pid}")
+            fel += 1
+        lås1.release()
 
-        # en levande process ska blockera
-        import subprocess
-        p_annan = subprocess.Popen([sys.executable, "-c",
-                                    "import time; time.sleep(20)"])
-        try:
-            _write_json(rot / "test.lock", {"pid": p_annan.pid,
-                                            "started": "", "host": ""})
-            lås2 = InstanceLock(rot / "test.lock")
-            if lås2.acquire():
-                print("  FEL laset togs trots levande agare")
-                fel += 1
-            if lås2.other_pid != p_annan.pid:
-                print(f"  FEL other_pid {lås2.other_pid}")
-                fel += 1
-        finally:
-            p_annan.terminate()
-            p_annan.wait()
-
-        # död process = övergivet lås, ska kunna övertas
-        _write_json(rot / "test.lock", {"pid": p_annan.pid,
+        # OS-låset släpptes; kvarvarande PID-information är bara diagnostik.
+        # Den ska aldrig blockera en ny start, inte ens om den ser levande ut.
+        _write_json(rot / "test.lock", {"pid": os.getpid(),
                                         "started": "", "host": ""})
         lås3 = InstanceLock(rot / "test.lock")
         if not lås3.acquire():
-            print("  FEL overgivet las overtogs inte")
+            print("  FEL frigjort OS-lås kunde inte återtas")
             fel += 1
         lås3.release()
-        if (rot / "test.lock").exists():
-            print("  FEL lasfilen togs inte bort vid release")
+        if not (rot / "test.lock").exists():
+            print("  FEL diagnostisk låsfil ska finnas kvar")
             fel += 1
 
-        # trasig låsfil ska inte hindra start
+        # Trasig PID-information får inte hindra OS-låsets övertagande.
         (rot / "test.lock").write_text("{ trasig", encoding="utf-8")
         lås4 = InstanceLock(rot / "test.lock")
         if not lås4.acquire():
-            print("  FEL trasig lasfil blockerade start")
+            print("  FEL trasig låsfil blockerade start")
             fel += 1
         lås4.release()
 

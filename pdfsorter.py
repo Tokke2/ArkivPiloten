@@ -12071,25 +12071,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     # skriver över varandras regler utan att någon märker det.
     lås = InstanceLock()
     if not lås.acquire():
-        session_log("start", f"En instans kör redan (PID {lås.other_pid}) - "
-                    "ber den visa fönstret; den här processen avslutas")
-        request_show()
-        print(f"{APP_NAME} kör redan (PID {lås.other_pid}).\n"
-              f"Det befintliga fönstret öppnas i stället.")
+        if not lås.lock_error:
+            session_log("start", f"En instans kör redan "
+                        f"(PID {lås.other_pid or 'okänt'}) - "
+                        "begär att det befintliga fönstret visas")
+            if not request_show():
+                session_log("start", "Kunde inte skicka signalen för att visa "
+                            "det befintliga fönstret", "warn")
+            return 0
+        fel = ("Kunde inte säkra enkel instans; en ny kopia startades inte. "
+               f"{lås.lock_error}")
+        session_log("start", fel, "err")
         try:
-            import tkinter as _tk_l
-            from tkinter import messagebox as _mb_l
-            _r = _tk_l.Tk(); _r.withdraw()
-            brand_window(_r)
-            _mb_l.showinfo(
-                APP_NAME,
-                f"{APP_NAME} kör redan.\n\n"
-                f"Det fönstret öppnas nu. Leta annars efter ikonen i "
-                f"systemfältet.")
-            _r.destroy()
+            print(fel, file=sys.stderr)
         except Exception:
             pass
-        return 0
+        return 1
 
     hjälpare = install_helpers()   # skapa .pyw / .command vid första start
     if hjälpare:
