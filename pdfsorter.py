@@ -5984,15 +5984,16 @@ class App:
                 self.tray = None
                 self._h("systemfält", "Systemfältsikonen KUNDE INTE startas "
                         "(pystray-fel) - appen körs utan ikon", "warn")
-                if start_hidden:
+                if start_hidden or self.settings.get("start_minimized", True):
                     self._log("Systemfältet är inte tillgängligt "
-                              "(installera pystray) - visar fönstret i stället.", "warn")
+                              "(installera pystray) - minimerar till "
+                              "aktivitetsfältet i stället.", "warn")
         elif start_hidden:
             self._h("systemfält", "Systemfält saknas helt (modul/pystray) - "
-                    "visar fönstret trots --tray", "warn")
+                    "fönstret minimeras till aktivitetsfältet", "warn")
             self._log("Systemfältet är inte tillgängligt "
                       "(pdfsorter_system.py eller pystray saknas) - "
-                      "visar fönstret i stället.", "warn")
+                      "minimerar i aktivitetsfältet i stället.", "warn")
         else:
             self._h("systemfält", f"Systemfältsikon avstängd "
                     f"(inställning tray_enabled={self.settings.get('tray_enabled', True)}, "
@@ -6011,29 +6012,29 @@ class App:
         # eller pip-uppdatering av tillägg körs vid vanlig appstart.
         self.root.after(900, self._ensure_weekly_python_update_task)
 
-        # En vanlig manuell start visas normalt. OS-autostarten använder
-        # --tray och startar fortfarande gömd; användarens val kan även
-        # begära dold manuell start. Dölj bara om ikonen kan visas säkert.
+        # Starta minimerad som standard. OS-autostarten använder också
+        # --tray; en andra start kan ändå visa det här fönstret igen.
         vill_dold = bool(start_hidden
-                         or self.settings.get("start_minimized", False))
+                         or self.settings.get("start_minimized", True))
         if vill_dold:
             varför = ("--tray" if start_hidden
-                      else "inställningen 'starta minimerad'")
+                      else "standardinställningen 'starta minimerad'")
             if not self.tray:
-                self._h("fönster", "Minimerad start begärd men systemfält "
-                        "saknas - fönstret visas ändå", "warn")
+                self._h("fönster", "Systemfältsikonen saknas - startar "
+                        "minimerad i aktivitetsfältet", "warn")
+                self.root.iconify()
             else:
                 säkert, orsak = tray_hidden_start_safe()
                 if säkert:
-                    self._h("fönster", f"Fönstret visas INTE vid start "
-                            f"({varför}) - göms i systemfältet efter 150 ms")
-                    self.root.after(150,
-                                    lambda: self.hide_window(f"start: {varför}"))
+                    self._h("fönster", f"Fönstret startar minimerat "
+                            f"({varför}) - göms i systemfältet")
+                    self.hide_window(f"start: {varför}")
                 else:
-                    self._h("fönster", f"Dold start avbröts ({orsak}) - "
-                            "fönstret visas i stället", "warn")
-                    self._log(f"Dold start avbröts: {orsak}. Fönstret visas "
-                              "så att appen alltid går att nå.", "warn")
+                    self._h("fönster", f"Minimerad start avbröts ({orsak}) - "
+                            "fönstret visas så att det går att nå", "warn")
+                    self._log(f"Minimerad start avbröts: {orsak}. "
+                              "Fönstret visas så att appen alltid går att nå.",
+                              "warn")
 
     # -- trådsäker UI-uppdatering -----------------------------------------
     def _post(self, fn: Callable[[], None]) -> None:
@@ -7039,7 +7040,7 @@ class App:
         self.var_autostart = tk.BooleanVar(
             value=bool(self.settings.get("autostart", False)
                       or autostart_enabled()))
-        self.var_startmin = tk.BooleanVar(value=self.settings.get("start_minimized", False))
+        self.var_startmin = tk.BooleanVar(value=self.settings.get("start_minimized", True))
         self.var_tray = tk.BooleanVar(value=self.settings.get("tray_enabled", True))
         self.var_close_tray = tk.BooleanVar(value=self.settings.get("close_to_tray", True))
         self.var_min_tray = tk.BooleanVar(
@@ -9690,7 +9691,7 @@ class App:
             self.var_close_tray.set(self.settings.get("close_to_tray", True))
             self.var_min_tray.set(
                 self.settings.get("minimize_to_tray", True))
-            self.var_startmin.set(self.settings.get("start_minimized", False))
+            self.var_startmin.set(self.settings.get("start_minimized", True))
             self.var_autowatch.set(self.settings.get("autowatch_on_start", False))
             self.var_notify.set(self.settings.get("notify", True))
             if hasattr(self, "var_cache_cleanup"):

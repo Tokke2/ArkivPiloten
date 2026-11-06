@@ -698,9 +698,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # -- nytt --
     "theme": "ljus",             # ljus | mork - växlas live i Inställningar
     "autostart": True,           # starta med operativsystemet
-    "start_minimized": False,    # manuell start visas normalt som standard
+    "start_minimized": True,     # starta minimerad i systemfältet som standard
     "autostart_minimized_migrated_v1": False,  # intern engångsmigrering
     "manual_start_visible_migrated_v1": False,  # intern engångsmigrering
+    "start_minimized_default_migrated_v2": False,  # standard: minimerad start
     "tray_enabled": True,        # visa ikon i systemfältet
     "close_to_tray": True,       # krysset gömmer appen i systemfältet
     "minimize_to_tray": True,    # minimering gömmer också appen i systemfältet
@@ -745,11 +746,20 @@ def _migrate_autostart_minimized(settings: Dict[str, Any]) -> bool:
 
 
 def _migrate_manual_start_visible(settings: Dict[str, Any]) -> bool:
-    """Visa manuella starter som standard; OS-autostart använder fortfarande --tray."""
+    """Äldre övergång: manuella starter visades, OS-autostart var dold."""
     if settings.get("manual_start_visible_migrated_v1", False):
         return False
     settings["start_minimized"] = False
     settings["manual_start_visible_migrated_v1"] = True
+    return True
+
+
+def _migrate_start_minimized_default(settings: Dict[str, Any]) -> bool:
+    """Slå på minimerad start som nytt standardval, en gång per installation."""
+    if settings.get("start_minimized_default_migrated_v2", False):
+        return False
+    settings["start_minimized"] = True
+    settings["start_minimized_default_migrated_v2"] = True
     return True
 
 
@@ -772,6 +782,11 @@ def load_settings() -> Dict[str, Any]:
         except Exception:
             pass
     if _migrate_manual_start_visible(s):
+        try:
+            save_settings(s)
+        except Exception:
+            pass
+    if _migrate_start_minimized_default(s):
         try:
             save_settings(s)
         except Exception:

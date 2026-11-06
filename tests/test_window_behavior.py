@@ -11,9 +11,9 @@ import pdfsorter_data as D
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_defaults_show_manual_start_but_keep_os_autostart():
+def test_default_start_is_minimized_and_os_autostart_remains_on():
     assert D.DEFAULT_SETTINGS["autostart"] is True
-    assert D.DEFAULT_SETTINGS["start_minimized"] is False
+    assert D.DEFAULT_SETTINGS["start_minimized"] is True
     assert D.DEFAULT_SETTINGS["tray_enabled"] is True
     assert D.DEFAULT_SETTINGS["close_to_tray"] is True
     assert D.DEFAULT_SETTINGS["minimize_to_tray"] is True
@@ -110,12 +110,18 @@ def test_manual_start_visible_migration_is_one_time():
     assert settings["start_minimized"] is True
 
 
-def test_upgrade_from_autostart_minimized_release_keeps_os_start_but_shows_manual():
-    settings = {"autostart": True, "start_minimized": True,
-                "autostart_minimized_migrated_v1": True}
+def test_latest_startup_migration_enables_minimized_start_once():
+    settings = {"autostart": True, "start_minimized": False,
+                "autostart_minimized_migrated_v1": True,
+                "manual_start_visible_migrated_v1": True}
     assert not D._migrate_autostart_minimized(settings)
-    assert D._migrate_manual_start_visible(settings)
+    assert not D._migrate_manual_start_visible(settings)
+    assert D._migrate_start_minimized_default(settings)
     assert settings["autostart"] is True
+    assert settings["start_minimized"] is True
+    assert settings["start_minimized_default_migrated_v2"] is True
+    settings["start_minimized"] = False
+    assert not D._migrate_start_minimized_default(settings)
     assert settings["start_minimized"] is False
 
 
@@ -130,7 +136,8 @@ def test_load_settings_persists_one_time_startup_migrations(tmp_path, monkeypatc
                 "start_minimized": False,
                 "tray_minimize_migrated_v1": False,
                 "autostart_minimized_migrated_v1": False,
-                "manual_start_visible_migrated_v1": False})
+                "manual_start_visible_migrated_v1": False,
+                "start_minimized_default_migrated_v2": False})
     D.save_settings(old)
 
     migrated = D.load_settings()
@@ -139,9 +146,10 @@ def test_load_settings_persists_one_time_startup_migrations(tmp_path, monkeypatc
     assert migrated["minimize_to_tray"] is True
     assert migrated["tray_minimize_migrated_v1"] is True
     assert migrated["autostart"] is True
-    assert migrated["start_minimized"] is False
+    assert migrated["start_minimized"] is True
     assert migrated["autostart_minimized_migrated_v1"] is True
     assert migrated["manual_start_visible_migrated_v1"] is True
+    assert migrated["start_minimized_default_migrated_v2"] is True
 
     migrated.update({"close_to_tray": False, "minimize_to_tray": False,
                      "autostart": False, "start_minimized": False})
@@ -163,5 +171,7 @@ def test_app_wires_autostart_sync_and_minimized_start():
     text = ast.unparse(init)
     assert "sync_autostart(vill)" in text
     assert "start_minimized" in text
-    assert "get('start_minimized', False)" in text
+    assert "get('start_minimized', True)" in text
     assert "hide_window" in text
+    assert "root.iconify" in text
+    assert "after(150" not in text

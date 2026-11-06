@@ -2076,12 +2076,13 @@ HELP_CONTENT: List[Tuple[str, str]] = [
              "igång, så du ser det även när fönstret är gömt."),
     ("note", "Under Inställningar finns knappen Spara ikonfil, om du vill "
              "använda ikonen till en egen genväg."),
-    ("body", "En vanlig manuell start visar fönstret. Vid automatisk start "
-             "med datorn göms appen i systemfältet. En pågående sortering "
-             "håller fönstret synligt så att dubblettfrågor inte hamnar "
-             "bakom systemfältet. Ändra valen under Inställningar → Start "
-             "och systemfält. Slå även på \"Starta bevakningen direkt\" om "
-             "mapparna ska bevakas utan att du öppnar appen."),
+    ("body", "Appen startar minimerad i systemfältet som standard. Om "
+             "systemfältet inte kan visas säkert lämnas fönstret åtkomligt. "
+             "En andra start visar den redan öppna instansen. En pågående "
+             "sortering håller fönstret synligt så att dubblettfrågor inte "
+             "hamnar bakom systemfältet. Ändra valet under Inställningar → "
+             "Start och systemfält. Slå även på \"Starta bevakningen direkt\" "
+             "om mapparna ska bevakas utan att du öppnar appen."),
 
     ("h2", "Uppdateringar sköter sig själva"),
     ("body", "Appen letar efter en ny version två gånger per dygn — tyst, i "
