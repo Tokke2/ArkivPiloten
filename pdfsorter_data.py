@@ -698,7 +698,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # -- nytt --
     "theme": "ljus",             # ljus | mork - växlas live i Inställningar
     "autostart": True,           # starta med operativsystemet
-    "start_minimized": True,     # starta minimerad i systemfältet som standard
+    "start_minimized": True,     # fast beteende: starta alltid minimerad
     "autostart_minimized_migrated_v1": False,  # intern engångsmigrering
     "manual_start_visible_migrated_v1": False,  # intern engångsmigrering
     "start_minimized_default_migrated_v2": False,  # standard: minimerad start
@@ -791,6 +791,14 @@ def load_settings() -> Dict[str, Any]:
             save_settings(s)
         except Exception:
             pass
+    # Startminimering är inte längre en valbar inställning. Ignorera äldre
+    # sparade false-värden och skriv tillbaka det fasta beteendet.
+    if s.get("start_minimized") is not True:
+        s["start_minimized"] = True
+        try:
+            save_settings(s)
+        except Exception:
+            pass
     # Engångsmigrering (ANVÄNDARORDER 2026-09-28: "ska även skanna
     # undermapparna i vald mapp"): gamla installationer har recursive=false
     # sparad som standardvärde. Slå på undermappar en gång, och logga-
@@ -831,6 +839,7 @@ def load_settings() -> Dict[str, Any]:
 def save_settings(settings: Dict[str, Any]) -> None:
     clean = dict(DEFAULT_SETTINGS)
     clean.update({k: v for k, v in settings.items() if k in DEFAULT_SETTINGS})
+    clean["start_minimized"] = True
     clean["schema_version"] = SCHEMA_VERSION
     with _io_lock():
         _write_json(settings_path(), clean)

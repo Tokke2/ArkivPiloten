@@ -5335,7 +5335,7 @@ _UI_EN = {
     "Ingen smart rensning ännu · körs dagligen och vid avslut.":
         "No smart cleanup yet · runs daily and on exit.",
     "Starta bevakningen direkt": "Start watching immediately",
-    "Starta minimerad i systemfältet": "Start minimized to tray",
+    "Starta alltid minimerad": "Always start minimized",
     "Visa ikon i systemfältet": "Show tray icon",
     "Krysset minimerar i stället för att avsluta": "Close button minimizes to tray instead",
     "Minimera till systemfältet (annars aktivitetsfältet)":
@@ -5856,6 +5856,7 @@ class App:
         self._review_dialog: Optional[Any] = None
         #: Sätts när appen avslutas. Kön får då inte skapa fler dialoger.
         self._closing = False
+        self._startup_taskbar_minimize = False
         self._icon_ref = None                    # håll kvar PhotoImage
 
         self.root = tk.Tk()
@@ -6012,29 +6013,30 @@ class App:
         # eller pip-uppdatering av tillägg körs vid vanlig appstart.
         self.root.after(900, self._ensure_weekly_python_update_task)
 
-        # Starta minimerad som standard. OS-autostarten använder också
+        # Alla normala starter minimeras. OS-autostarten använder också
         # --tray; en andra start kan ändå visa det här fönstret igen.
-        vill_dold = bool(start_hidden
-                         or self.settings.get("start_minimized", True))
-        if vill_dold:
-            varför = ("--tray" if start_hidden
-                      else "standardinställningen 'starta minimerad'")
-            if not self.tray:
-                self._h("fönster", "Systemfältsikonen saknas - startar "
-                        "minimerad i aktivitetsfältet", "warn")
-                self.root.iconify()
+        varför = "--tray" if start_hidden else "alltid minimerad"
+        if not self.tray:
+            self._h("fönster", "Systemfältsikonen saknas - startar "
+                    "minimerad i aktivitetsfältet", "warn")
+            self.root.iconify()
+        else:
+            säkert, orsak = tray_hidden_start_safe()
+            if säkert:
+                self._h("fönster", f"Fönstret startar minimerat "
+                        f"({varför}) - göms i systemfältet")
+                self.hide_window(f"start: {varför}")
             else:
-                säkert, orsak = tray_hidden_start_safe()
-                if säkert:
-                    self._h("fönster", f"Fönstret startar minimerat "
-                            f"({varför}) - göms i systemfältet")
-                    self.hide_window(f"start: {varför}")
-                else:
-                    self._h("fönster", f"Minimerad start avbröts ({orsak}) - "
-                            "fönstret visas så att det går att nå", "warn")
-                    self._log(f"Minimerad start avbröts: {orsak}. "
-                              "Fönstret visas så att appen alltid går att nå.",
-                              "warn")
+                self._h("fönster", f"Systemfältet kan inte visas säkert "
+                        f"({orsak}) - minimerar till aktivitetsfältet", "warn")
+                self._log(f"Systemfältet kan inte visas säkert: {orsak}. "
+                          "Startar minimerad i aktivitetsfältet i stället.",
+                          "warn")
+                self._startup_taskbar_minimize = True
+                self.root.iconify()
+                self.root.after(
+                    2000, lambda: setattr(
+                        self, "_startup_taskbar_minimize", False))
 
     # -- trådsäker UI-uppdatering -----------------------------------------
     def _post(self, fn: Callable[[], None]) -> None:
@@ -7040,7 +7042,7 @@ class App:
         self.var_autostart = tk.BooleanVar(
             value=bool(self.settings.get("autostart", False)
                       or autostart_enabled()))
-        self.var_startmin = tk.BooleanVar(value=self.settings.get("start_minimized", True))
+        self.var_startmin = tk.BooleanVar(value=True)
         self.var_tray = tk.BooleanVar(value=self.settings.get("tray_enabled", True))
         self.var_close_tray = tk.BooleanVar(value=self.settings.get("close_to_tray", True))
         self.var_min_tray = tk.BooleanVar(
@@ -7063,10 +7065,12 @@ class App:
                         style="Card.TCheckbutton",
                                   variable=self.var_tray)
         cb_tray.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=2)
-        ttk.Checkbutton(sysbox, text="Starta minimerad i systemfältet",
-                        style="Card.TCheckbutton",
-                        variable=self.var_startmin).grid(row=1, column=2, columnspan=2,
-                                                         sticky="w", padx=8, pady=2)
+        cb_startmin = ttk.Checkbutton(
+            sysbox, text="Starta alltid minimerad",
+            style="Card.TCheckbutton", variable=self.var_startmin)
+        cb_startmin.grid(row=1, column=2, columnspan=2, sticky="w",
+                         padx=8, pady=2)
+        cb_startmin.state(["disabled"])
         ttk.Checkbutton(sysbox, text="Krysset minimerar i stället för att avsluta",
                         style="Card.TCheckbutton",
                         variable=self.var_close_tray).grid(row=2, column=0, columnspan=2,
@@ -7773,7 +7777,7 @@ class App:
             "tray_enabled": bool(self.var_tray.get()),
             "close_to_tray": bool(self.var_close_tray.get()),
             "minimize_to_tray": bool(self.var_min_tray.get()),
-            "start_minimized": bool(self.var_startmin.get()),
+            "start_minimized": True,
             "autowatch_on_start": bool(self.var_autowatch.get()),
             "notify": bool(self.var_notify.get()),
             "autostart": bool(self.var_autostart.get()),
@@ -9691,7 +9695,7 @@ class App:
             self.var_close_tray.set(self.settings.get("close_to_tray", True))
             self.var_min_tray.set(
                 self.settings.get("minimize_to_tray", True))
-            self.var_startmin.set(self.settings.get("start_minimized", True))
+            self.var_startmin.set(True)
             self.var_autowatch.set(self.settings.get("autowatch_on_start", False))
             self.var_notify.set(self.settings.get("notify", True))
             if hasattr(self, "var_cache_cleanup"):
@@ -10483,8 +10487,7 @@ class App:
         släpps först - annars skulle den nya instansen tro att appen redan
         kör och bara be den döende processen visa fönstret.
         """
-        dold = (not self.visible) or bool(
-            self.settings.get("start_minimized", False))
+        dold = True
         bevaka = bool(self.watcher and self.watcher.running)
         rot = Path(__file__).resolve().parent
         cmd = omstart_kommando(rot, sys.executable or "", dold=dold,
@@ -11257,6 +11260,11 @@ class App:
             state = self.root.state()
         except Exception:
             return
+        if state == "iconic" and getattr(self, "_startup_taskbar_minimize", False):
+            self._startup_taskbar_minimize = False
+            self._h("fönster", "Startade minimerad i aktivitetsfältet "
+                    "eftersom systemfältet inte var säkert")
+            return
         modal = self._review_is_open()
         action = _minimize_action(state, self.settings, bool(self.tray),
                                   modal, busy=bool(getattr(self, "_busy", False)))
@@ -11842,7 +11850,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--djup", action="store_true",
                    help="Läs mer av loggarna i --ai-rapport (för envisa fel)")
     p.add_argument("--tray", action="store_true",
-                   help="Starta minimerad i systemfältet (används vid autostart)")
+                   help="Starta alltid minimerad (systemfältet om möjligt, annars aktivitetsfältet)")
     p.add_argument("--resume-watch", action="store_true",
                    help="Starta bevakningen direkt (används av appens egen "
                         "omstart efter en uppdatering)")

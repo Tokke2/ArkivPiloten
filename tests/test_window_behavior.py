@@ -158,7 +158,7 @@ def test_load_settings_persists_one_time_startup_migrations(tmp_path, monkeypatc
     assert later["close_to_tray"] is False
     assert later["minimize_to_tray"] is False
     assert later["autostart"] is False
-    assert later["start_minimized"] is False
+    assert later["start_minimized"] is True
 
 
 def test_app_wires_autostart_sync_and_minimized_start():
@@ -170,8 +170,21 @@ def test_app_wires_autostart_sync_and_minimized_start():
                 if isinstance(node, ast.FunctionDef) and node.name == "__init__")
     text = ast.unparse(init)
     assert "sync_autostart(vill)" in text
-    assert "start_minimized" in text
-    assert "get('start_minimized', True)" in text
+    assert "tray_hidden_start_safe" in text
     assert "hide_window" in text
     assert "root.iconify" in text
     assert "after(150" not in text
+
+
+def test_minimized_start_is_not_optional_and_has_taskbar_fallback():
+    source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
+    assert '"start_minimized": True' in source
+    assert 'cb_startmin.state(["disabled"])' in source
+    assert "_startup_taskbar_minimize = True" in source
+    assert "minimerar till aktivitetsfältet" in source
+
+
+def test_legacy_saved_start_setting_cannot_disable_minimized_start():
+    source = (ROOT / "pdfsorter_data.py").read_text(encoding="utf-8")
+    assert 'clean["start_minimized"] = True' in source
+    assert 's["start_minimized"] = True' in source
