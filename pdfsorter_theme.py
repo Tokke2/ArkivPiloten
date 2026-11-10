@@ -318,6 +318,23 @@ class Theme:
         self._cfg("TLabel", background=c["bg"], foreground=c["text"])
         self._cfg("TSeparator", background=c["border"])
 
+        # -- brand header and start-page hero -----------------------------
+        self._cfg("Topbar.TFrame", background=c["surface"],
+                     relief="solid", borderwidth=1, bordercolor=c["border"])
+        self._cfg("BrandTitle.TLabel", background=c["surface"],
+                     foreground=c["text"], font=self.f_head)
+        self._cfg("BrandSub.TLabel", background=c["surface"],
+                     foreground=c["text_muted"], font=self.f_small)
+        self._cfg("Hero.TFrame", background=c["accent_light"],
+                     relief="solid", borderwidth=1,
+                     bordercolor=c["accent_hair"])
+        self._cfg("HeroTitle.TLabel", background=c["accent_light"],
+                     foreground=c["accent_dark"], font=self.f_title)
+        self._cfg("HeroText.TLabel", background=c["accent_light"],
+                     foreground=c["text_muted"], font=self.f_small)
+        self._cfg("Step.TFrame", background=c["surface"], relief="solid",
+                     borderwidth=1, bordercolor=c["accent_hair"])
+
         # -- kort ---------------------------------------------------------
         # Ett kort är en vit yta med tunn ram. Rubriken ligger UTANFÖR
         # kortet, som en egen etikett ovanför - det ger en tydligare

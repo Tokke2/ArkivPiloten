@@ -38,7 +38,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 
 ## Features
 
-- 🧭 **Simpler navigation** — the Start screen explains the three everyday steps, while review, categories, settings, help and advanced JSON tools have clear, ordered tabs
+- 🧭 **Clearer design** — a branded header, highlighted three-step Start screen, compact cards and clearly ordered tabs keep everyday actions separate from advanced tools
 - 📥 **Watched folders + review queue** — only an exact, unique saved support-word match can move automatically; every other PDF stays in the review queue
 - 🎯 **Zone-weighted matching** — letterhead, footer and sender zones weigh more than body text, plus multi-page matching; an organisation-number support word can auto-move only when its exact spelling is saved and uniquely identifies one category
 - 🧠 **User-controlled learning** — suggested support words are never preselected or saved automatically; you choose which words to save. The learned model ranks suggestions but never authorizes a move
@@ -245,7 +245,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 
 ## Funktioner
 
-- 🧭 **Enklare navigation** — startsidan visar de tre vanliga stegen, och granskning, kategorier, inställningar, hjälp och avancerad JSON-hantering ligger i tydlig ordning
+- 🧭 **Tydligare design** — en gemensam varumärkesrad, markerade tre steg på startsidan, kompakta kort och tydlig flikordning skiljer vardagsåtgärder från avancerade verktyg
 - 📥 **Bevakade mappar + granskningskö** — bara en exakt, unik stödordsträff kan flyttas automatiskt; alla andra PDF:er ligger kvar i granskningskön
 - 🎯 **Zonviktad matchning** — brevhuvud, sidfot och avsändarzon väger tyngre än brödtext, plus flersidig matchning; ett org.nr-stödord får bara auto-flytta när exakt skrivsätt är sparat och pekar ut en kategori
 - 🧠 **Användarstyrd inlärning** — stödordsförslag förbockas eller sparas aldrig automatiskt; du väljer vilka ord som ska sparas. Den inlärda modellen rangordnar förslag men ger aldrig flytträtt

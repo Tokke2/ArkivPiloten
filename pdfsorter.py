@@ -3472,14 +3472,17 @@ except ImportError as _theme_err:   # noqa: F401
             self.f_mono_bold = ("TkFixedFont", 9, "bold")
             # Registrera stilnamnen tomma, annars kraschar widgetarna
             for name in ("Card.TFrame", "CardInner.TFrame", "Shadow.TFrame",
-                         "Sunk.TFrame", "Status.TFrame"):
+                         "Sunk.TFrame", "Status.TFrame", "Topbar.TFrame",
+                         "Hero.TFrame", "Step.TFrame"):
                 self.style.configure(name)
             for name in ("Card.TLabel", "CardMuted.TLabel", "CardHead.TLabel",
                          "CardTitle.TLabel", "CardKey.TLabel", "Muted.TLabel",
                          "Faint.TLabel", "Title.TLabel", "Head.TLabel",
                          "Huge.TLabel", "Section.TLabel", "Ok.TLabel",
                          "Warn.TLabel", "Err.TLabel", "Status.TLabel",
-                         "PillMuted.TLabel"):
+                         "PillMuted.TLabel", "PillAccent.TLabel",
+                         "BrandTitle.TLabel", "BrandSub.TLabel",
+                         "HeroTitle.TLabel", "HeroText.TLabel"):
                 self.style.configure(name)
             for name in ("Accent.TButton", "Danger.TButton", "Link.TButton",
                          "CardLink.TButton"):
@@ -5755,17 +5758,20 @@ _UI_EN = {
     "Start": "Home", "Kategorier": "Categories",
     "Avancerat": "Advanced", "Inställningar": "Settings",
     "Granska": "Review", "Historik": "History", "Hjälp": "Help",
+    "PDF-sortering, enkelt och säkert": "PDF sorting, simply and safely",
     "Sortera dina PDF-filer": "Sort your PDF files",
-    "1  Välj var PDF:erna finns     ·     2  Välj arkivmapp     ·     "
-    "3  Sortera nu eller starta bevakning":
-        "1  Choose where the PDFs are     ·     2  Choose an archive folder     ·     "
-        "3  Sort now or start watching",
+    "Välj PDF-mappar": "Choose PDF folders",
+    "Var filerna finns": "Where the files are",
+    "Välj arkivmapp": "Choose an archive folder",
+    "Där sorterade filer sparas": "Where sorted files are saved",
+    "Sortera eller bevaka": "Sort or watch",
+    "Du kan granska osäkra filer": "You can review uncertain files",
     "1. PDF-filer att sortera": "1. PDF files to sort",
-    "Välj mappen där dina PDF-filer finns":
-        "Choose the folder containing your PDF files",
+    "Välj mappen eller mapparna där dina PDF-filer finns":
+        "Choose the folder or folders containing your PDF files",
     "2. Arkivmapp": "2. Archive folder",
     "sorterade filer sparas här": "Sorted files are saved here",
-    "Aktivitet": "Activity",
+    "Aktivitet": "Activity", "Lägg till mapp…": "Add folder…",
     "Sortera nu": "Sort now", "Sorterar…": "Sorting…",
     "Avbryt sortering": "Stop sorting", "Stoppar…": "Stopping…",
     "Avsluta granskning": "Stop reviewing",
@@ -6354,6 +6360,29 @@ class App:
         # (default=True) på alla framtida dialoger och felrutor, inklusive
         # aktivitetsfältet på Windows via iconbitmap.
         self._icon_ref = brand_window(self.root)
+
+        # Gemensam, luftig varumärkesrad gör att appens olika arbetsflikar
+        # känns som en sammanhållen produkt och ger en tydlig hjälpväg.
+        header = ttk.Frame(self.root, style="Topbar.TFrame")
+        header.pack(fill="x", padx=12, pady=(10, 4))
+        header.columnconfigure(1, weight=1)
+        self._brand_small_ref = icon_photoimage(36)
+        if self._brand_small_ref is not None:
+            ttk.Label(header, image=self._brand_small_ref,
+                      background=self.C["surface"]).grid(
+                          row=0, column=0, rowspan=2,
+                          padx=(12, 10), pady=7, sticky="w")
+        brand_title = ttk.Label(header, text=APP_NAME,
+                                style="BrandTitle.TLabel")
+        brand_title.grid(row=0, column=1, sticky="sw", pady=(7, 0))
+        brand_sub = ttk.Label(
+            header, text="PDF-sortering, enkelt och säkert",
+            style="BrandSub.TLabel")
+        brand_sub.grid(row=1, column=1, sticky="nw", pady=(0, 7))
+        ttk.Button(
+            header, text="Hjälp", style="Link.TButton",
+            command=lambda: self.nb.select(self.tab_help)).grid(
+                row=0, column=2, rowspan=2, padx=12, sticky="e")
 
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(fill="both", expand=True, padx=12, pady=(10, 0))
@@ -7007,23 +7036,56 @@ class App:
 
         # En kort startsida med tre tydliga steg. Mer sällan använda verktyg
         # ligger kvar på sina egna flikar, så vardagsflödet hålls lättöverskådligt.
-        intro = ttk.Frame(f, style="Card.TFrame")
+        intro = ttk.Frame(f, style="Hero.TFrame")
         intro.grid(row=0, column=0, sticky="ew", padx=T.PAD,
                    pady=(T.PAD, 0))
-        intro_body = ttk.Frame(intro, style="CardInner.TFrame")
+        intro_body = ttk.Frame(intro, style="Hero.TFrame")
         intro_body.pack(fill="x", padx=T.INNER, pady=(8, 7))
         ttk.Label(intro_body, text="Sortera dina PDF-filer",
-                  style="CardTitle.TLabel").pack(anchor="w")
-        intro_hint = ttk.Label(
-            intro_body,
-            text="1  Välj var PDF:erna finns     ·     2  Välj arkivmapp     ·     "
-                 "3  Sortera nu eller starta bevakning",
-            style="CardMuted.TLabel", wraplength=1000, justify="left")
-        intro_hint.pack(anchor="w", fill="x", pady=(2, 0))
-        intro_body.bind(
-            "<Configure>",
-            lambda event: intro_hint.configure(
-                wraplength=max(220, event.width - 2 * T.INNER)), add="+")
+                  style="HeroTitle.TLabel").pack(anchor="w")
+        stepbar = ttk.Frame(intro_body, style="Hero.TFrame")
+        stepbar.pack(fill="x", pady=(9, 0))
+        steps = []
+        for number, (label, detail) in enumerate((
+                ("Välj PDF-mappar", "Var filerna finns"),
+                ("Välj arkivmapp", "Där sorterade filer sparas"),
+                ("Sortera eller bevaka", "Du kan granska osäkra filer")), 1):
+            chip = ttk.Frame(stepbar, style="Step.TFrame")
+            chip.columnconfigure(1, weight=1)
+            ttk.Label(chip, text=f"0{number}",
+                      style="PillAccent.TLabel").grid(
+                          row=0, column=0, rowspan=2, padx=9, pady=8,
+                          sticky="n")
+            ttk.Label(chip, text=label, style="CardKey.TLabel").grid(
+                row=0, column=1, sticky="sw", padx=(0, 8), pady=(7, 0))
+            ttk.Label(chip, text=detail, style="CardMuted.TLabel").grid(
+                row=1, column=1, sticky="nw", padx=(0, 8), pady=(0, 7))
+            steps.append(chip)
+
+        last_step_columns = None
+
+        def layout_steps(_event=None):
+            nonlocal last_step_columns
+            width = max(1, stepbar.winfo_width())
+            columns = 3 if width >= 780 else 2 if width >= 500 else 1
+            if columns == last_step_columns:
+                return
+            last_step_columns = columns
+            for child in steps:
+                child.grid_forget()
+            for col in range(3):
+                stepbar.columnconfigure(col, weight=0, uniform="")
+            for col in range(columns):
+                stepbar.columnconfigure(col, weight=1, uniform="start-steps")
+            for index, child in enumerate(steps):
+                row, col = divmod(index, columns)
+                span = (columns if index == 2 and columns == 2 else 1)
+                child.grid(row=row, column=col, columnspan=span,
+                           sticky="ew", padx=(0 if col == 0 else 6, 0),
+                           pady=(0 if row == 0 else 6, 0))
+
+        stepbar.bind("<Configure>", layout_steps, add="+")
+        self.root.after_idle(layout_steps)
 
         # Tunga inställningar bor på egen flik - och den måste gå att
         # rulla, annars hamnar de nedersta korten (autostart, systemfält,
@@ -7037,7 +7099,7 @@ class App:
         top.columnconfigure(1, weight=2, uniform="m")
 
         incard = T.card(top, "1. PDF-filer att sortera",
-                        "Välj mappen där dina PDF-filer finns")
+                        "Välj mappen eller mapparna där dina PDF-filer finns")
         incard.grid(row=0, column=0, sticky="nsew", padx=(0, T.GAP))
         box = incard.body
         box.columnconfigure(0, weight=1)
@@ -7060,7 +7122,7 @@ class App:
 
         inbtn = ttk.Frame(box, style="CardInner.TFrame")
         inbtn.grid(row=0, column=2, sticky="n", padx=T.INNER, pady=T.INNER)
-        ttk.Button(inbtn, text="Lägg till…", width=12,
+        ttk.Button(inbtn, text="Lägg till mapp…", width=15,
                    command=self._add_input_dir).pack(fill="x")
         ttk.Button(inbtn, text="Ta bort", width=12,
                    command=self._remove_input_dir).pack(fill="x", pady=6)

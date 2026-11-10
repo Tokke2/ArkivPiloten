@@ -687,8 +687,9 @@ pdfsorter_theme.py  ──►  (helt fristående)
   dyr OCR-text mellan omskanningar.
 
 **GUI (Tkinter):** sju flikar — Start, Granska, Kategorier, Inställningar,
-Historik, Hjälp och Avancerat. Startsidan visar sorteringens tre steg;
-JSON-redigering finns under Avancerat. Kärnan är `ReviewDialog` med 10 föreslagna
+Historik, Hjälp och Avancerat. En gemensam varumärkesrad ligger ovanför flikarna;
+startsidan visar sorteringens tre steg i tydliga kort. JSON-redigering finns under
+Avancerat. Kärnan är `ReviewDialog` med 10 föreslagna
 stödord att bocka i.
 
 ## 6. Matchningslogik i detalj
