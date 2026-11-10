@@ -5614,6 +5614,7 @@ class ConflictDialog:
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk = tk
         self.app = app
+        self.colors = getattr(app, "C", COLORS) if app is not None else COLORS
         self.result = "rename"
         self.win = tk.Toplevel(parent)
         self._icon_ref = brand_window(self.win)
@@ -5625,7 +5626,7 @@ class ConflictDialog:
         self.win.resizable(True, True)
         _fit_geometry(self.win, 640, 300, 460, 230)
         try:
-            self.win.configure(background=(app.C if app else COLORS)["bg"])
+            self.win.configure(background=self.colors["bg"])
         except Exception:
             pass
 
@@ -5633,22 +5634,44 @@ class ConflictDialog:
                if kind == "name" else
                "En fil med IDENTISKT innehåll (SHA-256) finns redan i "
                "arkivmappen, fast med annat namn eller i en annan undermapp.")
-        ttk.Label(self.win,
-                  text=f"{vad}\n\n"
-                       f"Ny fil: {src.name}\n"
-                       f"Befintlig målfil: {target.name}\n\n"
-                       "Välj hur dubbletten ska hanteras:",
-                  justify="left", anchor="w",
-                  wraplength=max(240, min(560, self.win.winfo_screenwidth() - 80)),
-                  style="TLabel").pack(fill="x", padx=18, pady=(16, 8))
+        try:
+            screen_h = int(self.win.winfo_screenheight())
+            screen_w = int(self.win.winfo_screenwidth())
+        except Exception:
+            screen_h, screen_w = 800, 1280
+        text_rows = max(3, min(7, (screen_h - 190) // 22))
+        text_cols = max(24, min(72, (screen_w - 140) // 8))
+
+        self.win.columnconfigure(0, weight=1)
+        self.win.rowconfigure(0, weight=1)
+        details = ttk.Frame(self.win)
+        details.grid(row=0, column=0, sticky="nsew", padx=14, pady=(14, 6))
+        details.columnconfigure(0, weight=1)
+        details.rowconfigure(0, weight=1)
+        body = tk.Text(
+            details, wrap="word", width=text_cols, height=text_rows,
+            borderwidth=0, padx=8, pady=7, state="disabled", cursor="arrow",
+            takefocus=False, background=self.colors["surface"],
+            foreground=self.colors["text"], highlightthickness=0)
+        body.grid(row=0, column=0, sticky="nsew")
+        body_scroll = ttk.Scrollbar(details, orient="vertical", command=body.yview)
+        body_scroll.grid(row=0, column=1, sticky="ns")
+        body.configure(yscrollcommand=body_scroll.set)
+        body.configure(state="normal")
+        body.insert(
+            "1.0", f"{vad}\n\nNy fil: {src.name}\n"
+            f"Befintlig målfil: {target.name}\n\n"
+            "Välj hur dubbletten ska hanteras:")
+        body.configure(state="disabled")
 
         self.var_remember = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.win, variable=self.var_remember,
-                        text="Kom ihåg under denna körning").pack(
-            anchor="w", padx=18)
+        ttk.Checkbutton(
+            self.win, variable=self.var_remember,
+            text="Kom ihåg under denna körning").grid(
+                row=1, column=0, sticky="w", padx=18, pady=(2, 0))
 
         rad = ttk.Frame(self.win)
-        rad.pack(padx=18, pady=16, fill="x")
+        rad.grid(row=2, column=0, sticky="ew", padx=14, pady=(8, 14))
 
         def ersatt():
             self.result = "replace"
@@ -5658,12 +5681,43 @@ class ConflictDialog:
             self.result = "rename"
             self.win.destroy()
 
-        ttk.Button(rad, text="Ersätt den gamla", style="Danger.TButton",
-                   command=ersatt).pack(side="left")
-        ttk.Button(rad, text="Behåll båda (2)", style="Accent.TButton",
-                   command=bada).pack(side="left", padx=8)
-        ttk.Button(rad, text="Avbryt flytten",
-                   command=self._avbryt).pack(side="right")
+        buttons = [
+            ttk.Button(rad, text="Ersätt den gamla", style="Danger.TButton",
+                       command=ersatt),
+            ttk.Button(rad, text="Behåll båda (2)", style="Accent.TButton",
+                       command=bada),
+            ttk.Button(rad, text="Avbryt flytten", command=self._avbryt),
+        ]
+        last_columns = None
+
+        def layout_buttons(_event=None):
+            nonlocal last_columns
+            width = max(1, rad.winfo_width())
+            columns = 3 if width >= 560 else 2 if width >= 390 else 1
+            if columns == last_columns:
+                return
+            last_columns = columns
+            for child in rad.winfo_children():
+                child.grid_forget()
+            for col in range(3):
+                rad.columnconfigure(col, weight=0, uniform="")
+            for col in range(columns):
+                rad.columnconfigure(col, weight=1, uniform="conflict-actions")
+            if columns == 3:
+                for col, button in enumerate(buttons):
+                    button.grid(row=0, column=col, sticky="ew",
+                                padx=(0 if col == 0 else 5, 0), pady=2)
+            elif columns == 2:
+                buttons[0].grid(row=0, column=0, sticky="ew", padx=(0, 5), pady=2)
+                buttons[1].grid(row=0, column=1, sticky="ew", padx=(5, 0), pady=2)
+                buttons[2].grid(row=1, column=0, columnspan=2,
+                                sticky="ew", pady=2)
+            else:
+                for row, button in enumerate(buttons):
+                    button.grid(row=row, column=0, sticky="ew", pady=2)
+
+        rad.bind("<Configure>", layout_buttons, add="+")
+        self.win.after_idle(layout_buttons)
         self.win.bind("<Escape>", lambda e: self._avbryt())
         self.win.update_idletasks()
         try:
