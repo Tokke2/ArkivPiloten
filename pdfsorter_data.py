@@ -646,7 +646,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "subfolders_enabled_v2": False,   # engångsmigrering: se load_settings
     "extensions_offer_hidden": False, # "visa inte igen" i tilläggsdialogen
     "tesseract_path": "",        # manuell sökväg till tesseract.exe
-    "learned_matching": True,    # bakåtkompatibilitet; alltid aktivt
+    "learned_matching": True,    # bakåtkompatibilitet; fast alltid aktivt
     "learned_confirmed_only_v1": False,  # modell ombyggd från bekräftade val
     "swish_number": "0721817177",  # Swish-nummer för donations-QR (N15)
     "check_updates": True,       # 2026-10-16: sök Git-uppdatering vid start
@@ -772,7 +772,7 @@ def load_settings() -> Dict[str, Any]:
         for k, v in data.items():
             if k in s:
                 s[k] = v
-    # Självlärning är fast på; ignorera och migrera äldre false-värden.
+    # Självlärning är fast på; äldre exporter med false ignoreras.
     s["learned_matching"] = True
     if isinstance(data, dict) and data.get("learned_matching") is not True:
         try:

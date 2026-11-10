@@ -1968,20 +1968,19 @@ varje korrigering.
 - AC-14.5 Profilen sparas lokalt och påverkar inte redan sorterade filer.
   Självlärningen är alltid aktiv och kan inte stängas av i inställningarna;
   gamla `learned_matching=false` ignoreras. Vid första körningen efter
-  uppgraderingen byggs profilen om från användarbekräftad historik.
+  uppgraderingen byggs profilen om från historikens användarbekräftade val,
+  så äldre autosorteringar inte fortsätter påverka modellen.
 - AC-14.6 **LEVERERAD 2026-09-28:** `LearnedMatcher` (naiv Bayes,
   Laplace-mjukning + prior) i `learned_model.json`; träningsdata =
   `learn_tokens()` (~60 karakteristiska ord, stoppsord gallrade) som
-  sparas i varje historikpost (`tokens`) och tränas stegvis vid varje
-  flytt i `engine.apply()`, flush vid batchslut/avslut. Integration i
-  `decide()`: (a) bryter regelgodkända dödlägen när marginalen är säker
-  (≥0,25 i log-rummet) på någon av de två nära kandidaterna, (b) på
-  nivån "Lös" auto-flyttar en säker modell ensam, (c) annars
-  `learned_hint` som visas i granskningsrutan ("lärd: X – N liknande
-  filer"). Bara användarbekräftade val tränar profilen; autosorteringar och
-  omskanningar hoppas över. Inlärningen är alltid aktiv och använder ingen
-  av/på-kryssruta. En äldre profil byggs om från bekräftad historik vid
-  första användningen efter uppgradering.
+  sparas i historiken; bara användarbekräftade val/rättelser tränar modellen,
+  manuella val väger tyngre, och autosorteringar/omskanningar hoppas över.
+  Flush sker vid batchslut/avslut. Integrationen i `decide()` kan förbättra
+  rangordningen men ändrar inte beviskraven för autosortering. Inlärningen är
+  alltid aktiv, utan av/på-kryssruta. Vid uppgradering byggs den gamla
+  profilen om en gång från bekräftade historikposter. Verifierat med tester
+  för träning, walk-forward, återbyggnad, rättelser och filtrering av
+  obekräftade beslut.
 
 ### REQ-N2 (B) — requirements.txt och veckovis uppdatering
 En `requirements.txt` bredvid `pdfsorter.py` listar Python-tilläggen. Från

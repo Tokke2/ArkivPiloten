@@ -1827,7 +1827,7 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
                         body=extraction.text or "")
     t = effective_thresholds(settings)
 
-    # N14: modellens syn på filen när den har tillräckligt underlag.
+    # Självlärande modellen används när den har tillräckligt underlag.
     lm_pred = None
     if settings.get("learned_matching", True):
         try:
@@ -2848,8 +2848,9 @@ class SortEngine:
                     wrong = best.name
                     self.rules.register_reject(wrong, best.matched)
                 self._rules_save()
-                # Bara uttryckliga användarval och rättelser är facit;
-                # autosorteringar och omskanningar tränar inte modellen.
+                # Självlärning bygger bara på användarens uttryckliga val
+                # och rättelser. Autosorteringar och omskanningar är aldrig
+                # facit, även när filen faktiskt flyttades.
                 toks = learn_tokens(decision.extraction.text
                                     or decision.extraction.combined)
                 features = learn_features(decision.extraction)
@@ -5367,7 +5368,7 @@ _UI_EN = {
     "Fråga när appen är osäker": "Ask when the app is unsure",
     "OCR för skannade PDF:er": "OCR for scanned PDFs",
     "Bättre OCR (noggrannare, något långsammare)": "Better OCR (more accurate, slightly slower)",
-    "Självlärning är alltid aktiv: appen lär av dina bekräftade val och rättelser, aldrig av autosorteringar.": "Self-learning is always on: the app learns from confirmed choices and corrections, never automatic sorts.",
+    "Självlärning är alltid aktiv: appen lär av dina bekräftade val och rättelser, aldrig av autosorteringar.": "Self-learning is always on: the app learns from your confirmed choices and corrections, never automatic sorts.",
     "Läs även undermappar i inmappen": "Include subfolders of the inbox",
     "Lägg filer i undermappar efter datum": "Put files in subfolders by date",
     "Skanna om allt när ett nytt stödord lärts in": "Rescan everything when a new keyword is learned",
