@@ -3941,12 +3941,19 @@ class ReviewDialog:
                 details.append(line)
             scanned = len(ocr_pages)
             total_pages = int(getattr(ext, "page_count", 0) or 0)
-            heading = (f"OCR per sida ({scanned} av {total_pages} sidor):"
-                       if total_pages and scanned < total_pages else "OCR per sida:")
-            wrapped_label(head, text=heading + "\n" + "\n".join(details),
-                          style="CardMuted.TLabel", justify="left").grid(
-                          row=next_row, column=0, columnspan=2, sticky="w",
-                          padx=16, pady=(2, 10))
+            coverage = (f"{scanned} av {total_pages} sidor" if total_pages
+                        and scanned < total_pages else f"{scanned} sidor")
+            self._ocr_detail_lines = details
+            ttk.Label(head, text=f"OCR-avläsning: {coverage}",
+                      style="CardMuted.TLabel").grid(
+                          row=next_row, column=0, sticky="w",
+                          padx=16, pady=(2, 0))
+            ttk.Button(
+                head, text="Visa resultat per sida…",
+                command=self._show_ocr_details).grid(
+                    row=next_row + 1, column=0, sticky="w",
+                    padx=16, pady=(4, 10))
+            next_row += 2
 
         ttk.Separator(self._all).grid(row=1, column=0, sticky="ew", padx=14, pady=(10, 0))
 
@@ -4277,6 +4284,49 @@ class ReviewDialog:
                 note += "  ⚠ finns i " + ", ".join(owners[:2])
             ttk.Label(self.inner, text=note, style="CardMuted.TLabel"
                       ).grid(row=i, column=2, sticky="w", padx=(10, 14))
+
+    def _show_ocr_details(self) -> None:
+        """Visa OCR-resultat i ett separat läsbart fönster utan att tränga undan valen."""
+        details = getattr(self, "_ocr_detail_lines", [])
+        if not details:
+            return
+        tk, ttk, *_ = _tk()
+        win = tk.Toplevel(self.win)
+        win._icon_ref = brand_window(win)
+        win.title("OCR-avläsning per sida")
+        win.configure(background=self.C["bg"])
+        win.transient(self.win)
+        _fit_geometry(win, 820, 680, 560, 380)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(1, weight=1)
+        ttk.Label(
+            win,
+            text="Texten nedan är automatisk OCR-avläsning. Kontrollera osäkra delar mot original-PDF:en.",
+            style="CardMuted.TLabel", wraplength=760, justify="left",
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        body = ttk.Frame(win, style="Card.TFrame")
+        body.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 8))
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        text = tk.Text(
+            body, wrap="word", state="normal", padx=12, pady=10,
+            background=self.C["surface"], foreground=self.C["text"],
+            insertbackground=self.C["text"], relief="flat", borderwidth=0,
+            font=getattr(self.theme, "f_base", ("TkDefaultFont", 10)),
+        )
+        scroll = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        text.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        text.insert("1.0", "\n\n".join(details))
+        text.configure(state="disabled")
+        ttk.Button(win, text="Stäng", command=win.destroy).grid(
+            row=2, column=0, sticky="e", padx=16, pady=(0, 14))
+        win.bind("<Escape>", lambda _event: win.destroy())
+        try:
+            win.grab_set()
+        except Exception:
+            pass
 
     def _split_suggested(self) -> None:
         """Skapa användarvalda delkopior; original-PDF:en lämnas orörd."""

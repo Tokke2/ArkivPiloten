@@ -883,23 +883,67 @@ def _tess_call(fn, img, langs: str, cfg: str, **extra):
 def _ocr_pass(img, langs: str, cfg: str, pytesseract) -> Tuple[float, str]:
     """OCR:a en bild och returnerar (medelkonfidens, text).
 
-    `image_to_data` ger konfidens per ord, vilket låter flera
-    konfigurationer jämföras objektivt - grunden för "Bättre OCR" i REQ-N5.
-    Missar datan fallbackas till ren text med konfidens 0.
+    `image_to_data` ger konfidens per ord och positionsgrupper för rader och
+    stycken. Behåll den strukturen i stället för att platta ut hela sidan till
+    en enda rad; radbrytningar hjälper både läsbarheten och zonmatchningen.
     """
     try:
         d = _tess_call(pytesseract.image_to_data, img, langs, cfg,
                        output_type=pytesseract.Output.DICT)
-        confs = [int(c) for c in d.get("conf", [])
-                 if str(c).lstrip("-").isdigit() and int(c) > 0]
-        text = " ".join(w for w in d.get("text", []) if w and w.strip())
+        words = d.get("text", []) or []
+        conf_values = d.get("conf", []) or []
+        confs = []
+        lines: Dict[Tuple[str, str, str], List[Tuple[int, str]]] = {}
+        line_order: List[Tuple[str, str, str]] = []
+
+        def value_at(key: str, index: int, fallback: str) -> str:
+            values = d.get(key, []) or []
+            try:
+                return str(values[index])
+            except (IndexError, TypeError):
+                return fallback
+
+        for i, raw in enumerate(words):
+            word = str(raw or "").strip()
+            if not word:
+                continue
+            try:
+                confidence = float(conf_values[i])
+                if confidence > 0:
+                    confs.append(confidence)
+            except (IndexError, TypeError, ValueError, OverflowError):
+                pass
+            block = value_at("block_num", i, "0")
+            paragraph = value_at("par_num", i, "0")
+            line = value_at("line_num", i, "0")
+            key = (block, paragraph, line)
+            if key not in lines:
+                lines[key] = []
+                line_order.append(key)
+            try:
+                word_order = int(value_at("word_num", i, str(i)))
+            except (TypeError, ValueError, OverflowError):
+                word_order = i
+            lines[key].append((word_order, word))
+
+        rendered: List[str] = []
+        previous_block = None
+        for key in line_order:
+            if previous_block is not None and key[0] != previous_block:
+                rendered.append("")
+            rendered.append(" ".join(
+                word for _, word in sorted(lines[key], key=lambda item: item[0])))
+            previous_block = key[0]
+        text = "\n".join(rendered).strip()
         score = sum(confs) / len(confs) if confs else 0.0
-        return score, text
+        if text:
+            return score, text
     except Exception:
-        try:
-            return 0.0, _tess_call(pytesseract.image_to_string, img, langs, cfg)
-        except Exception:
-            return 0.0, ""
+        pass
+    try:
+        return 0.0, _tess_call(pytesseract.image_to_string, img, langs, cfg)
+    except Exception:
+        return 0.0, ""
 
 
 def _run_ocr_detailed(path: Path, max_pages: int, language: str,
@@ -955,6 +999,9 @@ def _run_ocr_detailed(path: Path, max_pages: int, language: str,
                 # en enda textkolumn med varierande innehåll - fångar
                 # skanningar som psm 3/6 delar upp fel.
                 passes.append((pre, "--oem 1 --psm 4"))
+                # PSM 11 hittar fristående etiketter och text kring tabeller/
+                # diagram bättre än vanliga löptextlägen.
+                passes.append((pre, "--oem 1 --psm 11"))
                 # Extra avläsningspass på 1,5× uppskalad bild: liten och
                 # blek text som annars försvinner (bättre avläsning).
                 try:
