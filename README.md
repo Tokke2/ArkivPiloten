@@ -38,13 +38,14 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 
 ## Features
 
+- 🧭 **Simpler navigation** — the Start screen explains the three everyday steps, while review, categories, settings, help and advanced JSON tools have clear, ordered tabs
 - 📥 **Watched folders + review queue** — only an exact, unique saved support-word match can move automatically; every other PDF stays in the review queue
 - 🎯 **Zone-weighted matching** — letterhead, footer and sender zones weigh more than body text, plus multi-page matching; an organisation-number support word can auto-move only when its exact spelling is saved and uniquely identifies one category
 - 🧠 **User-controlled learning** — suggested support words are never preselected or saved automatically; you choose which words to save. The learned model ranks suggestions but never authorizes a move
 - 🔐 **Exact-match safety** — automatic moves require a literal whole-word/phrase match in PDF text, a unique category, and non-recipient evidence; partial, fuzzy, OCR-denoised, filename-only, or learned-only matches require review
 - 🔍 **OCR for scanned PDFs** (Tesseract), including logos in letterheads of otherwise text-based files
 - 💡 **Clearer review dialog (1.4.14)** — file details, keyword suggestions and destination are grouped into clean cards. The existing-folder field accepts free text and filters the dropdown as you type; choose a match with Enter. The primary “Save & move” action is easy to spot.
-- 💡 **Review controls** — suggestions are not selected by default; choose words yourself, choose a category and optional subfolder, and confirm. Matchningar includes a button to clear all support words. The mouse wheel is paused while the category dropdown is open.
+- 💡 **Review controls** — suggestions are not selected by default; choose words yourself, choose a category and optional subfolder, and confirm. Kategorier includes a button to clear all support words. The mouse wheel is paused while the category dropdown is open.
 - ↩️ **Never destructive** — files are never overwritten (name clashes become `invoice (2).pdf`), and every move can be undone
 - 🎨 **One shared app icon** — the new transparent 512px archive/checkmark mark is the source for windows/dialogs, taskbar, tray, shortcuts, macOS app bundle and the multi-size Windows `.ico`.
 - 🧰 **Tray icon, autostart, single instance** — a manual launch opens the window; OS autostart starts in the tray. Windows autostart runs `pythonw.exe pdfsorter.py --tray` directly (not the `.pyw` file association), so the app branding replaces Python’s generic icon. Closing/minimizing sends the app to the tray while idle, but the window stays visible during sorting so duplicate prompts cannot get hidden.
@@ -244,6 +245,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 
 ## Funktioner
 
+- 🧭 **Enklare navigation** — startsidan visar de tre vanliga stegen, och granskning, kategorier, inställningar, hjälp och avancerad JSON-hantering ligger i tydlig ordning
 - 📥 **Bevakade mappar + granskningskö** — bara en exakt, unik stödordsträff kan flyttas automatiskt; alla andra PDF:er ligger kvar i granskningskön
 - 🎯 **Zonviktad matchning** — brevhuvud, sidfot och avsändarzon väger tyngre än brödtext, plus flersidig matchning; ett org.nr-stödord får bara auto-flytta när exakt skrivsätt är sparat och pekar ut en kategori
 - 🧠 **Användarstyrd inlärning** — stödordsförslag förbockas eller sparas aldrig automatiskt; du väljer vilka ord som ska sparas. Den inlärda modellen rangordnar förslag men ger aldrig flytträtt
@@ -251,7 +253,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 - 🔐 **Säker exaktmatchning** — automatisk flytt kräver bokstavlig helords-/frasträff i PDF-texten, en entydig kategori och bevis utanför mottagarblocket; delträffar, OCR-brus, filnamn och inlärning kräver granskning
 - 🔍 **OCR för skannade PDF:er** (Tesseract), inklusive logotyper i brevhuvuden på i övrigt textbaserade filer
 - 💡 **Tydligare granskningsruta (1.4.14)** — filinfo, stödordsförslag och målmapp ligger i rena, separata kort. Fältet för befintlig mapp tar fritext och filtrerar listan medan du skriver; Enter väljer en träff. Huvudknappen **Spara & flytta** är lätt att hitta.
-- 💡 **Granskningskontroller** — förslag förbockas eller sparas inte åt dig; välj stödord, kategori och eventuell undermapp själv. Fliken Matchningar har en knapp för att rensa alla stödord. Mushjulet pausas medan kategorirullgardinen är öppen.
+- 💡 **Granskningskontroller** — förslag förbockas eller sparas inte åt dig; välj stödord, kategori och eventuell undermapp själv. Fliken Kategorier har en knapp för att rensa alla stödord. Mushjulet pausas medan kategorirullgardinen är öppen.
 - ↩️ **Aldrig destruktiv** — filer skrivs aldrig över (namnkrockar blir `faktura (2).pdf`), och varje flytt går att ångra
 - 🎨 **En gemensam appikon** — den nya transparenta 512px-ikonen med arkiv/checkmark är källa för fönster/dialoger, aktivitetsfält, systemfält, genvägar, macOS-appen och Windows-`.ico` i flera storlekar.
 - 🧰 **Tray-ikon, autostart, enkelinstans** — appen startar alltid minimerad, i systemfältet om det kan visas säkert och annars i aktivitetsfältet. En andra start visar den redan öppna instansen. Windows-autostart kör `pythonw.exe pdfsorter.py --tray` direkt (inte `.pyw` via filassociation), så appens egen ikon används i stället för Pythons standardikon. Under sortering hålls fönstret synligt så att dubblettfrågor inte hamnar bakom systemfältet.

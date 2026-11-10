@@ -147,8 +147,8 @@
 > och kontrollområden.
 > (a) `Ctrl+Tab` / `Ctrl+Shift+Tab` byter flik framåt/bakåt och slår runt
 > vid första/sista fliken. `Ctrl+1…7` väljer fliken efter dess nuvarande
-> ordning (Sortera, Matchningar, Inställningar, Granska, Historik, JSON,
-> Hjälp); ogiltiga index gör inget.
+> ordning (Start, Granska, Kategorier, Inställningar, Historik, Hjälp,
+> Avancerat); ogiltiga index gör inget.
 > (b) `F6` och `Shift+F6` cyklar mellan flikväljaren, första synliga och
 > aktiverade fokusmålet i den valda fliken, och statusraden. Statusraden
 > är därmed också tangentbordsfokuserbar.
@@ -686,8 +686,9 @@ pdfsorter_theme.py  ──►  (helt fristående)
 - `TextCache` — minnescache nycklad på (sökväg, storlek, mtime). Sparar
   dyr OCR-text mellan omskanningar.
 
-**GUI (Tkinter):** sju flikar — Sortera, Matchningar, Inställningar,
-Granska, Historik, JSON, Hjälp. Kärnan är `ReviewDialog` med 10 föreslagna
+**GUI (Tkinter):** sju flikar — Start, Granska, Kategorier, Inställningar,
+Historik, Hjälp och Avancerat. Startsidan visar sorteringens tre steg;
+JSON-redigering finns under Avancerat. Kärnan är `ReviewDialog` med 10 föreslagna
 stödord att bocka i.
 
 ## 6. Matchningslogik i detalj
@@ -1327,11 +1328,11 @@ osorterade filer. Bara unika, bokstavliga stödordsträffar får flyttas;
 
 ### REQ-F3 (M) — Flikar
 **AC-F3:**
-- AC-3.1 Flikar: Sortera, Matchningar, Inställningar, Granska, Historik,
-  JSON, Hjälp.
+- AC-3.1 Flikar i ordning: Start, Granska, Kategorier, Inställningar,
+  Historik, Hjälp, Avancerat.
 - AC-3.2 Statusrad längst ned visar PDF-motor och OCR-status.
 
-### REQ-F4 (M) — Matchningar: sök, sortera och visa
+### REQ-F4 (M) — Kategorier: sök, sortera och visa
 **AC-F4:**
 - AC-4.1 Kategorilista till vänster, stödord för vald kategori till höger.
 - AC-4.2 Sökfält igenom alla kategorier.
@@ -1343,7 +1344,7 @@ Användaren ska kunna ta bort **både enskilda stödord** ur en kategori och
 **en hel kategori (hela listan)** med alla dess stödord, direkt i
 gränssnittet utan att öppna JSON-filen.
 **AC-F5:**
-- AC-5.1 **Enskilt stödord:** Markera ett/flera stödord i Matchningar →
+- AC-5.1 **Enskilt stödord:** Markera ett/flera stödord i Kategorier →
   knappen "Ta bort" eller tangenten `Delete`. En bekräftelsedialog frågar
   först.
 - AC-5.2 **Hela kategorin (hela listan):** Markera en kategori → knappen
@@ -2318,7 +2319,7 @@ i kravsektionerna ovan (N1-N14 m.fl.).
 | 83 | Minifeed med senaste händelser på Sortera-fliken | Design |
 | 84 | Tillgänglighetsnamn (skärmläsare) på alla kontroller | Design |
 | 85 | Veckorapport autoexporteras till mapp (utan nätverk) | Design |
-| 86 | Färgteckenförklaring på Matchningar-fliken | Design |
+| 86 | Färgteckenförklaring på Kategorier-fliken | Design |
 | 87 | Poängnormalisering mot kategoristorlek (stora kategorier straffas) | Matchning |
 | 88 | Kombinationsregel: två stödord måste träffa i samma stycke | Matchning |
 | 89 | Tidsdecay: nyligen tillagda ord väger tyngre under inlärningsfasen | Matchning |
@@ -2353,7 +2354,7 @@ i kravsektionerna ovan (N1-N14 m.fl.).
 | 119 | Ctrl+T växlar tema direkt | Design |
 | 120 | In-app-toasts (icke-modala) i stället för messagebox för små saker | Design |
 | 121 | Tidslinjevy i Historik, grupperad per dag | Design |
-| 122 | Kategorikort med sparkline på Matchningar | Design |
+| 122 | Kategorikort med sparkline på Kategorier | Design |
 | 123 | Ångra över sessioner (ångra senaste flytten efter omstart) | Design |
 | 124 | Sökmarkering i Hjälp-fliken | Design |
 | 125 | Statuspille med live minnesanvändning (cache-MB) | Design/Minne |
@@ -2372,7 +2373,7 @@ i kravsektionerna ovan (N1-N14 m.fl.).
 | 135 | Flyttverifiering: hashkontroll av målfilen efter flytt/kopiering (billig: hashen finns redan från dubblettkontrollen) | Robusthet |
 | 136 | Loggläsare i appen: bläddra/filtrera gamla sessionsloggar per nivå och kategori, kopiera urval | Felsökning |
 | 137 | Gzip-komprimera sessionsloggar äldre än 3 månader (raderas aldrig — komprimeras bara) | Minne/Ordning |
-| 138 | Träffsäkerhets-KPI: andel auto vs användaröverskrivningar per kategori, pill på Matchningar | Ny funktion |
+| 138 | Träffsäkerhets-KPI: andel auto vs användaröverskrivningar per kategori, pill på Kategorier | Ny funktion |
 | 139 | Filnamnsnormalisering vid flytt (valfritt): datumprefix, understreck, gemener | Ny funktion |
 | 140 | Global sökning (Ctrl+F): ett fält som söker kö + historik + regler och hoppar till rätt flik | Design |
 | 141 | Bevakningshälsa per mapp: kort med antal sedda filer, senaste fil, fel per bevakad mapp | Design |
@@ -2394,7 +2395,7 @@ i kravsektionerna ovan (N1-N14 m.fl.).
 | 152 | 14-dagars sparkline (sorterade filer/dag) på Sortera-fliken | Design |
 | 153 | Högerklick i granskningskön: öppna mapp / förhandsvisa / ignorera / ta ur kön | Design |
 | 154 | Inställbar teckenstorlek (tillgänglighet) utöver HiDPI-autoskalning | Design |
-| 155 | Søkfält på Matchningar-fliken: filtrerar kategorier + stödord direkt | Design |
+| 155 | Søkfält på Kategorier-fliken: filtrerar kategorier + stödord direkt | Design |
 | 156 | Klick på ett stödord → lista tidigare filer det matchade (ur historiken) | Design |
 | 157 | Kön visar föreslagen kategori bredvid filnamnet (regel eller lärd) | Design |
 | 158 | ETA vid långa batcher: filer/min → beräknad återstående tid | Design/Snabbhet |

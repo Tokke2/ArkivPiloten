@@ -1849,7 +1849,7 @@ HELP_CONTENT: List[Tuple[str, str]] = [
              "vidare. Undermapparna skapas automatiskt."),
 
     ("h2", "Kom igång på fem minuter"),
-    ("bullet", "1.  Fliken Sortera → Lägg till… och peka ut mappen där "
+    ("bullet", "1.  Fliken Start → Lägg till… och peka ut mappen där "
                "PDF-filerna landar. Du kan lägga till flera."),
     ("bullet", "2.  Välj Utmapp — där skapas undermapparna."),
     ("bullet", "3.  Kryssa i Testkörning. Då flyttas ingenting, du ser "
@@ -1910,7 +1910,7 @@ HELP_CONTENT: List[Tuple[str, str]] = [
     ("bullet", "Inmapparna gås igenom på nytt."),
     ("bullet", "_Osorterat plockas upp igen."),
     ("bullet", "Redan sorterade filer rörs aldrig."),
-    ("note", "Har du redigerat stödord under Matchningar eller i JSON-fliken "
+    ("note", "Har du redigerat stödord under Kategorier eller i Avancerat (JSON) "
              "kan du klicka \"Skanna om alla\" på fliken Granska. Vill du "
              "hellre ta en fil i taget: kryssa ur \"Skanna om allt när ett "
              "nytt stödord lärts in\" under Inställningar."),
@@ -1919,7 +1919,7 @@ HELP_CONTENT: List[Tuple[str, str]] = [
     ("body",
      "Har en kategori breda ord som lätt ger falska träffar kan du kräva "
      "att flera stödord matchar innan en fil flyttas dit. Under "
-     "Matchningar finns fältet Kräver — sätt det till 3 så måste tre "
+     "Kategorier finns fältet Kräver — sätt det till 3 så måste tre "
      "olika stödord finnas i dokumentet."),
     ("body",
      "Siffran 0 betyder att kategorin följer den vanliga strikthetsnivån. "
@@ -1938,7 +1938,7 @@ HELP_CONTENT: List[Tuple[str, str]] = [
     ("body",
      "Slå på det under Inställningar, kortet \"Datum och undermappar\". "
      "Där väljer du också standardmall - år, år och månad, eller kvartal. "
-     "Varje kategori kan ha en egen mall under Matchningar."),
+     "Varje kategori kan ha en egen mall under Kategorier."),
     ("note",
      "Appen väljer fakturadatum före förfallodatum. Ett förfallodatum ligger "
      "en månad fram och skulle lägga decemberfakturor i fel år."),
@@ -1983,7 +1983,7 @@ HELP_CONTENT: List[Tuple[str, str]] = [
              "dokumentet genuint tvetydigt."),
 
     ("h2", "Se och ändra dina matchningar"),
-    ("body", "Fliken Matchningar visar allt appen har lärt sig. Till vänster "
+    ("body", "Fliken Kategorier visar allt appen har lärt sig. Till vänster "
              "ligger kategorierna, till höger stödorden för den kategori du "
              "markerat. Du behöver aldrig öppna en JSON-fil för att ändra "
              "något."),
@@ -2110,7 +2110,7 @@ HELP_CONTENT: List[Tuple[str, str]] = [
     ("h2", "Om något blir fel"),
     ("bullet", "Fil i fel mapp?  Gå till Historik, markera raden och klicka "
                "Ångra valda. Filen flyttas tillbaka."),
-    ("bullet", "Fortsätter det bli fel?  Fliken Matchningar → sortera på "
+    ("bullet", "Fortsätter det bli fel?  Fliken Kategorier → sortera på "
                "Träffar och ta bort stödord som är för allmänna."),
     ("bullet", "Hittar den ingenting?  Filen kan vara inskannad. Kryssa i "
                "OCR och kontrollera att Tesseract är installerat "
@@ -2119,7 +2119,7 @@ HELP_CONTENT: List[Tuple[str, str]] = [
                "Inställningar - då rätas sidan upp, trösklas och körs genom "
                "flera OCR-lägen, och det bästa resultatet vinns."),
     ("bullet", "Sorterar den efter kunden i stället för leverantören?  Ta "
-               "bort kundens stödord under Matchningar — appen väger redan "
+               "bort kundens stödord under Kategorier — appen väger redan "
                "ned allt som står under Leveransadress och Kundnr."),
 
     ("h2", "Var sparas allt?"),

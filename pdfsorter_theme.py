@@ -232,9 +232,9 @@ class Theme:
 
     #: Standardavstånd i bildpunkter. Att gå via namn i stället för siffror
     #: gör att luften blir densamma på alla flikar.
-    PAD = 16        # ytterkant mot fönstret
-    GAP = 12        # mellan två kort
-    INNER = 14      # inuti ett kort
+    PAD = 12        # ytterkant mot fönstret
+    GAP = 8         # mellan två kort
+    INNER = 10      # inuti ett kort
 
     def __init__(self, root, ttk, dark: bool = False,
                  contrast: str = "normal"):
@@ -375,7 +375,7 @@ class Theme:
         # -- knappar ------------------------------------------------------
         self._cfg("TButton", background=c["surface"], foreground=c["text"],
                      bordercolor=c["border_strong"], relief="solid",
-                     borderwidth=1, padding=(14, 8), font=self.f_base,
+                     borderwidth=1, padding=(12, 7), font=self.f_base,
                      anchor="center")
         self._map("TButton",
                background=[("pressed", c["accent_light"]),
@@ -387,7 +387,7 @@ class Theme:
 
         self._cfg("Accent.TButton", background=c["accent"],
                      foreground=c["text_invert"], bordercolor=c["accent_dark"],
-                     padding=(18, 9), font=self.f_bold)
+                     padding=(14, 8), font=self.f_bold)
         self._map("Accent.TButton",
                background=[("pressed", c["accent_dark"]),
                            ("active", c["accent_dark"]),
@@ -421,9 +421,9 @@ class Theme:
         # Vald flik får vit botten och en kraftig accentkant upptill, så
         # den läses ihop med kortytan under.
         self._cfg("TNotebook", background=c["bg"], borderwidth=0,
-                     tabmargins=(4, 6, 4, 0))
+                     tabmargins=(2, 4, 2, 0))
         self._cfg("TNotebook.Tab", background=c["bg"],
-                     foreground=c["text_muted"], padding=(22, 11),
+                     foreground=c["text_muted"], padding=(10, 7),
                      font=self.f_base, borderwidth=0)
         self._map("TNotebook.Tab",
                background=[("selected", c["surface"]), ("active", c["accent_light"])],

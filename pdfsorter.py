@@ -22,7 +22,7 @@ OCR-brus, delord och flexibla ID-matchningar kan aldrig själva flytta filer.
 
 Alla andra filer visas i granskningsdialogen. Användaren väljer kategori,
 stödord och vid behov undermapp. Alla sparade stödord går att rensa med
-knappen i Matchningar.
+knappen på fliken Kategorier.
 
 Filer i projektet
 -----------------
@@ -5752,8 +5752,20 @@ class ConflictDialog:
 # aldrig tomma, aldrig krasch.
 
 _UI_EN = {
-    "Sortera": "Sort", "Matchningar": "Rules", "Inställningar": "Settings",
+    "Start": "Home", "Kategorier": "Categories",
+    "Avancerat": "Advanced", "Inställningar": "Settings",
     "Granska": "Review", "Historik": "History", "Hjälp": "Help",
+    "Sortera dina PDF-filer": "Sort your PDF files",
+    "1  Välj var PDF:erna finns     ·     2  Välj arkivmapp     ·     "
+    "3  Sortera nu eller starta bevakning":
+        "1  Choose where the PDFs are     ·     2  Choose an archive folder     ·     "
+        "3  Sort now or start watching",
+    "1. PDF-filer att sortera": "1. PDF files to sort",
+    "Välj mappen där dina PDF-filer finns":
+        "Choose the folder containing your PDF files",
+    "2. Arkivmapp": "2. Archive folder",
+    "sorterade filer sparas här": "Sorted files are saved here",
+    "Aktivitet": "Activity",
     "Sortera nu": "Sort now", "Sorterar…": "Sorting…",
     "Avbryt sortering": "Stop sorting", "Stoppar…": "Stopping…",
     "Avsluta granskning": "Stop reviewing",
@@ -5987,15 +5999,15 @@ def meny_spec() -> List[Dict[str, Any]]:
              "snabb": f"{c}+,", "typ": "flik", "flik": "tab_opts"},
         ]},
         {"titel": "Visa", "poster": [
-            {"id": "flik_sortera", "text": "Sortera", "typ": "flik",
+            {"id": "flik_sortera", "text": "Start", "typ": "flik",
              "flik": "tab_sort"},
-            {"id": "flik_matchningar", "text": "Matchningar", "typ": "flik",
+            {"id": "flik_matchningar", "text": "Kategorier", "typ": "flik",
              "flik": "tab_cats"},
             {"id": "flik_granska", "text": "Granska", "typ": "flik",
              "flik": "tab_review"},
             {"id": "flik_historik", "text": "Historik", "typ": "flik",
              "flik": "tab_hist"},
-            {"id": "flik_json", "text": "JSON", "typ": "flik",
+            {"id": "flik_json", "text": "Avancerat", "typ": "flik",
              "flik": "tab_json"},
             {"typ": "avdelare"},
             {"id": "genvag", "text": "Skapa genväg på skrivbordet",
@@ -6354,13 +6366,13 @@ class App:
         self.tab_hist = ttk.Frame(self.nb)
         self.tab_json = ttk.Frame(self.nb)
         self.tab_help = ttk.Frame(self.nb)
-        self.nb.add(self.tab_sort, text="Sortera")
-        self.nb.add(self.tab_cats, text="Matchningar")
-        self.nb.add(self.tab_opts, text="Inställningar")
+        self.nb.add(self.tab_sort, text="Start")
         self.nb.add(self.tab_review, text="Granska")
+        self.nb.add(self.tab_cats, text="Kategorier")
+        self.nb.add(self.tab_opts, text="Inställningar")
         self.nb.add(self.tab_hist, text="Historik")
-        self.nb.add(self.tab_json, text="JSON")
         self.nb.add(self.tab_help, text="Hjälp")
+        self.nb.add(self.tab_json, text="Avancerat")
 
         self._build_sort_tab()
         self._build_cats_tab()
@@ -6558,7 +6570,7 @@ class App:
         session_log("ui", f"Klick: {vad}")
 
     # ======================================================================
-    # Flik 1 - Sortera
+    # Flik 1 - Start
     # ======================================================================
     # -- menyraden --------------------------------------------------------
     def _meny_variabel(self, namn: str) -> Any:
@@ -6991,20 +7003,41 @@ class App:
         f = self.tab_sort
         f.configure(style="TFrame")
         f.columnconfigure(0, weight=1)
-        f.rowconfigure(2, weight=1)
+        f.rowconfigure(3, weight=1)
+
+        # En kort startsida med tre tydliga steg. Mer sällan använda verktyg
+        # ligger kvar på sina egna flikar, så vardagsflödet hålls lättöverskådligt.
+        intro = ttk.Frame(f, style="Card.TFrame")
+        intro.grid(row=0, column=0, sticky="ew", padx=T.PAD,
+                   pady=(T.PAD, 0))
+        intro_body = ttk.Frame(intro, style="CardInner.TFrame")
+        intro_body.pack(fill="x", padx=T.INNER, pady=(8, 7))
+        ttk.Label(intro_body, text="Sortera dina PDF-filer",
+                  style="CardTitle.TLabel").pack(anchor="w")
+        intro_hint = ttk.Label(
+            intro_body,
+            text="1  Välj var PDF:erna finns     ·     2  Välj arkivmapp     ·     "
+                 "3  Sortera nu eller starta bevakning",
+            style="CardMuted.TLabel", wraplength=1000, justify="left")
+        intro_hint.pack(anchor="w", fill="x", pady=(2, 0))
+        intro_body.bind(
+            "<Configure>",
+            lambda event: intro_hint.configure(
+                wraplength=max(220, event.width - 2 * T.INNER)), add="+")
 
         # Tunga inställningar bor på egen flik - och den måste gå att
         # rulla, annars hamnar de nedersta korten (autostart, systemfält,
         # uppdateringar) utanför fönstret och går inte att nå.
         g = self._scrollable_tab(self.tab_opts, "inställningar")
 
-        # -- rad 1: mapparna sida vid sida --------------------------------
+        # -- steg 1–2: mapparna sida vid sida ----------------------------
         top = ttk.Frame(f)
-        top.grid(row=0, column=0, sticky="ew", padx=T.PAD, pady=(T.PAD, 0))
+        top.grid(row=1, column=0, sticky="ew", padx=T.PAD, pady=(T.GAP, 0))
         top.columnconfigure(0, weight=3, uniform="m")
         top.columnconfigure(1, weight=2, uniform="m")
 
-        incard = T.card(top, "Inmappar som bevakas")
+        incard = T.card(top, "1. PDF-filer att sortera",
+                        "Välj mappen där dina PDF-filer finns")
         incard.grid(row=0, column=0, sticky="nsew", padx=(0, T.GAP))
         box = incard.body
         box.columnconfigure(0, weight=1)
@@ -7034,7 +7067,7 @@ class App:
         ttk.Button(inbtn, text="Öppna", width=12,
                    command=self._open_selected_input).pack(fill="x")
 
-        outcard = T.card(top, "Utmapp", "undermapparna skapas här")
+        outcard = T.card(top, "2. Arkivmapp", "sorterade filer sparas här")
         outcard.grid(row=0, column=1, sticky="nsew")
         outbox = outcard.body
         outbox.columnconfigure(0, weight=1)
@@ -7073,11 +7106,11 @@ class App:
         top.bind("<Configure>", layout_folder_cards, add="+")
         self.root.after_idle(layout_folder_cards)
 
-        # -- rad 2: handlingsraden ----------------------------------------
+        # -- steg 3: sortera eller bevaka --------------------------------
         # Det viktigaste på hela fliken. Egen vit yta så att knappen
         # "Sortera nu" läses som fönstrets primära åtgärd.
         actcard = ttk.Frame(f, style="Card.TFrame")
-        actcard.grid(row=1, column=0, sticky="ew", padx=T.PAD, pady=(T.GAP, 0))
+        actcard.grid(row=2, column=0, sticky="ew", padx=T.PAD, pady=(T.GAP, 0))
         actcard.columnconfigure(3, weight=1)
         self.btn_sort = ttk.Button(actcard, text="Sortera nu",
                                    style="Accent.TButton", command=self._sort_now)
@@ -7174,9 +7207,9 @@ class App:
         self.root.after_idle(layout_actions)
 
 
-        # -- rad 3: loggen -------------------------------------------------
-        logcard = T.card(f, "Logg", "senaste händelserna")
-        logcard.grid(row=2, column=0, sticky="nsew", padx=T.PAD,
+        # -- aktivitet ----------------------------------------------------
+        logcard = T.card(f, "Aktivitet", "senaste händelserna")
+        logcard.grid(row=3, column=0, sticky="nsew", padx=T.PAD,
                      pady=(T.GAP, T.GAP))
         logf = logcard.body
         logf.columnconfigure(0, weight=1)
@@ -8661,7 +8694,7 @@ class App:
             self._log_threadsafe(f"{path.name}  ✖ {exc}", "err")
 
     # ======================================================================
-    # Flik 2 - Matchningar
+    # Flik 3 - Kategorier
     # ======================================================================
     def _build_cats_tab(self) -> None:
         """Matchningsvyn: kategorier till vänster, deras stödord till höger.
@@ -9424,7 +9457,7 @@ class App:
         self._refresh_categories()
 
     # ======================================================================
-    # Flik 3 - Granska
+    # Flik 2 - Granska
     # ======================================================================
     def _build_review_tab(self) -> None:
         ttk = self.ttk
@@ -9488,7 +9521,7 @@ class App:
         """Kör om matchningen mot alla osorterade filer.
 
         Praktiskt sedan man redigerat stödord under Kategorier eller i
-        JSON-fliken - då slipper man vänta på nästa inlärning.
+        Avancerat (JSON) - då slipper man vänta på nästa inlärning.
         """
         if self._rescanning:
             self.messagebox.showinfo(APP_NAME, "En omskanning pågår redan.",
@@ -9857,7 +9890,7 @@ class App:
             self._notify(f"{len(self.queue)} filer väntar på manuell granskning")
 
     # ======================================================================
-    # Flik 4 - Historik
+    # Flik 5 - Historik
     # ======================================================================
     def _build_hist_tab(self) -> None:
         tk, ttk = self.tk, self.ttk
@@ -10031,7 +10064,7 @@ class App:
                                                   "(kräver Pillow).", parent=self.root)
 
     # ======================================================================
-    # Flik 5 - Matchningar (JSON)
+    # Flik 7 - Avancerat (JSON)
     # ======================================================================
     def _build_json_tab(self) -> None:
         tk, ttk = self.tk, self.ttk
@@ -10044,7 +10077,7 @@ class App:
         top.grid(row=0, column=0, sticky="ew", padx=T.PAD, pady=(T.PAD, 4))
         ttk.Label(top, text="Rådata", style="Head.TLabel").pack(side="left")
         ttk.Label(top, text="   För dig som vill redigera filerna direkt. "
-                            "Vanlig hantering sker under Matchningar.",
+                            "Vanlig hantering sker under Kategorier.",
                   style="Muted.TLabel").pack(side="left")
 
         bar = ttk.Frame(f)
