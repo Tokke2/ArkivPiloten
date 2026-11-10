@@ -534,12 +534,17 @@ Allt sker lokalt på datorn — inga nätverksanrop, ingen molntjänst.
 
 ## 2. Kärnidé
 
-> Appen är **försiktig av design.** En fil flyttas automatiskt bara när
-> bevisen är starka. Är appen osäker frågar den i stället — det är alltid
-> billigare att svara på en fråga än att leta rätt på en felsorterad fil.
+> **Ingen automatisk flyttning.** Matchningspoäng, starka bevis och
+> inlärda träffar får bara föreslå en kategori. Varje fil måste ligga kvar
+> tills användaren bekräftar flytten — även vid mappbevakning, batchkörning
+> och omskanning efter inlärning. Obekräftade filer går inte automatiskt till
+> `_Osorterat`.
 
-Varje gång användaren svarar lär sig appen. Efter tio–femton svar känner
-den igen de vanligaste leverantörerna och sköter resten på egen hand.
+Varje bekräftat användarval får fortfarande lära appen. Inlärning och
+reskanning uppdaterar förslag och granskningskö, men flyttar aldrig andra
+filer i bakgrunden. Detta ersätter äldre krav längre ned som beskriver
+automatisk flyttning eller automatisk borttagning från granskningskön; de
+beskriver tidigare beteende och gäller inte längre.
 
 ## 3. Arkitektur — fem samverkande moduler
 
@@ -1305,15 +1310,16 @@ En osäker fil öppnas med **tio föreslagna stödord** som användaren bockar i
   fält; okänt skrivet namn växlar till Ny mapp-läge.
 
 ### REQ-F2 (M) — Inlärning & omskanning
-När användaren svarat ska appen lära sig och tillämpa regeln på allt
-osorterat.
+När användaren svarat ska appen lära sig regeln och uppdatera förslag
+för osorterade filer; varje fil kräver egen användarbekräftelse före flytt.
 **AC-F2:**
 - AC-2.1 Valda ord sparas som permanenta regler (om "Spara valda ord" är
   på).
 - AC-2.2 Filen flyttas till vald kategori.
-- AC-2.3 Filer som den nya regeln nu täcker tas automatiskt bort ur kön.
+- AC-2.3 Filer som den nya regeln täcker får uppdaterat förslag i granskningskön; de flyttas inte automatiskt.
 - AC-2.4 `rescan_after_learn` skannar om kön, inmapparna och `_Osorterat`
-  i bakgrunden. Redan sorterade filer rörs aldrig.
+  i bakgrunden och lägger matchningar i granskningskön. Ingen fil flyttas
+  förrän användaren bekräftar den.
 
 ### REQ-F3 (M) — Flikar
 **AC-F3:**
@@ -1976,8 +1982,8 @@ varje korrigering.
   sparas i historiken; bara användarbekräftade val/rättelser tränar modellen,
   manuella val väger tyngre, och autosorteringar/omskanningar hoppas över.
   Flush sker vid batchslut/avslut. Integrationen i `decide()` kan förbättra
-  rangordningen men ändrar inte beviskraven för autosortering. Inlärningen är
-  alltid aktiv, utan av/på-kryssruta. Vid uppgradering byggs den gamla
+  rangordningen men ger endast förslag; ingen score eller modell kan
+  flytta filer utan bekräftelse. Inlärningen är alltid aktiv, utan av/på-kryssruta. Vid uppgradering byggs den gamla
   profilen om en gång från bekräftade historikposter. Verifierat med tester
   för träning, walk-forward, återbyggnad, rättelser och filtrering av
   obekräftade beslut.

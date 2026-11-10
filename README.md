@@ -4,8 +4,8 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.4.14 — your PDFs, sorted into the right folders. Automatically.**
-**PDF Sorter 1.4.14 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
+**PDF Sorter 1.4.14 — your PDFs, suggested for the right folders; moved only after your confirmation.**
+**PDF Sorter 1.4.14 — dina PDF:er föreslås till rätt mappar och flyttas först när du bekräftar.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
@@ -22,29 +22,29 @@ Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
 
 ## What is ArkivPiloten?
 
-ArkivPiloten watches one or more **inbox folders**, reads every new PDF, figures out which company or project it belongs to, and moves it to the right subfolder in your **outbox folder** — e.g. `Outbox/Pilkington/2025/`.
+ArkivPiloten watches one or more **inbox folders**, reads every new PDF, and suggests which company or project it belongs to. It moves a file to the right subfolder in your **outbox folder** — e.g. `Outbox/Pilkington/2025/` — only after you confirm that file.
 
-It recognises senders by organisation number, VAT number, bankgiro, domain and company name, reads scanned documents with OCR, and **learns continuously from your confirmed choices and corrections**: when it is unsure it asks you, and similar files can then be handled more accurately in the future. It never treats its own automatic guesses as confirmed learning data. Everything runs locally on your computer — no cloud, no account, no network calls for sorting.
+It recognises senders by organisation number, VAT number, bankgiro, domain and company name, reads scanned documents with OCR, and **learns continuously from your confirmed choices and corrections**. Scores, learned matches, watched-folder events and rescans can suggest a destination, but never move a file without your confirmation. Every file remains in its source folder until you confirm a category or explicitly choose `_Osorterat`. Everything runs locally on your computer — no cloud, no account, no network calls for sorting.
 
-> **Cautious by design.** A file is only moved automatically when the evidence is strong. If ArkivPiloten is unsure, it asks instead — answering one question is always cheaper than hunting down a misfiled document.
+> **No autonomous moves.** Strong evidence and learned matches only improve the suggestion. ArkivPiloten always asks you to confirm each file before moving it, including while watching folders or rescanning after learning.
 
 ### How a decision is made
 
 | Result | Meaning | What happens |
 |---|---|---|
-| ✅ **Auto** | The evidence is strong enough | The file is moved right away |
-| ❓ **Ask** | Unclear or weak evidence | The file goes to the review queue; you tick the keywords that belong to the right category, and the app learns from it |
+| 💡 **Suggestion** | Rules or learned matches identify a likely category | The file stays in the inbox and appears in review; nothing moves until you confirm |
+| ✅ **Confirmed** | You choose or confirm a category | The file is moved, and selected support words can teach future suggestions |
 | ⚠️ **Error** | The file could not be read | The error is logged and the file is left untouched |
 
 ## Features
 
-- 📥 **Watched folders + automatic sorting** into `<category>/<year>` (optionally using the document's own date: `date_enabled`)
-- 🎯 **Zone-weighted matching** — letterhead, footer and sender zones weigh more than body text, plus multi-page matching; a proven organisation number always suffices on its own
+- 📥 **Watched folders + review queue** — new PDFs receive category suggestions but remain in the inbox until you confirm; confirmed files go into `<category>/<year>` (optionally using the document's own date: `date_enabled`)
+- 🎯 **Zone-weighted matching** — letterhead, footer and sender zones weigh more than body text, plus multi-page matching; a proven organisation number can make a category suggestion especially strong, but never moves the file by itself
 - 🧠 **Always-on self-learning** — learns from every user-confirmed category choice and correction, never from its own automatic guesses; it helps rank rule-approved candidates after roughly 5 confirmed decisions per category and never moves a file on its own
-- 🔐 **Safer matching (1.2.0+)** — body-text-only mentions never auto-move a file on Normal and above: auto-sorting requires sender-zone, strong-ID or multi-page evidence, at least 12 characters of read text, and the exact analysed bytes are fingerprinted (SHA-256) and re-verified before any move
+- 🔐 **Safer matching (1.2.0+)** — body-text-only mentions are handled cautiously; matching evidence only ranks suggestions. Every move, whatever the score or evidence, still requires your confirmation, and the exact analysed bytes are fingerprinted (SHA-256) and re-verified before moving
 - 🔍 **OCR for scanned PDFs** (Tesseract), including logos in letterheads of otherwise text-based files
 - 💡 **Clearer review dialog (1.4.14)** — file details, keyword suggestions and destination are grouped into clean cards. The existing-folder field accepts free text and filters the dropdown as you type; choose a match with Enter. The primary “Save & move” action is easy to spot.
-- 💡 **10 keyword suggestions per uncertain file** — tick the right ones in the review dialog and the file (and future lookalikes) sort themselves. The mouse wheel is paused while the category dropdown is open.
+- 💡 **10 keyword suggestions per file** — confirm the category in the review dialog; selected support words improve future suggestions, but each future file still waits for your confirmation. The mouse wheel is paused while the category dropdown is open.
 - ↩️ **Never destructive** — files are never overwritten (name clashes become `invoice (2).pdf`), and every move can be undone
 - 🎨 **One shared app icon** — the new transparent 512px archive/checkmark mark is the source for windows/dialogs, taskbar, tray, shortcuts, macOS app bundle and the multi-size Windows `.ico`.
 - 🧰 **Tray icon, autostart, single instance** — a manual launch opens the window; OS autostart starts in the tray. Windows autostart runs `pythonw.exe pdfsorter.py --tray` directly (not the `.pyw` file association), so the app branding replaces Python’s generic icon. Closing/minimizing sends the app to the tray while idle, but the window stays visible during sorting so duplicate prompts cannot get hidden.
@@ -228,30 +228,30 @@ You can also donate from inside the app via **Help → Support the project 💖*
 
 ## Vad är ArkivPiloten?
 
-ArkivPiloten bevakar en eller flera **inmappar**, läser varje ny PDF, avgör vilket företag eller projekt den hör till och flyttar den till rätt undermapp i din **utmapp** — t.ex. `Utmapp/Pilkington/2025/`.
+ArkivPiloten bevakar en eller flera **inmappar**, läser varje ny PDF och föreslår vilket företag eller projekt den hör till. Filen flyttas till rätt undermapp i **utmappen** — t.ex. `Utmapp/Pilkington/2025/` — först när du bekräftar just den filen.
 
-Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domän och firmanamn, läser skannade dokument med OCR och **lär sig hela tiden av dina bekräftade val och rättelser**: är den osäker frågar den dig, och liknande filer kan sedan hanteras säkrare. Appen räknar aldrig sina egna autosorteringar som bekräftade inlärningsexempel. Allt sker lokalt på din dator — ingen molntjänst, inget konto, inga nätverksanrop för sorteringen.
+Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domän och firmanamn, läser skannade dokument med OCR och **lär sig hela tiden av dina bekräftade val och rättelser**. Poäng, inlärda träffar, mappbevakning och omskanning kan föreslå en kategori men flyttar aldrig en fil utan ditt uttryckliga val. Varje fil ligger kvar i inmappen tills du bekräftar kategori eller väljer `_Osorterat`. Allt sker lokalt — ingen molntjänst, inget konto, inga nätverksanrop för sorteringen.
 
-> **Försiktig av design.** En fil flyttas bara automatiskt när bevisen är starka. Är ArkivPiloten osäker frågar den i stället — det är alltid billigare att svara på en fråga än att leta rätt på en felsorterad fil.
+> **Inga automatiska flyttar.** Starka bevis och inlärda träffar förbättrar bara förslaget. ArkivPiloten ber alltid om din bekräftelse före varje flytt, även vid mappbevakning och omskanning efter inlärning.
 
 ### Så fattas beslutet
 
 | Resultat | Betydelse | Vad som händer |
 |---|---|---|
-| ✅ **Auto** | Bevisen räcker | Filen flyttas med en gång |
-| ❓ **Fråga** | Otydligt eller för svaga bevis | Filen läggs i granskningskön; du bockar i de stödord som hör till rätt kategori, och appen lär sig av det |
+| 💡 **Förslag** | Regler eller inlärning hittar en trolig kategori | Filen ligger kvar i inmappen och visas för granskning; inget flyttas innan du bekräftar |
+| ✅ **Bekräftat** | Du väljer eller bekräftar en kategori | Filen flyttas, och valda stödord kan lära framtida förslag |
 | ⚠️ **Fel** | Filen kunde inte läsas | Felet loggas och filen lämnas orörd |
 
 ## Funktioner
 
-- 📥 **Bevakade mappar + automatisk sortering** i `<kategori>/<år>`; alla sorterade filer får årsmapp, även `_Osorterat`, och en anpassad datummall läggs innanför årsmappen (dokumentdatum styr året när det finns)
-- 🎯 **Zonviktad matchning** — brevhuvud, sidfot och avsändarzon väger tyngre än brödtext, plus flersidig matchning; ett bevisat organisationsnummer räcker alltid ensamt
+- 📥 **Bevakade mappar + granskningskö** — nya PDF:er får kategoriförslag men ligger kvar tills du bekräftar; bekräftade filer läggs i `<kategori>/<år>`; alla sorterade filer får årsmapp, även `_Osorterat`
+- 🎯 **Zonviktad matchning** — brevhuvud, sidfot och avsändarzon väger tyngre än brödtext, plus flersidig matchning; ett bevisat organisationsnummer kan ge ett extra starkt kategoriförslag men flyttar aldrig filen på egen hand
 - 🧠 **Alltid aktiv självlärning** — lär zonmedvetet av varje användarbekräftat val och varje rättelse, aldrig av appens egna autosorteringar; visar vilka träffar som gav förslaget, väger in kategorins kalibrerade tillförlitlighet och låter äldre signaler klinga av. Manuella val ger riktad återkoppling. Historiken kan testas utan informationsläckage, modellen byggas om eller nollställas; den flyttar aldrig en fil på egen hand
 - 🔐 **Lokal, återställningsbar inlärning** — modell och zonfunktioner sparas lokalt med atomisk skrivning och säkerhetskopia; historiken kan spelas upp igen efter återställning. Ingen molntjänst eller nätverksinlärning används
-- 🔐 **Säkrare matchning (1.2.0+)** — bara löptextträffar flyttar aldrig en fil automatiskt på Normal och uppåt: det krävs avsändarzon, starkt ID eller flersidigt bevis, minst 12 lästa tecken, och exakt analyserade byte fingeravtrycks (SHA-256) och kontrolleras igen före varje flytt
+- 🔐 **Säkrare matchning (1.2.0+)** — matchningsbevis rangordnar bara förslag; varje flytt kräver alltid din bekräftelse, oavsett poäng. Exakt analyserade byte fingeravtrycks (SHA-256) och kontrolleras igen före flytt
 - 🔍 **OCR för skannade PDF:er** (Tesseract), inklusive logotyper i brevhuvuden på i övrigt textbaserade filer
 - 💡 **Tydligare granskningsruta (1.4.14)** — filinfo, stödordsförslag och målmapp ligger i rena, separata kort. Fältet för befintlig mapp tar fritext och filtrerar listan medan du skriver; Enter väljer en träff. Huvudknappen **Spara & flytta** är lätt att hitta.
-- 💡 **10 stödordsförslag per osäker fil** — bocka i rätt ord i granskningsrutan så sorterar sig filen (och framtida liknande filer) själva. Mushjulet pausas medan kategorirullgardinen är öppen.
+- 💡 **10 stödordsförslag per fil** — bekräfta kategorin i granskningsrutan; valda stödord förbättrar framtida förslag, men varje senare fil väntar också på din bekräftelse. Mushjulet pausas medan kategorirullgardinen är öppen.
 - ↩️ **Aldrig destruktiv** — filer skrivs aldrig över (namnkrockar blir `faktura (2).pdf`), och varje flytt går att ångra
 - 🎨 **En gemensam appikon** — den nya transparenta 512px-ikonen med arkiv/checkmark är källa för fönster/dialoger, aktivitetsfält, systemfält, genvägar, macOS-appen och Windows-`.ico` i flera storlekar.
 - 🧰 **Tray-ikon, autostart, enkelinstans** — appen startar alltid minimerad, i systemfältet om det kan visas säkert och annars i aktivitetsfältet. En andra start visar den redan öppna instansen. Windows-autostart kör `pythonw.exe pdfsorter.py --tray` direkt (inte `.pyw` via filassociation), så appens egen ikon används i stället för Pythons standardikon. Under sortering hålls fönstret synligt så att dubblettfrågor inte hamnar bakom systemfältet.

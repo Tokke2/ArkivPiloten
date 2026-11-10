@@ -54,8 +54,8 @@ def _decide(path, rules):
     return P.decide(rules, ext, NORMAL)
 
 
-def test_invoice_with_orgnr_in_any_format_is_filed_automatically(tmp_path):
-    """Samma organisation, fyra skrivsätt - alla ska ge samma beslut."""
+def test_invoice_with_orgnr_in_any_format_suggests_manual_review(tmp_path):
+    """Ett säkert ID föreslår kategori men flyttar aldrig utan bekräftelse."""
     rules = _rules(tmp_path, [{
         "name": "Pilkington", "folder": "Pilkington",
         "keywords": [{"text": "556033-9086", "weight": 1.0}],
@@ -73,7 +73,7 @@ def test_invoice_with_orgnr_in_any_format_is_filed_automatically(tmp_path):
             FILLER,
         ])
         d = _decide(path, rules)
-        assert d.status == "auto", (orgnr, d.reason)
+        assert d.status == "ask", (orgnr, d.reason)
         assert d.best.name == "Pilkington"
 
 

@@ -98,7 +98,7 @@ def test_content_duplicate_is_detected_across_output_subfolders(monkeypatch, tmp
 
     ok, message = engine.apply(
         P.Decision(source, P.Extraction(path=source), [], "auto"),
-        "New category", [],
+        "New category", [], decided_by="user",
     )
 
     assert ok, message
@@ -162,7 +162,8 @@ def test_tagged_output_keeps_original_content_fingerprint_across_restarts(
         conflict_asker=lambda *_args: "rename",
     )
     ok, message = first.apply(
-        P.Decision(source, R.Extraction(path=source), [], "auto"), "Sorted", [])
+        P.Decision(source, R.Extraction(path=source), [], "ask"), "Sorted", [],
+        decided_by="user")
     assert ok, message
     stored = output / "Sorted" / source.name
     assert stored.read_bytes().endswith(b"tag")
@@ -178,7 +179,7 @@ def test_tagged_output_keeps_original_content_fingerprint_across_restarts(
     )
     ok, message = second.apply(
         P.Decision(second_source, R.Extraction(path=second_source), [], "auto"),
-        "Other", [],
+        "Other", [], decided_by="user",
     )
     assert ok, message
     assert prompts == [(second_source, stored, "content")]
@@ -201,7 +202,8 @@ def test_replace_keeps_old_duplicate_if_new_placement_fails(monkeypatch, tmp_pat
     )
 
     ok, _message = engine.apply(
-        P.Decision(source, R.Extraction(path=source), [], "auto"), "New", [])
+        P.Decision(source, R.Extraction(path=source), [], "ask"), "New", [],
+        decided_by="user")
 
     assert not ok
     assert old.read_bytes() == b"same bytes"

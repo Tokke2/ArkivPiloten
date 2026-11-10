@@ -65,6 +65,10 @@ def test_live_model_trains_only_from_explicit_user_choices(tmp_path, monkeypatch
         decision = P.Decision(
             path, extraction, [P.CategoryScore("Acme", 1.0)], "ask")
         ok, _ = engine.apply(decision, "Acme", [], decided_by=decided_by)
-        assert ok
+        if decided_by == "user":
+            assert ok
+        else:
+            assert not ok
+            assert path.exists()
 
     assert trained == ["Acme"]

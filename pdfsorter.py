@@ -11,16 +11,14 @@ Vad den gör
 -----------
 Bevakar en eller flera inmappar, läser varje ny PDF och flyttar den till
 en undermapp i utmappen: allt om Pilkington -> Utmapp/Pilkington/.
-Undermappar skapas automatiskt.
+Undermappar skapas automatiskt när du bekräftar en kategori.
 
-Ett tydligt stödord räcker normalt för att avgöra vart filen hör. En
-kategori kan kräva fler - sätt "Kräver" under Matchningar om ett företag
-har ord som lätt ger falska träffar. Ett bevisat organisationsnummer
-räcker däremot alltid ensamt.
+Poäng, stödord, ett bevisat organisationsnummer och inlärda träffar kan
+föreslå vart filen hör, men flyttar den aldrig utan ditt uttryckliga val.
+Det gäller också bevakning, omskanning och framtida liknande filer.
 
-Är appen osäker visas en dialogruta med 10 föreslagna stödord ur just den
-filen. Du bockar i de ord som hör till rätt kategori. Därefter går filen -
-och alla framtida liknande filer - automatiskt.
+Vid granskning visas en dialogruta med stödordsförslag ur just den filen.
+Du väljer kategori och bekräftar flytten; appen lär av ditt bekräftade val.
 
 Filer i projektet
 -----------------
@@ -1812,7 +1810,7 @@ def _apply_learned_ranking(scores: List[CategoryScore],
 
 
 def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> Decision:
-    """Avgör om filen kan sorteras automatiskt eller behöver frågas om.
+    """Skapar ett kategoriförslag; varje fil kräver fortsatt manuell bekräftelse.
 
     Sorteringen är avsiktligt försiktig: varje villkor som inte uppfylls
     skickar filen till granskning i stället för att gissa. Det är alltid
@@ -1912,10 +1910,10 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
                                                     -s2.score, s2.name))
                         best = scores[0]
                         second = _eff(scores[1])
-                    d = Decision(extraction.path, extraction, scores, "auto",
-                                 f"Lärd klassificerare bryter dödläget "
-                                 f"({lm_pred[2]} liknande filer)")
-                    return d
+                    return ask(
+                        f"{best.name} föreslås av inlärningen "
+                        f"({lm_pred[2]} liknande filer); välj och bekräfta "
+                        "mappen själv. Automatisk flyttning är avstängd.")
             # Exakt oavgjort och modellen osäker: kategorin med fler
             # tidigare sorterade filer vinner (enkel historikprior som
             # är aktiv redan från första filen, till skillnad från N14).
@@ -1933,11 +1931,11 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
                                                         -s2.score, s2.name))
                             best = scores[0]
                             second = _eff(scores[1])
-                        d = Decision(extraction.path, extraction, scores, "auto",
-                                     f"Historik bryter exakt dödläge: {vinnare} "
-                                     f"har {max(f1, f2)} tidigare filer mot "
-                                     f"{min(f1, f2)}")
-                        return d
+                        return ask(
+                            f"{vinnare} föreslås utifrån tidigare val "
+                            f"({max(f1, f2)} mot {min(f1, f2)} filer); "
+                            "bekräfta mappen innan filen flyttas. "
+                            "Automatisk flyttning är avstängd.")
             d = ask(f"{best.name} ({_eff(best):g}) och {scores[1].name} "
                     f"({second:g}) ligger för nära")
             d.learned_hint = (lm_pred[0], lm_pred[2]) if lm_pred else None
@@ -1949,8 +1947,9 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
             d.learned_hint = (lm_pred[0], lm_pred[2]) if lm_pred else None
             return d
 
-    d = Decision(extraction.path, extraction, scores, "auto", "")
-    return d
+    return ask(
+        f"{best.name} föreslås utifrån stödorden, men poäng flyttar aldrig "
+        "en fil automatiskt. Välj mapp och bekräfta flytten själv.")
 
 
 # ==========================================================================
@@ -2743,6 +2742,10 @@ class SortEngine:
         with self.lock:
             if cancel_event is not None and cancel_event.is_set():
                 return False, "Avbruten innan filen flyttades; den ligger kvar."
+            if decided_by in {"auto", "rescan"}:
+                self.stats["left"] += 1
+                return False, ("Automatisk flyttning är avstängd. "
+                               "Filen ligger kvar tills du bekräftar den i granskningen.")
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
                 return False, ("Filen ändrades efter analysen - lämnas "
@@ -5443,7 +5446,6 @@ class ConflictDialog:
         except Exception:
             pass
 
-        c = (app.C if app else COLORS)
         vad = ("En fil med samma namn finns redan i målmappen."
                if kind == "name" else
                "En fil med IDENTISKT innehåll (SHA-256) finns redan i "
@@ -5992,6 +5994,9 @@ class App:
         self.filedialog, self.messagebox, self.simpledialog = filedialog, messagebox, simpledialog
 
         self.settings = load_settings()
+        # Every file remains in its source folder until the user confirms a
+        # destination; legacy "ask_when_unsure=false" settings cannot bypass this.
+        self.settings["ask_when_unsure"] = True
         self.rules = Rules.load()
         # Manuellt utpekad tesseract (installerad på udda ställe) ska
         # gälla direkt vid start, innan standardsökningen ens körs.
@@ -6970,7 +6975,7 @@ class App:
             opt.columnconfigure(c, weight=1)
 
         self.var_recursive = tk.BooleanVar(value=self.settings.get("recursive", True))
-        self.var_ask = tk.BooleanVar(value=self.settings.get("ask_when_unsure", True))
+        self.var_ask = tk.BooleanVar(value=True)
         self.var_ocr = tk.BooleanVar(value=self.settings.get("ocr_enabled", True))
         self.var_dry = tk.BooleanVar(value=self.settings.get("dry_run", False))
         self.var_action = tk.StringVar(value=self.settings.get("action", "move"))
@@ -6980,14 +6985,17 @@ class App:
                         style="Card.TCheckbutton",
                         variable=self.var_recursive).grid(row=0, column=0, columnspan=2,
                                                           sticky="w", padx=8, pady=(6, 2))
-        ttk.Checkbutton(opt, text="Fråga när appen är osäker",
-                        style="Card.TCheckbutton",
-                        variable=self.var_ask).grid(row=0, column=2, columnspan=2,
-                                                    sticky="w", padx=8, pady=(6, 2))
+        confirm_all = ttk.Checkbutton(
+            opt, text="Bekräfta varje flytt manuellt (alltid)",
+            style="Card.TCheckbutton", variable=self.var_ask)
+        confirm_all.grid(row=0, column=2, columnspan=2,
+                         sticky="w", padx=8, pady=(6, 2))
+        confirm_all.state(["disabled"])
         ttk.Label(
             opt,
-            text=("Självlärning är alltid aktiv: appen lär av dina bekräftade "
-                  "val och rättelser, aldrig av autosorteringar."),
+            text=("Självlärning är alltid aktiv: appen lär av stödord i dina "
+                  "bekräftade val. Poäng och inlärning föreslår en mapp men "
+                  "flyttar aldrig filer utan ditt val."),
             style="CardMuted.TLabel", wraplength=460, justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
         ocr_cb = ttk.Checkbutton(opt, text="OCR för skannade PDF:er",
@@ -7042,8 +7050,8 @@ class App:
                    command=self._manage_learned).pack(side="left", padx=6)
         ttk.Label(
             opt,
-            text=("Manuella val och rättelser väger 3× tyngre än autosortering. "
-                  "Välj ‘Återbygg från historik’ för att tillämpa det på äldre beslut."),
+            text=("Manuella val och rättelser förbättrar framtida förslag. "
+                  "Även inlärda träffar flyttar aldrig filer utan bekräftelse."),
             style="CardMuted.TLabel", wraplength=720, justify="left",
         ).grid(row=5, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 4))
 
@@ -7532,8 +7540,7 @@ class App:
 
     def _resume_queue_after_locked_warning(self) -> None:
         if (getattr(self, "queue", None)
-                and not getattr(self, "_closing", False)
-                and getattr(self, "settings", {}).get("ask_when_unsure", True)):
+                and not getattr(self, "_closing", False)):
             self._post(self._process_queue)
 
     def _show_locked_file_warning(self, path: Path) -> bool:
@@ -7986,7 +7993,7 @@ class App:
             "recursive": bool(self.var_recursive.get()),
             "learned_matching": True,
             "year_subfolder": bool(self.var_year_sub.get()),
-            "ask_when_unsure": bool(self.var_ask.get()),
+            "ask_when_unsure": True,
             "ocr_enabled": bool(self.var_ocr.get()),
             "ocr_quality": ("high" if self.var_ocr_quality.get()
                             else "standard"),
@@ -8278,8 +8285,7 @@ class App:
             self._notify(f"{sorted_n} filer sorterade"
                          + (f", {len(self.queue)} väntar på granskning"
                             if self.queue else ""))
-        if (not cancelled and self.queue
-                and self.settings.get("ask_when_unsure", True) and self.visible):
+        if not cancelled and self.queue and self.visible:
             self._process_queue()
 
     def _handle(self, decision: Decision, from_watch: bool,
@@ -8296,46 +8302,14 @@ class App:
             self._log_threadsafe(f"{name}  ✖ {decision.reason}", "err")
             return
         if decision.status == "auto":
-            best = decision.best
-            ok, msg = self.engine.apply(
-                decision, best.name, best.matched, "auto",
-                cancel_event=cancel_event)
-            if not ok and msg.startswith("Avbruten"):
-                return
-            if ok:
-                tag = " (OCR)" if decision.extraction.used_ocr else ""
-                # Felsökningsdesign: logga VAR träffarna satt, så att en
-                # felregisterad kategori syns direkt i loggen.
-                zon = ", ".join(f"{w}:{best.zone_of(w)}"
-                                for w in best.matched[:3])
-                mp = getattr(best, "multipage", None)
-                flersidig = f"  [flersidig: {', '.join(mp)}]" if mp else ""
-                self._log_threadsafe(
-                    f"{name}  →  {best.name}   poäng {best.score:g}{tag}  "
-                    f"[{zon}]{flersidig}",
-                    "ok")
-                if from_watch:
-                    if not self.settings.get("dry_run", False):
-                        self._note_watch_activity(sorted_file=True)
-                    self._post(self._sync_tray)
-                    if not self.visible:
-                        self._post(lambda n=name, c=best.name:
-                                   self._notify(f"{n} → {c}"))
-            else:
-                level = "warn" if "lämnades kvar" in msg else "err"
-                self._log_threadsafe(f"{name}  ✖ {msg}", level)
-            return
+            # Defense in depth: never trust a high score or an old decision
+            # object to move a file. Re-present it as a manual review item.
+            decision.status = "ask"
+            decision.reason = (
+                "Automatisk flyttning är avstängd. "
+                "Välj kategori och bekräfta flytten själv.")
 
         # osäker
-        if not self.settings.get("ask_when_unsure", True):
-            ok, msg = self.engine.send_to_unmatched(
-                decision, cancel_event=cancel_event)
-            if not ok and msg.startswith("Avbruten"):
-                return
-            self._log_threadsafe(f"{name}  ⚠ {decision.reason} → "
-                                 f"{'_Osorterat' if ok else msg}", "warn")
-            return
-
         key = str(decision.path)
         if key not in self._queued_paths:
             self._queued_paths.add(key)
@@ -9417,39 +9391,23 @@ class App:
             self.rescan_after_learn(all_learned, last_category)
 
     def _apply_rule_to_queue(self, upto: int) -> int:
-        """Flytta de filer i kön som den nyss inlärda regeln nu täcker.
-
-        Returnerar hur många som togs bort före index `upto`, så att
-        anroparens loopräknare kan justeras.
-        """
-        removed_before = 0
+        """Uppdatera förslag i kön efter inlärning utan att flytta filer."""
         idx = 0
         while idx < len(self.queue):
             decision = self.queue[idx]
             if not decision.path.exists():
                 self.queue.pop(idx)
                 self._queued_paths.discard(str(decision.path))
-                if idx < upto:
-                    removed_before += 1
                 continue
             fresh = decide(self.rules, decision.extraction, self.settings)
-            if fresh.status != "auto":
-                idx += 1
-                continue
-            best = fresh.best
-            ok, _ = self.engine.apply(fresh, best.name, best.matched, "rescan")
-            if not ok:
-                idx += 1
-                continue
-            self._log(f"{decision.path.name}  →  {best.name}   "
-                      f"(samma regel)", "ok")
-            if self.watcher:
-                self.watcher.forget(decision.path)
-            self.queue.pop(idx)
-            self._queued_paths.discard(str(decision.path))
-            if idx < upto:
-                removed_before += 1
-        return removed_before
+            if fresh.status in {"auto", "ask"} and fresh.best:
+                fresh.status = "ask"
+                fresh.reason = (
+                    f"Inlärningen föreslår {fresh.best.name}. "
+                    "Bekräfta flytten manuellt.")
+                self.queue[idx] = fresh
+            idx += 1
+        return 0
 
     # ======================================================================
     # Omskanning efter inlärning
@@ -9487,11 +9445,7 @@ class App:
         return out
 
     def rescan_after_learn(self, learned: List[str], category: str) -> None:
-        """Skanna om allt osorterat sedan användaren lärt appen ett nytt ord.
-
-        Poängen med att svara på en fråga är att slippa svara på samma sak
-        igen. Lär man appen att "offert" betyder Offerter ska alla väntande
-        offerter flyttas dit på en gång, inte en i taget.
+        """Uppdatera förslag efter inlärning; varje flytt kräver bekräftelse.
 
         Körs i bakgrunden så gränssnittet inte fryser.
         """
@@ -9508,9 +9462,8 @@ class App:
                          daemon=True, name="pdfsorter-rescan").start()
 
     def _rescan_worker(self, files: List[Path], category: str) -> None:
-        # Samma parallellmönster som _sort_worker: läsningen delas upp på
-        # trådar, flytten serialiseras av motorn.
-        counters = {"moved": 0, "still": 0}
+        # Läsning och matchning delas upp på trådar; inga filer flyttas.
+        counters = {"suggested": 0, "still": 0}
         lock = threading.Lock()
         workers = max(2, min(8, os.cpu_count() or 2))
 
@@ -9520,21 +9473,15 @@ class App:
             try:
                 decision = self.engine.analyze(path)
             except Exception:
-                return
-            if decision.status != "auto":
                 with lock:
                     counters["still"] += 1
                 return
-            best = decision.best
-            ok, msg = self.engine.apply(decision, best.name, best.matched, "rescan")
-            if ok:
+            if decision.status in {"auto", "ask"}:
+                # Rescanning may refresh a suggestion, never apply it. The
+                # normal review dialog is the only route to a user-confirmed move.
+                self._handle(decision, from_watch=False)
                 with lock:
-                    counters["moved"] += 1
-                self._log_threadsafe(
-                    f"{path.name}  →  {best.name}   (omskanning)", "ok")
-                self._post(lambda pth=path: self._drop_from_queue(pth))
-                if self.watcher:
-                    self.watcher.forget(path)
+                    counters["suggested"] += 1
             else:
                 with lock:
                     counters["still"] += 1
@@ -9551,28 +9498,26 @@ class App:
             # _rescanning måste nollställas oavsett vad som händer, annars
             # låser sig knappen "Skanna om alla" för alltid.
             self._post(lambda: self._rescan_done(
-                counters["moved"], counters["still"], category))
+                counters["suggested"], counters["still"], category))
 
-    def _drop_from_queue(self, path: Path) -> None:
-        """Ta bort en fil ur granskningskön sedan omskanningen flyttat den."""
-        key = str(path)
-        self.queue = [d for d in self.queue if str(d.path) != key]
-        self._queued_paths.discard(key)
-
-    def _rescan_done(self, moved: int, still: int, category: str) -> None:
+    def _rescan_done(self, suggested: int, still: int, category: str) -> None:
         self._rescanning = False
         self.engine.flush_rules()
-        if moved:
-            self._log(f"— Omskanning klar: {moved} filer flyttade, "
+        if suggested:
+            self._log(f"— Omskanning klar: {suggested} filer behöver granskas, "
                       f"{still} väntar fortfarande —", "ok")
             if not self.visible:
-                self._notify(f"{moved} filer flyttades av den nya regeln")
+                self._notify(f"{suggested} filer väntar på granskning efter inlärning")
         else:
             self._log("— Omskanning klar: inga fler filer matchade —", "info")
         self._log(f"    Textcache: {TEXT_CACHE.stats()}", "info")
         self._refresh_queue()
         self._refresh_categories()
         self._refresh_history()
+        if self.queue and self.visible:
+            self._process_queue()
+        elif self.queue:
+            self._notify(f"{len(self.queue)} filer väntar på manuell granskning")
 
     # ======================================================================
     # Flik 4 - Historik
@@ -9886,8 +9831,10 @@ class App:
                 self.messagebox.showerror(APP_NAME, "Inställningarna måste vara ett JSON-objekt.",
                                           parent=self.root)
                 return
+            data["ask_when_unsure"] = True
             save_settings(data)
             self.settings = load_settings()
+            self.settings["ask_when_unsure"] = True
             self.engine.settings = self.settings
             self._reload_settings_into_gui()
             self._log("Inställningar sparade från JSON-fliken", "ok")
@@ -9898,7 +9845,8 @@ class App:
         try:
             self.var_out.set(self.settings.get("output_dir", ""))
             self.var_recursive.set(self.settings.get("recursive", False))
-            self.var_ask.set(self.settings.get("ask_when_unsure", True))
+            self.settings["ask_when_unsure"] = True
+            self.var_ask.set(True)
             self.var_ocr.set(self.settings.get("ocr_enabled", True))
             self.var_ocr_quality.set(
                 str(self.settings.get("ocr_quality", "high")) == "high")
@@ -11422,7 +11370,7 @@ class App:
             except Exception:
                 pass
         # Beta av kön som samlats medan fönstret var gömt
-        if self.queue and self.settings.get("ask_when_unsure", True):
+        if self.queue:
             self.root.after(250, self._process_queue)
 
     def _restore_for_active_run(self) -> None:
@@ -11647,13 +11595,13 @@ def _self_check() -> int:
     huvud = Extraction(path=Path("x.pdf"), text=(
         "Pilkington Sverige AB\nStorgatan 1\n\nFaktura\nVi hänvisar till "
         "ert glas och er montering. Belopp att betala inom trettio dagar. Tack!"))
-    rad("avsändarhuvud -> auto", decide(regler, huvud, dict(DEFAULT_SETTINGS)).status == "auto")
+    rad("avsändarhuvud -> manuell bekräftelse", decide(regler, huvud, dict(DEFAULT_SETTINGS)).status == "ask")
     org = next(f"556033908{d}" for d in "0123456789"
                if _luhn_ok(f"556033908{d}"))
     regler2 = Rules(); regler2.add_keywords("Pilkington", [f"{org[:6]}-{org[6:]}"])
     dok = Extraction(path=Path("x.pdf"), text=(
         f"Annan Firma\nRad två\n\nFaktura\nOrg.nr {org[:6]}-{org[6:]}\n" + "Text " * 20))
-    rad("bevisat org.nr -> auto", decide(regler2, dok, dict(DEFAULT_SETTINGS)).status == "auto")
+    rad("bevisat org.nr -> manuell bekräftelse", decide(regler2, dok, dict(DEFAULT_SETTINGS)).status == "ask")
     if SYSTEM_MODULE:
         rad("ikon 16px renderas", make_icon_image(16) is not None)
         st = autostart_status()
@@ -11869,8 +11817,8 @@ def run_cli(args: argparse.Namespace) -> int:
         settings["input_dir"] = args.input
     if args.output:
         settings["output_dir"] = args.output
-    if args.no_ask:
-        settings["ask_when_unsure"] = False
+    # Compatibility only: --no-ask can no longer bypass confirmation.
+    settings["ask_when_unsure"] = True
     if args.dry_run:
         settings["dry_run"] = True
     if args.copy:
@@ -11894,6 +11842,9 @@ def run_cli(args: argparse.Namespace) -> int:
         if not args.json:
             print(msg, flush=True)
 
+    if args.no_ask:
+        emit("--no-ask kan inte kringgå manuell bekräftelse; filer lämnas kvar för granskning.")
+
     engine = SortEngine(rules, settings,
                         log=lambda m, lvl="info": (
                             session_log("sortering", m, lvl),
@@ -11901,35 +11852,33 @@ def run_cli(args: argparse.Namespace) -> int:
 
     def handle(path: Path) -> None:
         decision = engine.analyze(path)
-        row = {"file": str(path), "status": decision.status, "reason": decision.reason}
         if decision.status == "auto":
-            best = decision.best
-            zon = ", ".join(f"{w}:{best.zone_of(w)}" for w in best.matched[:4])
-            mp = getattr(best, "multipage", None)
-            session_log("sortering",
-                        f"{path.name} -> {best.name}  poäng {best.score:g}  "
-                        f"[{zon}]" + (f"  [flersidig: {', '.join(mp)}]" if mp else ""))
-            ok, msg = engine.apply(decision, best.name, best.matched, "auto")
-            row.update({"category": best.name, "score": best.score, "ok": ok, "target": msg})
-            emit(f"{'[TEST] ' if settings['dry_run'] else ''}{path.name}"
-                 f"  ->  {best.name}  ({best.score:g})"
-                 + ("  [OCR]" if decision.extraction.used_ocr else "")
-                 + ("" if ok else f"   FEL: {msg}"))
-        elif decision.status == "error":
+            decision.status = "ask"
+            decision.reason = "Manuell bekräftelse krävs; automatisk flyttning är avstängd."
+        row = {"file": str(path), "status": decision.status,
+               "reason": decision.reason}
+        if decision.status == "error":
             row["ok"] = False
             session_log("sortering", f"{path.name}  FEL: {decision.reason}", "err")
-            emit(f"{path.name}  FEL: {decision.reason}")
+            emit(f"{path.name}  FEL: {decision.reason} — filen ligger kvar")
         elif decision.status == "ignored":
             row["ok"] = True
             session_log("sortering", f"{path.name}  ignorerad: {decision.reason}")
             emit(f"{path.name}  ⊘ {decision.reason} - lämnas orörd")
         else:
-            ok, msg = engine.send_to_unmatched(decision)
-            row.update({"category": None, "ok": ok, "target": msg})
-            session_log("sortering", f"{path.name}  OSÄKER: {decision.reason} -> "
-                        f"{'_Osorterat' if ok else 'lämnad'}", "warn")
-            emit(f"{path.name}  OSÄKER: {decision.reason}"
-                 f"  -> {'_Osorterat' if ok else 'lämnad i inmappen'}")
+            best = decision.best
+            row.update({
+                "category": best.name if best else None,
+                "needs_review": True,
+                "target": "left in input folder; no automatic move",
+            })
+            session_log("sortering",
+                        f"{path.name}  GRANSKNING: "
+                        f"{best.name if best else 'ingen kategori'} föreslås; "
+                        "filen lämnas kvar tills ett manuellt val", "warn")
+            emit(f"{path.name}  GRANSKNING: "
+                 f"{best.name if best else 'ingen kategori'} föreslås; "
+                 "filen ligger kvar tills du bekräftar flytten")
             if args.verbose:
                 cands = suggest_keywords(decision.extraction.combined, path.name,
                                          limit=int(settings.get("keywords_per_file", 10)),
@@ -12058,7 +12007,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--rules", help="Sökväg till en egen rules.json")
     p.add_argument("--watch", action="store_true", help="Bevaka mappen kontinuerligt")
     p.add_argument("--no-ask", action="store_true",
-                   help="Fråga aldrig; osäkra filer lämnas eller går till _Osorterat")
+                   help="Föråldrad: manuellt bekräfta varje flytt; matchningar föreslås")
     p.add_argument("--dry-run", action="store_true", help="Testkör, ändra inget på disk")
     p.add_argument("--copy", action="store_true", help="Kopiera i stället för att flytta")
     p.add_argument("--exclude", action="append", default=None,
