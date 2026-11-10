@@ -3788,7 +3788,9 @@ class ReviewDialog:
             self.win, bool(getattr(self.theme, "dark", False))))
         self.win.title(f"Osäker fil — {index} av {total}")
         self.win.transient(parent)
-        _fit_geometry(self.win, 1000, 940, 860, 760)
+        # Make the review window wide enough for a side-by-side decision
+        # layout, while _fit_geometry clamps it to the available screen.
+        _fit_geometry(self.win, 1280, 900, 1000, 680)
         self.win.columnconfigure(0, weight=1)
         self.win.rowconfigure(0, weight=1)
 
@@ -3804,7 +3806,12 @@ class ReviewDialog:
         self._outer_sb.grid(row=0, column=1, sticky="ns")
         self._outer.grid(row=0, column=0, sticky="nsew")
         self._all = ttk.Frame(self._outer, style="TFrame")
-        self._all.columnconfigure(0, weight=1)
+        # Left: keyword choices. Right: file details, preview and destination.
+        # Equal tracks keep the keyword rows readable without squeezing the
+        # category controls or long file metadata.
+        self._all.columnconfigure(0, weight=1, uniform="review-columns")
+        self._all.columnconfigure(1, weight=1, uniform="review-columns")
+        self._all.rowconfigure(0, weight=1)
         self._all_id = self._outer.create_window((0, 0), window=self._all,
                                                  anchor="nw")
         self._all.bind("<Configure>",
@@ -3817,19 +3824,38 @@ class ReviewDialog:
         pad = dict(padx=14, pady=(10, 0))
         ext = decision.extraction
         wrap_widgets = []
+        self._review_two_columns = True
+        keyword_canvas = None
+
+        def review_text_width() -> int:
+            # Use the full content width in the stacked fallback, and just
+            # the right-hand track in the side-by-side layout.
+            width = self._all.winfo_width()
+            if self._review_two_columns:
+                width = width // 2 - 28
+            else:
+                width -= 48
+            return max(220, min(900, width))
 
         def wrapped_label(parent, **options):
-            options["wraplength"] = max(
-                220, min(840, self.win.winfo_width() - 150))
+            options["wraplength"] = review_text_width()
             label = ttk.Label(parent, **options)
             wrap_widgets.append(label)
             return label
 
         def resize_wrapped_text(_event=None):
-            width = max(220, min(840, self.win.winfo_width() - 150))
+            width = review_text_width()
             for label in wrap_widgets:
                 try:
                     label.configure(wraplength=width)
+                except Exception:
+                    pass
+            if keyword_canvas is not None:
+                # Give the keyword list as much of the visible height as is
+                # practical, while keeping its own scrollbar for long PDFs.
+                height = max(140, min(440, self.win.winfo_height() - 420))
+                try:
+                    keyword_canvas.configure(height=height)
                 except Exception:
                     pass
 
@@ -3837,7 +3863,7 @@ class ReviewDialog:
 
         # -- filinfo -------------------------------------------------------
         head = ttk.Frame(self._all, style="Card.TFrame")
-        head.grid(row=0, column=0, sticky="ew", **pad)
+        head.grid(row=0, column=1, sticky="ew", **pad)
         head.columnconfigure(0, weight=1)
 
         wrapped_label(head, text=decision.path.name,
@@ -3955,15 +3981,17 @@ class ReviewDialog:
                     padx=16, pady=(4, 10))
             next_row += 2
 
-        ttk.Separator(self._all).grid(row=1, column=0, sticky="ew", padx=14, pady=(10, 0))
+        self._review_separator = ttk.Separator(self._all)
+        self._review_separator.grid(row=1, column=1, sticky="ew", padx=14, pady=(10, 0))
 
         # -- förhandsvisning (REQ-N7, FRAMSKJUTEN) ---------------------------
         # Koden finns kvar men är AVSTÄNGD som standard tills beställaren
         # säger till (settings["preview_in_dialog"]).
         row_box = 2
+        prev = None
         if preview:
             prev = ttk.Frame(self._all, style="Card.TFrame")
-            prev.grid(row=2, column=0, sticky="ew", padx=14, pady=(10, 0))
+            prev.grid(row=2, column=1, sticky="ew", padx=14, pady=(10, 0))
             prev.columnconfigure(0, weight=1)
             prev.rowconfigure(1, weight=1)
             self._prev_status = ttk.Label(prev, text="Läser in förhandsvisning…",
@@ -3987,12 +4015,11 @@ class ReviewDialog:
             row_box = 3
 
         # -- stödordslistan ------------------------------------------------
-        # En tydlig kortyta med rubrik och förklaring i stället för en
-        # tät LabelFrame-rubrik. Listan får en egen scrollbar.
+        # Stödorden ligger kvar i vänsterkolumnen medan filinfo,
+        # förhandsvisning och mappval visas i högerkolumnen.
         box = ttk.Frame(self._all, style="Card.TFrame")
-        # Kategori/målmapp är huvudbeslutet, därför visas det före
-        # stödordsinlärningen i dialogen.
-        box.grid(row=row_box + 1, column=0, sticky="nsew", padx=14, pady=(12, 0))
+        box.grid(row=0, column=0, rowspan=row_box + 1, sticky="nsew",
+                 padx=14, pady=(10, 10))
         box.columnconfigure(0, weight=1)
         box.rowconfigure(2, weight=1)
         ttk.Label(box, text="STÖDORD OCH TRÄFFAR",
@@ -4007,6 +4034,7 @@ class ReviewDialog:
         # fönstret rullas av den yttre canvasen.
         canvas = tk.Canvas(box, height=300, highlightthickness=0, borderwidth=0,
                            background=self.C["surface"])
+        keyword_canvas = canvas
         scroll = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
         self._canvas_scroll = scroll
         self.inner = ttk.Frame(canvas, style="CardInner.TFrame")
@@ -4044,7 +4072,7 @@ class ReviewDialog:
 
         # -- kategori ------------------------------------------------------
         catbox = ttk.Frame(self._all, style="Card.TFrame")
-        catbox.grid(row=row_box, column=0, sticky="ew", padx=14,
+        catbox.grid(row=row_box, column=1, sticky="ew", padx=14,
                     pady=(12, 10))
         catbox.columnconfigure(1, weight=1)
         ttk.Label(catbox, text="VART SKA FILEN SPARAS?",
@@ -4133,7 +4161,8 @@ class ReviewDialog:
         # Liten hjälprad: visar vad sökningen hittar och vad Enter gör.
         self._combo_hint_lbl = ttk.Label(catbox, text="",
                                         style="CardMuted.TLabel",
-                                        wraplength=560, justify="left")
+                                        wraplength=review_text_width(), justify="left")
+        wrap_widgets.append(self._combo_hint_lbl)
         self._combo_hint_lbl.grid(row=4, column=0, columnspan=2, sticky="w",
                                   padx=14, pady=(0, 8))
         self._combo_show_hint()
@@ -4168,6 +4197,52 @@ class ReviewDialog:
             style="Card.TCheckbutton").grid(
                 row=7, column=0, columnspan=2, sticky="w",
                 padx=14, pady=(4, 12))
+
+        def layout_review_columns(_event=None):
+            # Keep the requested left/right arrangement whenever both
+            # columns can remain usable. On a narrow or snapped window, stack
+            # all sections instead of clipping their controls off-screen.
+            wide = self._outer.winfo_width() >= 980
+            if wide == self._review_two_columns:
+                resize_wrapped_text()
+                return
+            self._review_two_columns = wide
+            for row in range(6):
+                self._all.rowconfigure(row, weight=0)
+            if wide:
+                self._all.rowconfigure(0, weight=1)
+                head.grid_configure(row=0, column=1, columnspan=1,
+                                    sticky="ew", **pad)
+                self._review_separator.grid_configure(
+                    row=1, column=1, columnspan=1,
+                    sticky="ew", padx=14, pady=(10, 0))
+                if prev is not None:
+                    prev.grid_configure(row=2, column=1, columnspan=1,
+                                        sticky="ew", padx=14, pady=(10, 0))
+                catbox.grid_configure(row=row_box, column=1, columnspan=1,
+                                      sticky="ew", padx=14, pady=(12, 10))
+                box.grid_configure(row=0, column=0, rowspan=row_box + 1,
+                                   columnspan=1, sticky="nsew",
+                                   padx=14, pady=(10, 10))
+            else:
+                self._all.rowconfigure(row_box + 1, weight=1)
+                head.grid_configure(row=0, column=0, columnspan=2,
+                                    sticky="ew", **pad)
+                self._review_separator.grid_configure(
+                    row=1, column=0, columnspan=2,
+                    sticky="ew", padx=14, pady=(10, 0))
+                if prev is not None:
+                    prev.grid_configure(row=2, column=0, columnspan=2,
+                                        sticky="ew", padx=14, pady=(10, 0))
+                catbox.grid_configure(row=row_box, column=0, columnspan=2,
+                                      sticky="ew", padx=14, pady=(12, 10))
+                box.grid_configure(row=row_box + 1, column=0, rowspan=1,
+                                   columnspan=2, sticky="nsew",
+                                   padx=14, pady=(10, 10))
+            resize_wrapped_text()
+
+        self._all.bind("<Configure>", layout_review_columns, add="+")
+        self.win.after_idle(layout_review_columns)
 
         # -- knappar (ligger utanför rullytan, alltid synliga) -------------
         btns = ttk.Frame(self.win)
@@ -4664,7 +4739,14 @@ class ReviewDialog:
             if keep_open:
                 self.combo.tk.call(
                     "ttk::combobox::ConfigureListbox", self.combo)
-                self._popdown_clear_selection()
+                # Typing while the native dropdown is open filters its rows
+                # and moves the visible highlight to the first match. The
+                # search text remains in the editable field until Enter.
+                values = list(self.combo["values"])
+                if self.combo.get().strip() and values:
+                    self._popdown_select_first()
+                else:
+                    self._popdown_clear_selection()
             else:
                 self.combo.tk.call("ttk::combobox::Unpost", self.combo)
         except Exception:
@@ -4691,6 +4773,24 @@ class ReviewDialog:
             if int(self.combo.tk.call(lb, "size")):
                 self.combo.tk.call(lb, "selection", "clear", 0, "end")
                 self.combo.tk.call(lb, "see", 0)
+        except Exception:
+            pass
+
+    def _popdown_select_first(self) -> None:
+        """Highlight and scroll to the first live typeahead match."""
+        if not self._popdown_open():
+            return
+        lb = self._popdown_lb_path()
+        if not lb:
+            return
+        try:
+            if not int(self.combo.tk.call(lb, "size")):
+                self._popdown_clear_selection()
+                return
+            self.combo.tk.call(lb, "selection", "clear", 0, "end")
+            self.combo.tk.call(lb, "selection", "set", 0)
+            self.combo.tk.call(lb, "activate", 0)
+            self.combo.tk.call(lb, "see", 0)
         except Exception:
             pass
 

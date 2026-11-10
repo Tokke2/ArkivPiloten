@@ -124,3 +124,85 @@ def test_typing_in_search_field_keeps_an_already_open_dropdown_posted():
     assert combo.values == ["Lindab", "Lidingö"]
     assert rendered == [[]]  # the native popup is used; no second list appears
     assert refreshed == [True]  # do not unpost the dropdown while typing
+
+
+def test_live_typeahead_highlights_first_match_in_open_dropdown():
+    calls = []
+
+    class Combo:
+        tk = SimpleNamespace(call=lambda *args: calls.append(args))
+
+        def __getitem__(self, key):
+            assert key == "values"
+            return ["Lidingö", "Lindab"]
+
+        @staticmethod
+        def get():
+            return "li"
+
+    selected = []
+    dialog = SimpleNamespace(
+        combo=Combo(),
+        _popdown_open=lambda: True,
+        _popdown_select_first=lambda: selected.append("first"),
+        _popdown_clear_selection=lambda: selected.append("clear"),
+    )
+
+    P.ReviewDialog._combo_refresh_popup(dialog, keep_open=True)
+
+    assert calls == [("ttk::combobox::ConfigureListbox", dialog.combo)]
+    assert selected == ["first"]
+
+
+def test_first_typeahead_match_is_highlighted_and_scrolled_into_view():
+    calls = []
+
+    def tk_call(*args):
+        calls.append(args)
+        if args == (".combo.popdown.f.l", "size"):
+            return 3
+        return ""
+
+    dialog = SimpleNamespace(
+        combo=SimpleNamespace(tk=SimpleNamespace(call=tk_call)),
+        _popdown_open=lambda: True,
+        _popdown_lb_path=lambda: ".combo.popdown.f.l",
+        _popdown_clear_selection=lambda: calls.append(("clear-selection",)),
+    )
+
+    P.ReviewDialog._popdown_select_first(dialog)
+
+    assert calls == [
+        (".combo.popdown.f.l", "size"),
+        (".combo.popdown.f.l", "selection", "clear", 0, "end"),
+        (".combo.popdown.f.l", "selection", "set", 0),
+        (".combo.popdown.f.l", "activate", 0),
+        (".combo.popdown.f.l", "see", 0),
+    ]
+
+
+def test_empty_typeahead_does_not_highlight_first_open_dropdown_item():
+    calls = []
+
+    class Combo:
+        tk = SimpleNamespace(call=lambda *args: calls.append(args))
+
+        def __getitem__(self, key):
+            assert key == "values"
+            return []
+
+        @staticmethod
+        def get():
+            return "missing"
+
+    selected = []
+    dialog = SimpleNamespace(
+        combo=Combo(),
+        _popdown_open=lambda: True,
+        _popdown_select_first=lambda: selected.append("first"),
+        _popdown_clear_selection=lambda: selected.append("clear"),
+    )
+
+    P.ReviewDialog._combo_refresh_popup(dialog, keep_open=True)
+
+    assert selected == ["clear"]
