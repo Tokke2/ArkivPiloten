@@ -50,8 +50,8 @@ def test_review_dialog_places_keywords_left_and_decision_controls_right():
     assert "head.grid(row=0, column=1" in source
     assert "box.grid(row=0, column=0, rowspan=row_box + 1" in source
     assert "catbox.grid(row=row_box, column=1" in source
-    assert "_fit_geometry(self.win, 1280, 900, 1000, 680)" in source
-    assert "wide = self._outer.winfo_width() >= 980" in source
+    assert "_fit_geometry(self.win, 1440, 960, 760, 600)" in source
+    assert "wide = self._outer.winfo_width() >= 760" in source
     assert "columnspan=2" in source
     assert "height = max(140, min(440, self.win.winfo_height() - 420))" in source
     assert "command=self._outer.yview" in source

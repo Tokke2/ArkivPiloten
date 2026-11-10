@@ -3788,9 +3788,9 @@ class ReviewDialog:
             self.win, bool(getattr(self.theme, "dark", False))))
         self.win.title(f"Osäker fil — {index} av {total}")
         self.win.transient(parent)
-        # Make the review window wide enough for a side-by-side decision
-        # layout, while _fit_geometry clamps it to the available screen.
-        _fit_geometry(self.win, 1280, 900, 1000, 680)
+        # Use most of the available screen for the two-column review layout;
+        # _fit_geometry clamps both dimensions on smaller displays.
+        _fit_geometry(self.win, 1440, 960, 760, 600)
         self.win.columnconfigure(0, weight=1)
         self.win.rowconfigure(0, weight=1)
 
@@ -3826,6 +3826,7 @@ class ReviewDialog:
         wrap_widgets = []
         self._review_two_columns = True
         keyword_canvas = None
+        category_combo = None
 
         def review_text_width() -> int:
             # Use the full content width in the stacked fallback, and just
@@ -3856,6 +3857,16 @@ class ReviewDialog:
                 height = max(140, min(440, self.win.winfo_height() - 420))
                 try:
                     keyword_canvas.configure(height=height)
+                except Exception:
+                    pass
+            if category_combo is not None:
+                # Keep the editable folder field inside its current column.
+                track = self._all.winfo_width()
+                if self._review_two_columns:
+                    track //= 2
+                char_width = max(16, min(44, (track - 190) // 8))
+                try:
+                    category_combo.configure(width=char_width)
                 except Exception:
                     pass
 
@@ -4100,6 +4111,7 @@ class ReviewDialog:
         # skriver, och en unik träff kan väljas med Enter.
         self.combo = ttk.Combobox(catbox, values=self._all_categories,
                                   state="normal", width=44, takefocus=True)
+        category_combo = self.combo
         if best and best.name in rules.names():
             self.combo.set(best.name)
         else:
@@ -4113,7 +4125,7 @@ class ReviewDialog:
         # Egen sökning i stället för klassbindningens "hoppa till första
         # prefix" (klassbindningen hoppar över pga _egen_ta).
         self.combo._egen_ta = True
-        self.combo.bind("<KeyPress>", self._combo_prepare_search)
+        self.combo.bind("<KeyPress>", self._combo_keypress_search)
         self.combo.bind("<KeyRelease>", self._combo_search)
         self.combo.bind("<Return>", self._combo_pick)
         self.combo.bind("<Escape>", self._combo_reset)
@@ -4202,7 +4214,7 @@ class ReviewDialog:
             # Keep the requested left/right arrangement whenever both
             # columns can remain usable. On a narrow or snapped window, stack
             # all sections instead of clipping their controls off-screen.
-            wide = self._outer.winfo_width() >= 980
+            wide = self._outer.winfo_width() >= 760
             if wide == self._review_two_columns:
                 resize_wrapped_text()
                 return
@@ -4587,6 +4599,48 @@ class ReviewDialog:
             self.combo.delete(0, "end")
             self.combo._replace_on_type = False
             return "break"
+
+    def _combo_keypress_search(self, event=None):
+        """Handle printable keys explicitly while the native dropdown is open.
+
+        Some Tk/Windows combinations send key events to the editable field and
+        others to the popdown listbox. Routing both through the same search
+        state prevents typing from being swallowed by the native popup.
+        """
+        if event is None:
+            return
+        if not self._popdown_open():
+            return self._combo_prepare_search(event)
+        state = int(getattr(event, "state", 0) or 0)
+        if state & (0x4 | 0x8):  # keep Ctrl/Alt shortcuts native
+            return
+        keysym = str(getattr(event, "keysym", "") or "")
+        if keysym == "BackSpace":
+            text = ("" if getattr(self.combo, "_replace_on_type", False)
+                    else self.combo.get()[:-1])
+        elif keysym == "Delete":
+            # Let the editable field perform native forward-delete; its
+            # KeyRelease binding will refresh the open result list.
+            return
+        elif keysym in ("Return", "Escape", "Tab", "Up", "Down", "Left",
+                        "Right", "Home", "End", "Prior", "Next", "Shift_L",
+                        "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R"):
+            return
+        else:
+            char = str(getattr(event, "char", "") or "")
+            if not char or not char.isprintable():
+                return
+            text = ("" if getattr(self.combo, "_replace_on_type", False)
+                    else self.combo.get())
+            text += char
+        self.combo.set(text)
+        self.combo._replace_on_type = False
+        try:
+            self.combo.icursor("end")
+        except Exception:
+            pass
+        self._combo_search(keep_popup=True)
+        return "break"
 
     def _combo_render_suggestions(self, names: List[str]) -> None:
         """Visa aktuella träffar under fältet utan att flytta skrivfokus."""

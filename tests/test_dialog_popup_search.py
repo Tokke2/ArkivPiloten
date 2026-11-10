@@ -126,6 +126,62 @@ def test_typing_in_search_field_keeps_an_already_open_dropdown_posted():
     assert refreshed == [True]  # do not unpost the dropdown while typing
 
 
+def test_typing_in_combobox_with_dropdown_open_updates_search_immediately():
+    class Combo:
+        def __init__(self):
+            self.value = ""
+            self._replace_on_type = False
+            self.calls = []
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = value
+
+        def icursor(self, position):
+            self.calls.append(("icursor", position))
+
+    combo = Combo()
+    searches = []
+    dialog = SimpleNamespace(
+        combo=combo,
+        _popdown_open=lambda: True,
+        _combo_search=lambda **kwargs: searches.append(kwargs),
+        _combo_prepare_search=lambda _event: "prepared",
+    )
+
+    result = P.ReviewDialog._combo_keypress_search(
+        dialog, SimpleNamespace(char="S", keysym="s", state=0))
+
+    assert result == "break"
+    assert combo.get() == "S"
+    assert searches == [{"keep_popup": True}]
+    assert combo.calls == [("icursor", "end")]
+
+
+def test_first_key_replaces_selected_folder_when_dropdown_is_open():
+    combo = SimpleNamespace(
+        _replace_on_type=True,
+        get=lambda: "Old folder",
+        set=lambda value: setattr(combo, "value", value),
+        icursor=lambda _position: None,
+    )
+    combo.value = ""
+    dialog = SimpleNamespace(
+        combo=combo,
+        _popdown_open=lambda: True,
+        _combo_search=lambda **_kwargs: None,
+        _combo_prepare_search=lambda _event: None,
+    )
+
+    P.ReviewDialog._combo_keypress_search(
+        dialog, SimpleNamespace(char="S", keysym="s", state=0))
+
+    assert combo.value == "S"
+    assert combo._replace_on_type is False
+
+
 def test_live_typeahead_highlights_first_match_in_open_dropdown():
     calls = []
 
