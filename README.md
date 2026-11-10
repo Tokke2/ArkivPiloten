@@ -24,7 +24,7 @@ Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
 
 ArkivPiloten watches one or more **inbox folders**, reads every new PDF, figures out which company or project it belongs to, and moves it to the right subfolder in your **outbox folder** — e.g. `Outbox/Pilkington/2025/`.
 
-It recognises senders by organisation number, VAT number, bankgiro, domain and company name, reads scanned documents with OCR, and **learns from your decisions**: when it is unsure it asks you once, and similar files are then sorted automatically in the future. Everything runs locally on your computer — no cloud, no account, no network calls for sorting.
+It recognises senders by organisation number, VAT number, bankgiro, domain and company name, reads scanned documents with OCR, and **learns continuously from your confirmed choices and corrections**. It never treats its own automatic guesses as confirmed training data. Everything runs locally on your computer — no cloud, no account, no network calls for sorting.
 
 > **Cautious by design.** A file is only moved automatically when the evidence is strong. If ArkivPiloten is unsure, it asks instead — answering one question is always cheaper than hunting down a misfiled document.
 
@@ -40,7 +40,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 
 - 📥 **Watched folders + automatic sorting** into `<category>/<year>` (optionally using the document's own date: `date_enabled`)
 - 🎯 **Zone-weighted matching** — letterhead, footer and sender zones weigh more than body text, plus multi-page matching; a proven organisation number always suffices on its own
-- 🧠 **Self-learning classifier** — suggests and breaks deadlocks between rule-approved candidates after roughly 5 decisions per category; it never moves a file on its own
+- 🧠 **Always-on self-learning** — learns from every user-confirmed choice and correction, never its own automatic guesses; helps rank rule-approved candidates after roughly 5 confirmed decisions per category and never moves a file on its own
 - 🔐 **Safer matching (1.2.0+)** — body-text-only mentions never auto-move a file on Normal and above: auto-sorting requires sender-zone, strong-ID or multi-page evidence, at least 12 characters of read text, and the exact analysed bytes are fingerprinted (SHA-256) and re-verified before any move
 - 🔍 **OCR for scanned PDFs** (Tesseract), including logos in letterheads of otherwise text-based files
 - 💡 **Clearer review dialog (1.4.14)** — file details, keyword suggestions and destination are grouped into clean cards. The existing-folder field accepts free text and filters the dropdown as you type; choose a match with Enter. The primary “Save & move” action is easy to spot.
@@ -230,7 +230,7 @@ You can also donate from inside the app via **Help → Support the project 💖*
 
 ArkivPiloten bevakar en eller flera **inmappar**, läser varje ny PDF, avgör vilket företag eller projekt den hör till och flyttar den till rätt undermapp i din **utmapp** — t.ex. `Utmapp/Pilkington/2025/`.
 
-Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domän och firmanamn, läser skannade dokument med OCR och **lär sig av dina beslut**: är den osäker frågar den en gång, och liknande filer sorteras sedan automatiskt framöver. Allt sker lokalt på din dator — ingen molntjänst, inget konto, inga nätverksanrop för sorteringen.
+Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domän och firmanamn, läser skannade dokument med OCR och **lär sig hela tiden av dina bekräftade val och rättelser**. Appen räknar aldrig sina egna autosorteringar som bekräftade inlärningsexempel. Allt sker lokalt på din dator — ingen molntjänst, inget konto, inga nätverksanrop för sorteringen.
 
 > **Försiktig av design.** En fil flyttas bara automatiskt när bevisen är starka. Är ArkivPiloten osäker frågar den i stället — det är alltid billigare att svara på en fråga än att leta rätt på en felsorterad fil.
 
@@ -246,7 +246,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 
 - 📥 **Bevakade mappar + automatisk sortering** i `<kategori>/<år>`; alla sorterade filer får årsmapp, även `_Osorterat`, och en anpassad datummall läggs innanför årsmappen (dokumentdatum styr året när det finns)
 - 🎯 **Zonviktad matchning** — brevhuvud, sidfot och avsändarzon väger tyngre än brödtext, plus flersidig matchning; ett bevisat organisationsnummer räcker alltid ensamt
-- 🧠 **Självlärande klassificerare** — lär zonmedvetet från avsändare, mottagare, sidhuvud/sidfot, filnamn och brödtext; visar vilka träffar som gav förslaget, väger in kategorins kalibrerade tillförlitlighet och låter äldre signaler klinga av. Korrigeringar ger riktad återkoppling. Inställningar låter dig testa mot historik utan informationsläckage, återbygga, inspektera via testresultatet eller nollställa modellen; den flyttar aldrig en fil på egen hand
+- 🧠 **Alltid aktiv självlärning** — lär av varje användarbekräftat val och rättelse, aldrig av appens egna autosorteringar; använder zonerna, kategorins kalibrerade tillförlitlighet och åldrande vikter. Historiken kan testas utan informationsläckage, modellen byggas om eller nollställas; den flyttar aldrig en fil på egen hand
 - 🔐 **Lokal, återställningsbar inlärning** — modell och zonfunktioner sparas lokalt med atomisk skrivning och säkerhetskopia; historiken kan spelas upp igen efter återställning. Ingen molntjänst eller nätverksinlärning används
 - 🔐 **Säkrare matchning (1.2.0+)** — bara löptextträffar flyttar aldrig en fil automatiskt på Normal och uppåt: det krävs avsändarzon, starkt ID eller flersidigt bevis, minst 12 lästa tecken, och exakt analyserade byte fingeravtrycks (SHA-256) och kontrolleras igen före varje flytt
 - 🔍 **OCR för skannade PDF:er** (Tesseract), inklusive logotyper i brevhuvuden på i övrigt textbaserade filer

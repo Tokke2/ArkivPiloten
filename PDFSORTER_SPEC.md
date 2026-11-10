@@ -1953,9 +1953,9 @@ bryter dödlägen i granskningskön. Inspireation: Paperless-ngx tränar ML
 på 20–30 manuellt arkiverade dokument; AI-fakturaprocessorer lär av
 varje korrigering.
 **AC-N14:**
-- AC-14.1 Klassificeraren tränas på historikens beslut (auto + användar-
-  val i granskning), helt lokalt, deterministiskt och utan nätverk/ML-
-  paket — en ordvägare per kategori räcker för volymen.
+- AC-14.1 Klassificeraren tränas fortlöpande och helt lokalt på historikens
+  uttryckligen bekräftade användarval och rättelser. Autosorteringar och
+  omskanningar räknas aldrig som facit; ingen nätverks- eller ML-tjänst används.
 - AC-14.2 Minst N fattade beslut per kategori (standard: 5, inställbart)
   krävs innan kategorins lärda profil används; under det är den tyst.
 - AC-14.3 Den lärda profilen är en SVAG signal: den kan föreslå/förbättra
@@ -1965,9 +1965,10 @@ varje korrigering.
 - AC-14.4 Korrigeringar matas tillbaka: väljer användaren en annan
   kategori än den föreslagna uppdateras profilen (negativ inlärning för
   det falska spåret, kopplat till förslag #116).
-- AC-14.5 Profilen följer med rules.json-säkerhetskopior och påverkar
-  aldrig redan sorterade filer; den kan slås av helt i inställningarna
-  (`learned_matching`, standard på efter beslut).
+- AC-14.5 Profilen sparas lokalt och påverkar inte redan sorterade filer.
+  Självlärningen är alltid aktiv och kan inte stängas av i inställningarna;
+  gamla `learned_matching=false` ignoreras. Vid första körningen efter
+  uppgraderingen byggs profilen om från användarbekräftad historik.
 - AC-14.6 **LEVERERAD 2026-09-28:** `LearnedMatcher` (naiv Bayes,
   Laplace-mjukning + prior) i `learned_model.json`; träningsdata =
   `learn_tokens()` (~60 karakteristiska ord, stoppsord gallrade) som
@@ -1977,10 +1978,10 @@ varje korrigering.
   (≥0,25 i log-rummet) på någon av de två nära kandidaterna, (b) på
   nivån "Lös" auto-flyttar en säker modell ensam, (c) annars
   `learned_hint` som visas i granskningsrutan ("lärd: X – N liknande
-  filer"). Kryssruta "Lärande matchning" i Inställningar
-  (`learned_matching`, standard på). Verifierat: 14 tester (träning,
-  prediktion, min_files-grind, dödläge, Lös-auto, hint, avstängd,
-  träning-via-apply + journal/historik) + e2e-regression (auto 9,55).
+  filer"). Bara användarbekräftade val tränar profilen; autosorteringar och
+  omskanningar hoppas över. Inlärningen är alltid aktiv och använder ingen
+  av/på-kryssruta. En äldre profil byggs om från bekräftad historik vid
+  första användningen efter uppgradering.
 
 ### REQ-N2 (B) — requirements.txt och veckovis uppdatering
 En `requirements.txt` bredvid `pdfsorter.py` listar Python-tilläggen. Från

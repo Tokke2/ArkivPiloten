@@ -1558,7 +1558,18 @@ def _learned() -> LearnedMatcher:
     global _LEARNED
     with _LEARNED_LOCK:
         if _LEARNED is None:
-            _LEARNED = LearnedMatcher()
+            learner = LearnedMatcher()
+            settings = load_settings()
+            if not settings.get("learned_confirmed_only_v1", False):
+                # Äldre versioner tränade även på autosorteringar. Bygg om
+                # profilen från historikens uttryckligen bekräftade val.
+                rebuild_learned_from_history(load_history(), learner)
+                settings["learned_confirmed_only_v1"] = True
+                try:
+                    save_settings(settings)
+                except Exception:
+                    pass
+            _LEARNED = learner
         return _LEARNED
 
 
@@ -1597,7 +1608,8 @@ def replay_learned_history(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     for event in ordered:
         category = str(event.get("category", "") or "")
         features = _history_features(event)
-        if not category or not features or event.get("decided_by") == "unmatched":
+        if (not category or not features
+                or event.get("decided_by") != "user"):
             continue
         prediction = replay.predict(features)
         if prediction is not None:
@@ -1638,12 +1650,14 @@ def restore_learned_category(category: str, events: List[Dict[str, Any]],
         chosen = str(event.get("category", "") or "")
         features = _history_features(event)
         timestamp = str(event.get("time") or now_iso())
-        if chosen == category and features and event.get("decided_by") != "unmatched":
+        if (chosen == category and features
+                and event.get("decided_by") == "user"):
             learner.train(
                 category, features, timestamp=timestamp,
                 evidence_weight=_history_evidence_weight(event))
             count += 1
-        if event.get("corrected_from") == category:
+        if (event.get("decided_by") == "user"
+                and event.get("corrected_from") == category):
             rejected = [str(token) for token in event.get("rejected_features", [])]
             weight = _history_evidence_weight(event)
             profile = learner.cats.setdefault(
@@ -1671,7 +1685,8 @@ def rebuild_learned_from_history(events: List[Dict[str, Any]],
     for event in sorted(events, key=lambda e: str(e.get("time", ""))):
         category = str(event.get("category", "") or "")
         features = _history_features(event)
-        if not category or not features or event.get("decided_by") == "unmatched":
+        if (not category or not features
+                or event.get("decided_by") != "user"):
             continue
         learner.train(
             category, features,
@@ -1812,7 +1827,7 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
                         body=extraction.text or "")
     t = effective_thresholds(settings)
 
-    # N14: modellens syn på filen (om påslagen och tränad).
+    # N14: modellens syn på filen när den har tillräckligt underlag.
     lm_pred = None
     if settings.get("learned_matching", True):
         try:
@@ -2833,23 +2848,20 @@ class SortEngine:
                     wrong = best.name
                     self.rules.register_reject(wrong, best.matched)
                 self._rules_save()
-                # N14: varje beslut blir träningsdata (AC-14.4) - även
-                # användarens korrigeringar, eftersom kategorin här är
-                # det slutgiltiga valet.
+                # Bara uttryckliga användarval och rättelser är facit;
+                # autosorteringar och omskanningar tränar inte modellen.
                 toks = learn_tokens(decision.extraction.text
                                     or decision.extraction.combined)
                 features = learn_features(decision.extraction)
                 rejected_features = (rejected_learning_features(best)
                                      if wrong and best else [])
-                if s.get("learned_matching", True):
+                if decided_by == "user":
                     try:
                         with _LEARNED_LOCK:
                             _learned().train(
                                 category, features, incorrect_for=wrong or None,
                                 rejected_tokens=rejected_features,
-                                evidence_weight=(
-                                    _LEARNED_MANUAL_WEIGHT
-                                    if decided_by == "user" else 1),
+                                evidence_weight=_LEARNED_MANUAL_WEIGHT,
                             )
                     except Exception:
                         pass
@@ -5355,7 +5367,7 @@ _UI_EN = {
     "Fråga när appen är osäker": "Ask when the app is unsure",
     "OCR för skannade PDF:er": "OCR for scanned PDFs",
     "Bättre OCR (noggrannare, något långsammare)": "Better OCR (more accurate, slightly slower)",
-    "Lärande matchning (appen lär av dina beslut)": "Learning matching (the app learns from your choices)",
+    "Självlärning är alltid aktiv: appen lär av dina bekräftade val och rättelser, aldrig av autosorteringar.": "Self-learning is always on: the app learns from confirmed choices and corrections, never automatic sorts.",
     "Läs även undermappar i inmappen": "Include subfolders of the inbox",
     "Lägg filer i undermappar efter datum": "Put files in subfolders by date",
     "Skanna om allt när ett nytt stödord lärts in": "Rescan everything when a new keyword is learned",
@@ -6754,12 +6766,12 @@ class App:
                         style="Card.TCheckbutton",
                         variable=self.var_ask).grid(row=0, column=2, columnspan=2,
                                                     sticky="w", padx=8, pady=(6, 2))
-        self.var_learned = tk.BooleanVar(
-            value=self.settings.get("learned_matching", True))
-        ttk.Checkbutton(opt, text="Lärande matchning (appen lär av dina beslut)",
-                        style="Card.TCheckbutton",
-                        variable=self.var_learned).grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+        ttk.Label(
+            opt,
+            text=("Självlärning är alltid aktiv: appen lär av dina bekräftade "
+                  "val och rättelser, aldrig av autosorteringar."),
+            style="CardMuted.TLabel", wraplength=460, justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
         ocr_cb = ttk.Checkbutton(opt, text="OCR för skannade PDF:er",
                                  style="Card.TCheckbutton", variable=self.var_ocr)
         ocr_cb.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=2)
@@ -7754,7 +7766,7 @@ class App:
         self.settings.update({
             "output_dir": self.var_out.get().strip(),
             "recursive": bool(self.var_recursive.get()),
-            "learned_matching": bool(self.var_learned.get()),
+            "learned_matching": True,
             "year_subfolder": bool(self.var_year_sub.get()),
             "ask_when_unsure": bool(self.var_ask.get()),
             "ocr_enabled": bool(self.var_ocr.get()),
