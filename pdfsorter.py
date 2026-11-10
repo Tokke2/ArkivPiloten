@@ -6910,16 +6910,19 @@ class App:
                 self.btn_watch.grid_configure(row=0, column=2, padx=6)
                 watch_status.grid_configure(row=0, column=3, columnspan=1,
                                             sticky="w", padx=14, pady=0)
-                stats.grid_configure(row=1, column=0, sticky="w",
-                                     padx=(T.INNER, 8))
-                self.progress.grid_configure(row=1, column=1,
-                                             padx=(8, 0), pady=0, sticky="ew")
+                # Keep counters on a dedicated row at every width; the
+                # progress indicator must never compete for the "fel" cell.
+                stats.grid_configure(row=1, column=0, columnspan=4,
+                                     sticky="w", padx=T.INNER)
+                self.progress.grid_configure(row=2, column=0, columnspan=2,
+                                             padx=(T.INNER, 0), pady=0,
+                                             sticky="ew")
                 self.progress.configure(length=170)
-                self.pill_dry.grid_configure(row=1, column=2, padx=(10, 0),
-                                             sticky="w")
                 self.lbl_progress.configure(width=16, anchor="e")
-                self.lbl_progress.grid_configure(row=1, column=3,
-                                                 padx=(6, T.INNER), sticky="e")
+                self.lbl_progress.grid_configure(row=2, column=2,
+                                                 padx=(6, 8), sticky="e")
+                self.pill_dry.grid_configure(row=2, column=3,
+                                             padx=(6, T.INNER), sticky="w")
                 actcard.columnconfigure(0, weight=0)
                 actcard.columnconfigure(1, weight=0)
                 actcard.columnconfigure(2, weight=0)

@@ -73,6 +73,9 @@ def test_compact_action_layout_keeps_progress_off_the_error_counters():
     assert 'stats.grid_configure(row=2, column=0, columnspan=3' in layout
     assert 'self.progress.grid_configure(row=3, column=0, columnspan=3' in layout
     assert 'self.lbl_progress.grid_configure(row=4, column=0' in layout
+    assert 'stats.grid_configure(row=1, column=0, columnspan=4' in layout
+    assert 'self.progress.grid_configure(row=2, column=0, columnspan=2' in layout
+    assert 'self.lbl_progress.grid_configure(row=2, column=2' in layout
 
 
 def test_startup_schedules_task_maintenance_but_not_package_install():
