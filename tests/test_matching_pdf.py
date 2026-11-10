@@ -54,8 +54,8 @@ def _decide(path, rules):
     return P.decide(rules, ext, NORMAL)
 
 
-def test_invoice_with_orgnr_in_any_format_suggests_manual_review(tmp_path):
-    """Ett säkert ID föreslår kategori men flyttar aldrig utan bekräftelse."""
+def test_only_literal_orgnr_support_word_match_can_auto_move(tmp_path):
+    """Bara exakt skrivsätt av stödordet får auto-flytta; varianter föreslår."""
     rules = _rules(tmp_path, [{
         "name": "Pilkington", "folder": "Pilkington",
         "keywords": [{"text": "556033-9086", "weight": 1.0}],
@@ -73,7 +73,10 @@ def test_invoice_with_orgnr_in_any_format_suggests_manual_review(tmp_path):
             FILLER,
         ])
         d = _decide(path, rules)
-        assert d.status == "ask", (orgnr, d.reason)
+        if orgnr == "556033-9086":
+            assert d.status == "auto", (orgnr, d.reason)
+        else:
+            assert d.status == "ask", (orgnr, d.reason)
         assert d.best.name == "Pilkington"
 
 

@@ -10,15 +10,19 @@ Windows - då syns ingen terminal alls).
 Vad den gör
 -----------
 Bevakar en eller flera inmappar, läser varje ny PDF och flyttar den till
-en undermapp i utmappen: allt om Pilkington -> Utmapp/Pilkington/.
-Undermappar skapas automatiskt när du bekräftar en kategori.
+en undermapp i utmappen efter en exakt stödordsträff eller användarens val.
+Undermappar skapas automatiskt vid behov.
 
-Poäng, stödord, ett bevisat organisationsnummer och inlärda träffar kan
-föreslå vart filen hör, men flyttar den aldrig utan ditt uttryckliga val.
-Det gäller också bevakning, omskanning och framtida liknande filer.
+Appen lär bara in stödord som användaren själv väljer och sparar. En fil
+flyttas automatiskt endast när ett sparat stödord matchar exakt som helt
+ord/fras i PDF-texten, exakt en kategori har en sådan träff och den
+kategorin ligger först. Case och upprepade blanksteg normaliseras; stavning
+och skiljetecken inne i stödordet/frasen måste annars stämma. Inlärning, lösa poäng,
+OCR-brus, delord och flexibla ID-matchningar kan aldrig själva flytta filer.
 
-Vid granskning visas en dialogruta med stödordsförslag ur just den filen.
-Du väljer kategori och bekräftar flytten; appen lär av ditt bekräftade val.
+Alla andra filer visas i granskningsdialogen. Användaren väljer kategori,
+stödord och vid behov undermapp. Alla sparade stödord går att rensa med
+knappen i Matchningar.
 
 Filer i projektet
 -----------------
@@ -346,8 +350,8 @@ def keyword_strength(text: str) -> str:
     """Vilken sorts bevis är det här stödordet?
 
     Returnerar "orgnr", "vat", "giro", "domain", "kod" eller "" för vanliga
-    ord. Används av den strikta sorteringen, som kan kräva att minst ett
-    riktigt starkt bevis finns innan en fil flyttas automatiskt.
+    ord. Används för rangordning och för att känna igen identifierare; det
+    här styr inte automatflytt, som kräver en separat exakt stödordsträff.
 
     OCR-tolerant (REQ-N6): matchar inte originaltexten prövas även en
     avbrusad kopia, så att "556O33-9O86" ur en skanning ändå räknas som
@@ -559,6 +563,7 @@ def _kw_pattern(kw: Dict[str, Any]) -> re.Pattern:
 
 
 _PATTERN_CACHE: Dict[Tuple[str, bool, bool], re.Pattern] = {}
+_EXACT_PATTERN_CACHE: Dict[str, re.Pattern] = {}
 
 
 def _cached_pattern(kw: Dict[str, Any]) -> re.Pattern:
@@ -1809,12 +1814,81 @@ def _apply_learned_ranking(scores: List[CategoryScore],
     scores.sort(key=lambda s: (-(s.score + s.bonus), s.name))
 
 
-def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> Decision:
-    """Skapar ett kategoriförslag; varje fil kräver fortsatt manuell bekräftelse.
+def validate_subfolder_override(value: str) -> Tuple[str, str]:
+    """Normalize a dialog subfolder path and reject absolute/traversal paths."""
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw:
+        return "", ""
+    if (raw.startswith("/") or re.match(r"^[a-zA-Z]:", raw)
+            or any(part.strip() in {".", ".."} for part in raw.split("/"))):
+        return "", "En undermapp måste vara en relativ sökväg under kategorimappen."
+    parts = [safe_folder_name(part) for part in raw.split("/") if part.strip()]
+    if not parts:
+        return "", ""
+    return "/".join(parts), ""
 
-    Sorteringen är avsiktligt försiktig: varje villkor som inte uppfylls
-    skickar filen till granskning i stället för att gissa. Det är alltid
-    billigare att svara på en fråga än att leta rätt på en felsorterad fil.
+
+def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, List[str]]:
+    """Return literal, whole-word support matches from PDF text by category.
+
+    This deliberately does not use OCR denoising, flexible identifier
+    separators, the filename, learned-model scores, or substring rules.
+    Text is case-folded and whitespace-normalized only; punctuation and the
+    spelling of each support word/phrase must otherwise match exactly.
+    """
+    body = normalize(getattr(extraction, "text", "") or "")
+    if not body:
+        return {}
+    zones = _zones_for(body, "", "", "")
+    matches: Dict[str, List[str]] = {}
+    for cat in rules.categories:
+        if not cat.get("enabled", True):
+            continue
+        found = []
+        seen = set()
+        for kw in cat.get("keywords", []):
+            word = normalize(kw.get("text", ""))
+            if (not word or word in seen or not kw.get("whole_word", True)
+                    or (not any(char.isalpha() for char in word)
+                        and not keyword_strength(word))
+                    or float(kw.get("weight", 1.0) or 0.0) <= 0
+                    or int(kw.get("rejected", 0) or 0) > 0
+                    or _reject_factor(kw) <= 0):
+                continue
+            seen.add(word)
+            if not zones.kan_finnas(kw):
+                continue
+            pattern = _EXACT_PATTERN_CACHE.get(word)
+            if pattern is None:
+                pattern = _kw_pattern({"text": word, "whole_word": True})
+                if len(_EXACT_PATTERN_CACHE) >= 4000:
+                    _EXACT_PATTERN_CACHE.clear()
+                _EXACT_PATTERN_CACHE[word] = pattern
+            if pattern.search(body):
+                found.append(word)
+        required = max(1, int(cat.get("min_keywords", 0) or 0))
+        if len(found) >= required:
+            matches[cat["name"]] = found
+    return matches
+
+
+def exact_auto_category(rules: Rules, decision: Decision) -> str:
+    """Category that may auto-move: one exact-match category and top score."""
+    if (decision.status != "auto" or decision.best is None
+            or decision.best.only_recipient):
+        return ""
+    matches = exact_support_matches(rules, decision.extraction)
+    if len(matches) != 1:
+        return ""
+    category = next(iter(matches))
+    return category if decision.best.name == category else ""
+
+
+def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> Decision:
+    """Besluta mellan exakt unik stödordsträff och förslag för granskning.
+
+    Endast en bokstavlig helords-/frasträff som tillhör exakt en kategori
+    kan ge status ``auto``; all annan evidens skickas till granskning.
     """
     if extraction.error and not extraction.text:
         return Decision(extraction.path, extraction, [], "error", extraction.error)
@@ -1836,6 +1910,18 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
 
     if lm_pred is not None and scores:
         _apply_learned_ranking(scores, lm_pred)
+
+    # A move is allowed only when a user-owned support word or phrase occurs
+    # literally in the document text, with whole-word boundaries, and exactly
+    # one category has such a match. Learned scores and flexible/substring
+    # matches can never authorize a move.
+    exact = exact_support_matches(rules, extraction)
+    if (len(exact) == 1 and scores and scores[0].name in exact
+            and not scores[0].only_recipient):
+        matched_words = exact[scores[0].name]
+        return Decision(
+            extraction.path, extraction, scores, "auto",
+            "Exakt stödordsträff: " + ", ".join(matched_words[:4]))
 
     if not scores:
         # Säkerhetsrundan 2026-10-16: den lärda klassificeraren får aldrig
@@ -1935,7 +2021,7 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
                             f"{vinnare} föreslås utifrån tidigare val "
                             f"({max(f1, f2)} mot {min(f1, f2)} filer); "
                             "bekräfta mappen innan filen flyttas. "
-                            "Automatisk flyttning är avstängd.")
+                            "Inlärning ensam får aldrig flytta filer.")
             d = ask(f"{best.name} ({_eff(best):g}) och {scores[1].name} "
                     f"({second:g}) ligger för nära")
             d.learned_hint = (lm_pred[0], lm_pred[2]) if lm_pred else None
@@ -2735,17 +2821,19 @@ class SortEngine:
 
     def apply(self, decision: Decision, category: str, matched: List[str],
               decided_by: str = "auto", learned: Optional[List[str]] = None,
-              cancel_event: Optional[threading.Event] = None) -> Tuple[bool, str]:
+              cancel_event: Optional[threading.Event] = None,
+              subfolder_override: str = "") -> Tuple[bool, str]:
         # Hela verkställandet serialiseras: parallella sorteringstrådar får
         # aldrig tävla om målnamn (REQ-D2 - filer skrivs aldrig över).
         s = self.settings
         with self.lock:
             if cancel_event is not None and cancel_event.is_set():
                 return False, "Avbruten innan filen flyttades; den ligger kvar."
-            if decided_by in {"auto", "rescan"}:
+            if (decided_by in {"auto", "rescan"}
+                    and exact_auto_category(self.rules, decision) != category):
                 self.stats["left"] += 1
-                return False, ("Automatisk flyttning är avstängd. "
-                               "Filen ligger kvar tills du bekräftar den i granskningen.")
+                return False, ("Automatisk flyttning kräver en exakt, unik "
+                               "stödordsträff. Filen ligger kvar för granskning.")
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
                 return False, ("Filen ändrades efter analysen - lämnas "
@@ -2755,6 +2843,12 @@ class SortEngine:
             folder = cat["folder"]
             mall = cat.get("subfolder", "")
             sub, when, källa = self.subfolder_for(decision.extraction, mall)
+            manual_sub, sub_error = validate_subfolder_override(subfolder_override)
+            if sub_error:
+                self.stats["left"] += 1
+                return False, sub_error
+            if manual_sub:
+                sub = "/".join(part for part in (sub, manual_sub) if part)
 
             # -- REQ-N4: dubblettkontroll innan något rör disken --
             on_conflict = s.get("on_conflict", "rename")
@@ -3773,7 +3867,8 @@ class ReviewDialog:
     def __init__(self, parent, decision: Decision, rules: Rules,
                  candidates: List[Candidate], index: int = 1, total: int = 1,
                  theme=None, preview: bool = False,
-                 suggested_sender: str = ""):
+                 suggested_sender: str = "",
+                 subfolder_base_resolver: Optional[Callable[[str], Path]] = None):
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk, self.ttk, self.messagebox = tk, ttk, messagebox
         self.filedialog = filedialog
@@ -3782,6 +3877,7 @@ class ReviewDialog:
         self.decision = decision
         self.rules = rules
         self.candidates = candidates
+        self.subfolder_base_resolver = subfolder_base_resolver
         self.result: Optional[Dict[str, Any]] = None
 
         self.win = tk.Toplevel(parent)
@@ -4205,12 +4301,32 @@ class ReviewDialog:
         # "Ny mapp"-fältet ska vara låst när "Befintlig" är förvalt.
         self._sync()
 
-        self.save_rule = tk.BooleanVar(value=True)
+        subrow = ttk.Frame(catbox, style="CardInner.TFrame")
+        subrow.grid(row=7, column=0, columnspan=2, sticky="ew",
+                    padx=14, pady=(4, 4))
+        subrow.columnconfigure(1, weight=1)
+        ttk.Label(subrow, text="Undermapp:", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 8))
+        self.var_subfolder = tk.StringVar(value="")
+        self.subfolder_entry = ttk.Entry(subrow, textvariable=self.var_subfolder)
+        self.subfolder_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
+        ttk.Button(subrow, text="Välj befintlig…",
+                   command=self._browse_subfolder).grid(
+                       row=0, column=2, padx=(0, 4))
+        ttk.Button(subrow, text="Skapa ny…",
+                   command=self._create_subfolder).grid(row=0, column=3)
+        ttk.Label(
+            catbox, text="Valfri sökväg under vald kategori/årsmapp.",
+            style="CardMuted.TLabel").grid(
+                row=8, column=0, columnspan=2, sticky="w",
+                padx=14, pady=(0, 4))
+
+        self.save_rule = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             catbox, variable=self.save_rule,
-            text="Lär in valda ord för framtida sortering",
+            text="Spara valda stödord för framtida exakta matchningar",
             style="Card.TCheckbutton").grid(
-                row=7, column=0, columnspan=2, sticky="w",
+                row=9, column=0, columnspan=2, sticky="w",
                 padx=14, pady=(4, 12))
 
         def layout_review_columns(_event=None):
@@ -4339,17 +4455,15 @@ class ReviewDialog:
 
         if not self.candidates:
             ttk.Label(self.inner, text="Inga stödord kunde tas fram ur filen.\n"
-                                       "Använd \"+ Eget ord…\" eller välj bara en mapp.",
+                                       "Skriv in ett eget stödord eller välj en mapp.",
                       style="CardMuted.TLabel").grid(row=0, column=0, columnspan=4,
                                                  sticky="w", padx=10, pady=10)
             return
 
         top = max((c.score for c in self.candidates), default=1.0) or 1.0
         for i, cand in enumerate(self.candidates):
-            # Förbocka de starkaste identifierarna - avsändaren i
-            # brevhuvudet, org.nr, VAT och domän är nästan alltid rätt.
-            strong = ("sender", "orgnr", "vat", "company", "domain")
-            var = tk.BooleanVar(value=(i < 3 and cand.kind in strong))
+            # Appen föreslår men väljer aldrig stödord åt användaren.
+            var = tk.BooleanVar(value=False)
             self.vars.append((var, cand.text))
             ttk.Checkbutton(self.inner, variable=var, text=cand.display,
                             style="Card.TCheckbutton"
@@ -4534,10 +4648,73 @@ class ReviewDialog:
         text = normalize(word)
         if any(t == text for _, t in self.vars):
             return
+        selected_before = set(self._chosen())
         self.candidates.append(Candidate(text, word.strip(), "word", 1, 0.01))
         self._build_rows()
-        if self.vars:
-            self.vars[-1][0].set(True)
+        for var, candidate_text in self.vars:
+            if candidate_text in selected_before or candidate_text == text:
+                var.set(True)
+        if hasattr(self, "save_rule"):
+            self.save_rule.set(True)
+
+    def _subfolder_base(self) -> Optional[Path]:
+        category = self._category()
+        if not category or self.subfolder_base_resolver is None:
+            return None
+        try:
+            return Path(self.subfolder_base_resolver(category)).resolve()
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _browse_subfolder(self) -> None:
+        """Välj en befintlig mapp under den beräknade kategori/år-mappen."""
+        base = self._subfolder_base()
+        if base is None:
+            self.messagebox.showinfo(
+                APP_NAME, "Välj först en kategori för att bläddra bland undermappar.",
+                parent=self.win)
+            return
+        if not base.is_dir():
+            self.messagebox.showinfo(
+                APP_NAME,
+                "Det finns ännu inga undermappar här. Använd ‘Skapa ny…’ "
+                "eller skriv ett relativt mappnamn.", parent=self.win)
+            return
+        chosen = self.filedialog.askdirectory(
+            parent=self.win, title="Välj undermapp",
+            initialdir=str(base), mustexist=True)
+        if not chosen:
+            return
+        try:
+            relative = Path(chosen).resolve().relative_to(base)
+        except (OSError, ValueError):
+            self.messagebox.showerror(
+                APP_NAME, "Välj en mapp inuti den valda kategori/år-mappen.",
+                parent=self.win)
+            return
+        if relative == Path("."):
+            self.var_subfolder.set("")
+            return
+        value, error = validate_subfolder_override(relative.as_posix())
+        if error:
+            self.messagebox.showerror(APP_NAME, error, parent=self.win)
+            return
+        self.var_subfolder.set(value)
+
+    def _create_subfolder(self) -> None:
+        """Skriv namnet/sökvägen på en ny undermapp; den skapas vid flytt."""
+        _tk_mod, _ttk, _filedialog, _messagebox, simpledialog = _tk()
+        value = simpledialog.askstring(
+            APP_NAME,
+            "Ny undermapp relativt kategori/år (exempel: Fakturor/2025):",
+            initialvalue=self.var_subfolder.get(), parent=self.win)
+        if value is None:
+            return
+        cleaned, error = validate_subfolder_override(value)
+        if error:
+            self.messagebox.showerror(APP_NAME, error, parent=self.win)
+            return
+        self.var_subfolder.set(cleaned)
 
     def _sync(self) -> None:
         # Rullgardinen är alltid skrivbar/sökbar; bara "Ny mapp"-fältet
@@ -5221,6 +5398,11 @@ class ReviewDialog:
             self.messagebox.showwarning(APP_NAME, "Välj en befintlig kategori eller skriv ett namn på en ny mapp.",
                                         parent=self.win)
             return
+        subfolder, subfolder_error = validate_subfolder_override(
+            self.var_subfolder.get())
+        if subfolder_error:
+            self.messagebox.showwarning(APP_NAME, subfolder_error, parent=self.win)
+            return
         words = self._chosen()
         if self.save_rule.get() and not words:
             if not self.messagebox.askyesno(
@@ -5234,6 +5416,7 @@ class ReviewDialog:
             "words": words if self.save_rule.get() else [],
             "save_rule": bool(self.save_rule.get() and words),
             "folder": cat,
+            "subfolder": subfolder,
             "unmatched": False,
         }
         self._close()
@@ -6986,16 +7169,16 @@ class App:
                         variable=self.var_recursive).grid(row=0, column=0, columnspan=2,
                                                           sticky="w", padx=8, pady=(6, 2))
         confirm_all = ttk.Checkbutton(
-            opt, text="Bekräfta varje flytt manuellt (alltid)",
+            opt, text="Auto endast vid exakt stödordsträff (100%)",
             style="Card.TCheckbutton", variable=self.var_ask)
         confirm_all.grid(row=0, column=2, columnspan=2,
                          sticky="w", padx=8, pady=(6, 2))
         confirm_all.state(["disabled"])
         ttk.Label(
             opt,
-            text=("Självlärning är alltid aktiv: appen lär av stödord i dina "
-                  "bekräftade val. Poäng och inlärning föreslår en mapp men "
-                  "flyttar aldrig filer utan ditt val."),
+            text=("Stödordsförslag sparas först när du väljer dem. Automatisk "
+                  "flytt kräver en exakt, unik helords- eller frasträff; övriga filer "
+                  "ligger kvar för granskning."),
             style="CardMuted.TLabel", wraplength=460, justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
         ocr_cb = ttk.Checkbutton(opt, text="OCR för skannade PDF:er",
@@ -7051,7 +7234,8 @@ class App:
         ttk.Label(
             opt,
             text=("Manuella val och rättelser förbättrar framtida förslag. "
-                  "Även inlärda träffar flyttar aldrig filer utan bekräftelse."),
+                  "Inlärda poäng kan aldrig flytta en fil; bara en exakt "
+                  "stödordsträff kan göra det."),
             style="CardMuted.TLabel", wraplength=720, justify="left",
         ).grid(row=5, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 4))
 
@@ -8302,12 +8486,31 @@ class App:
             self._log_threadsafe(f"{name}  ✖ {decision.reason}", "err")
             return
         if decision.status == "auto":
-            # Defense in depth: never trust a high score or an old decision
-            # object to move a file. Re-present it as a manual review item.
+            best = decision.best
+            if best is not None:
+                ok, msg = self.engine.apply(
+                    decision, best.name, best.matched, "auto",
+                    cancel_event=cancel_event)
+                if not ok and msg.startswith("Avbruten"):
+                    return
+                if ok:
+                    zone = ", ".join(f"{word}:{best.zone_of(word)}"
+                                     for word in best.matched[:3])
+                    self._log_threadsafe(
+                        f"{name}  →  {best.name}   exakt stödord  [{zone}]", "ok")
+                    if from_watch:
+                        if not self.settings.get("dry_run", False):
+                            self._note_watch_activity(sorted_file=True)
+                        self._post(self._sync_tray)
+                        if not self.visible:
+                            self._post(lambda n=name, c=best.name:
+                                       self._notify(f"{n} → {c} (exakt stödord)"))
+                    return
+                decision.reason = msg
+            else:
+                decision.reason = "Exakt stödordsträff saknar en entydig kategori."
+            # Stale/forged automatic decisions are reviewed, never moved.
             decision.status = "ask"
-            decision.reason = (
-                "Automatisk flyttning är avstängd. "
-                "Välj kategori och bekräfta flytten själv.")
 
         # osäker
         key = str(decision.path)
@@ -8616,6 +8819,9 @@ class App:
         # en sjätte knapp gör att raden inte får plats i kortet.
         ttk.Button(kbtn, text="Ta bort", style="Danger.TButton",
                    command=self._kw_remove).grid(row=0, column=5)
+        ttk.Button(kbtn, text="Rensa alla stödord i alla kategorier…",
+                   style="Danger.TButton", command=self._kw_clear_all).grid(
+                       row=1, column=0, columnspan=6, sticky="ew", pady=(6, 0))
 
         self._kw_sort = ("hits", True)
         self._kw_rows: List[Dict[str, Any]] = []
@@ -8730,12 +8936,11 @@ class App:
         if hasattr(self, "lbl_kw_sum"):
             starka = sum(1 for k in cat["keywords"] if keyword_strength(k["text"]))
             oanvända = sum(1 for k in cat["keywords"] if not k.get("hits", 0))
-            behov = max(effective_thresholds(self.settings)["min_keywords"],
-                        int(cat.get("min_keywords", 0) or 0))
+            behov = max(1, int(cat.get("min_keywords", 0) or 0))
             delar = [f"{starka} starka bevis (org.nr, VAT, giro, domän)"]
             if oanvända:
                 delar.append(f"{oanvända} har aldrig träffat")
-            delar.append(f"kräver {behov} för automatisk flytt")
+            delar.append(f"auto kräver {behov} exakta stödord")
             self.lbl_kw_sum.configure(text="   ·   ".join(delar))
 
 
@@ -8903,6 +9108,27 @@ class App:
         _PATTERN_CACHE.clear()
         self._log(f"Tog bort {len(words)} stödord från \"{name}\"", "info")
         self._refresh_categories(name)
+
+    def _kw_clear_all(self) -> None:
+        """Rensa samtliga stödord i alla kategorier efter dubbel bekräftelse."""
+        total = sum(len(cat.get("keywords", [])) for cat in self.rules.categories)
+        if not total:
+            self.messagebox.showinfo(
+                APP_NAME, "Det finns inga stödord att rensa.", parent=self.root)
+            return
+        if not self.messagebox.askyesno(
+                APP_NAME,
+                f"Rensa alla {total} stödord i samtliga kategorier?\n\n"
+                "Kategorierna finns kvar, men framtida filer matchas inte längre "
+                "på dessa stödord.", parent=self.root):
+            return
+        for cat in self.rules.categories:
+            cat["keywords"] = []
+        self.rules._rebuild_index()
+        self.rules.save()
+        _PATTERN_CACHE.clear()
+        self._refresh_categories()
+        self._log(f"Rensade alla {total} stödord i samtliga kategorier", "warn")
 
     def _kw_prune(self) -> None:
         """Rensa stödord som aldrig gett en träff.
@@ -9238,6 +9464,20 @@ class App:
             self._queued_paths.clear()
             self._refresh_queue()
 
+    def _review_subfolder_base(self, decision: Decision,
+                               category: str) -> Path:
+        """Destination root used to browse/create a per-file subfolder."""
+        cat = self.rules.get(category)
+        folder = cat["folder"] if cat else safe_folder_name(category)
+        template = cat.get("subfolder", "") if cat else ""
+        sub, _when, _source = self.engine.subfolder_for(
+            decision.extraction, template)
+        base = Path(self.settings.get("output_dir") or ".") / safe_folder_name(folder)
+        for part in sub.split("/"):
+            if part:
+                base = base / safe_folder_name(part)
+        return base
+
     def _process_queue(self, start: int = 0) -> None:
         """Visa högst en granskningsdialog/köprocessor åt gången.
 
@@ -9302,7 +9542,10 @@ class App:
                                    theme=self.theme,
                                    preview=bool(self.settings.get(
                                        "preview_in_dialog", False)),
-                                   suggested_sender=_hint)
+                                   suggested_sender=_hint,
+                                   subfolder_base_resolver=(
+                                       lambda category, d=decision:
+                                       self._review_subfolder_base(d, category)))
                 self._review_dialog = dlg
                 res = dlg.show()
             except self.tk.TclError as exc:
@@ -9360,7 +9603,9 @@ class App:
                               f"{', '.join(words[:4])}{'…' if len(words) > 4 else ''}", "info")
                 else:
                     self.engine.learn(cat, [])
-                ok, msg = self.engine.apply(decision, cat, words, "user", learned=words)
+                ok, msg = self.engine.apply(
+                    decision, cat, words, "user", learned=words,
+                    subfolder_override=res.get("subfolder", ""))
                 level = ("ok" if ok else
                          "warn" if "lämnades kvar" in msg else "err")
                 self._log(f"{decision.path.name}  →  {cat}   (ditt val)" if ok
@@ -9391,23 +9636,37 @@ class App:
             self.rescan_after_learn(all_learned, last_category)
 
     def _apply_rule_to_queue(self, upto: int) -> int:
-        """Uppdatera förslag i kön efter inlärning utan att flytta filer."""
+        """Tillämpa exakta nya stödordsträffar; uppdatera övriga förslag."""
+        removed_before = 0
         idx = 0
         while idx < len(self.queue):
             decision = self.queue[idx]
             if not decision.path.exists():
                 self.queue.pop(idx)
                 self._queued_paths.discard(str(decision.path))
+                if idx < upto:
+                    removed_before += 1
                 continue
             fresh = decide(self.rules, decision.extraction, self.settings)
-            if fresh.status in {"auto", "ask"} and fresh.best:
+            if fresh.status == "auto" and fresh.best:
+                best = fresh.best
+                ok, msg = self.engine.apply(
+                    fresh, best.name, best.matched, "rescan")
+                if ok:
+                    self._log(f"{decision.path.name}  →  {best.name}   "
+                              "(exakt stödord efter inlärning)", "ok")
+                    if self.watcher:
+                        self.watcher.forget(decision.path)
+                    self.queue.pop(idx)
+                    self._queued_paths.discard(str(decision.path))
+                    if idx < upto:
+                        removed_before += 1
+                    continue
                 fresh.status = "ask"
-                fresh.reason = (
-                    f"Inlärningen föreslår {fresh.best.name}. "
-                    "Bekräfta flytten manuellt.")
-                self.queue[idx] = fresh
+                fresh.reason = msg
+            self.queue[idx] = fresh
             idx += 1
-        return 0
+        return removed_before
 
     # ======================================================================
     # Omskanning efter inlärning
@@ -9445,7 +9704,7 @@ class App:
         return out
 
     def rescan_after_learn(self, learned: List[str], category: str) -> None:
-        """Uppdatera förslag efter inlärning; varje flytt kräver bekräftelse.
+        """Flytta unika, exakta stödordsträffar; köa övriga för granskning.
 
         Körs i bakgrunden så gränssnittet inte fryser.
         """
@@ -9462,8 +9721,9 @@ class App:
                          daemon=True, name="pdfsorter-rescan").start()
 
     def _rescan_worker(self, files: List[Path], category: str) -> None:
-        # Läsning och matchning delas upp på trådar; inga filer flyttas.
-        counters = {"suggested": 0, "still": 0}
+        # Läsning och matchning delas upp på trådar; endast verifierade,
+        # unika, exakta stödordsträffar får flyttas vid omskanning.
+        counters = {"moved": 0, "review": 0, "still": 0}
         lock = threading.Lock()
         workers = max(2, min(8, os.cpu_count() or 2))
 
@@ -9476,12 +9736,26 @@ class App:
                 with lock:
                     counters["still"] += 1
                 return
-            if decision.status in {"auto", "ask"}:
-                # Rescanning may refresh a suggestion, never apply it. The
-                # normal review dialog is the only route to a user-confirmed move.
+            if decision.status == "auto" and decision.best:
+                best = decision.best
+                ok, msg = self.engine.apply(
+                    decision, best.name, best.matched, "rescan")
+                if ok:
+                    with lock:
+                        counters["moved"] += 1
+                    self._log_threadsafe(
+                        f"{path.name}  →  {best.name}   (exakt stödord vid omskanning)",
+                        "ok")
+                    self._post(lambda pth=path: self._drop_from_queue(pth))
+                    if self.watcher:
+                        self.watcher.forget(path)
+                    return
+                decision.status = "ask"
+                decision.reason = msg
+            if decision.status == "ask":
                 self._handle(decision, from_watch=False)
                 with lock:
-                    counters["suggested"] += 1
+                    counters["review"] += 1
             else:
                 with lock:
                     counters["still"] += 1
@@ -9498,16 +9772,25 @@ class App:
             # _rescanning måste nollställas oavsett vad som händer, annars
             # låser sig knappen "Skanna om alla" för alltid.
             self._post(lambda: self._rescan_done(
-                counters["suggested"], counters["still"], category))
+                counters["moved"], counters["review"], counters["still"], category))
 
-    def _rescan_done(self, suggested: int, still: int, category: str) -> None:
+    def _drop_from_queue(self, path: Path) -> None:
+        """Ta bort en fil ur kön som reskanningen flyttade säkert."""
+        key = str(path)
+        self.queue = [decision for decision in self.queue
+                      if str(decision.path) != key]
+        self._queued_paths.discard(key)
+
+    def _rescan_done(self, moved: int, review: int, still: int,
+                     category: str) -> None:
         self._rescanning = False
         self.engine.flush_rules()
-        if suggested:
-            self._log(f"— Omskanning klar: {suggested} filer behöver granskas, "
+        if moved or review:
+            self._log(f"— Omskanning klar: {moved} exakta träffar flyttade, "
+                      f"{review} filer behöver granskas, "
                       f"{still} väntar fortfarande —", "ok")
-            if not self.visible:
-                self._notify(f"{suggested} filer väntar på granskning efter inlärning")
+            if not self.visible and review:
+                self._notify(f"{review} filer väntar på granskning efter inlärning")
         else:
             self._log("— Omskanning klar: inga fler filer matchade —", "info")
         self._log(f"    Textcache: {TEXT_CACHE.stats()}", "info")
@@ -11595,13 +11878,13 @@ def _self_check() -> int:
     huvud = Extraction(path=Path("x.pdf"), text=(
         "Pilkington Sverige AB\nStorgatan 1\n\nFaktura\nVi hänvisar till "
         "ert glas och er montering. Belopp att betala inom trettio dagar. Tack!"))
-    rad("avsändarhuvud -> manuell bekräftelse", decide(regler, huvud, dict(DEFAULT_SETTINGS)).status == "ask")
+    rad("exakt stödord i avsändarhuvud -> auto", decide(regler, huvud, dict(DEFAULT_SETTINGS)).status == "auto")
     org = next(f"556033908{d}" for d in "0123456789"
                if _luhn_ok(f"556033908{d}"))
     regler2 = Rules(); regler2.add_keywords("Pilkington", [f"{org[:6]}-{org[6:]}"])
     dok = Extraction(path=Path("x.pdf"), text=(
         f"Annan Firma\nRad två\n\nFaktura\nOrg.nr {org[:6]}-{org[6:]}\n" + "Text " * 20))
-    rad("bevisat org.nr -> manuell bekräftelse", decide(regler2, dok, dict(DEFAULT_SETTINGS)).status == "ask")
+    rad("exakt org.nr-stödord -> auto", decide(regler2, dok, dict(DEFAULT_SETTINGS)).status == "auto")
     if SYSTEM_MODULE:
         rad("ikon 16px renderas", make_icon_image(16) is not None)
         st = autostart_status()
@@ -11843,7 +12126,7 @@ def run_cli(args: argparse.Namespace) -> int:
             print(msg, flush=True)
 
     if args.no_ask:
-        emit("--no-ask kan inte kringgå manuell bekräftelse; filer lämnas kvar för granskning.")
+        emit("--no-ask är föråldrad; oavsett flagga flyttas bara exakta, unika stödordsträffar.")
 
     engine = SortEngine(rules, settings,
                         log=lambda m, lvl="info": (
@@ -11852,9 +12135,26 @@ def run_cli(args: argparse.Namespace) -> int:
 
     def handle(path: Path) -> None:
         decision = engine.analyze(path)
-        if decision.status == "auto":
+        if decision.status == "auto" and decision.best:
+            best = decision.best
+            ok, target = engine.apply(
+                decision, best.name, best.matched, "auto")
+            if ok:
+                row = {
+                    "file": str(path), "status": "auto", "reason": decision.reason,
+                    "category": best.name, "score": best.score,
+                    "ok": True, "target": target,
+                }
+                session_log("sortering",
+                            f"{path.name} -> {best.name}  exakt stödord "
+                            f"({', '.join(best.matched[:4])})")
+                emit(f"{'[TEST] ' if settings['dry_run'] else ''}{path.name}"
+                     f"  ->  {best.name}  (exakt stödord)  {target}")
+                results.append(row)
+                return
             decision.status = "ask"
-            decision.reason = "Manuell bekräftelse krävs; automatisk flyttning är avstängd."
+            decision.reason = target
+
         row = {"file": str(path), "status": decision.status,
                "reason": decision.reason}
         if decision.status == "error":
@@ -11870,12 +12170,12 @@ def run_cli(args: argparse.Namespace) -> int:
             row.update({
                 "category": best.name if best else None,
                 "needs_review": True,
-                "target": "left in input folder; no automatic move",
+                "target": "left in input folder; no exact unique support-word match",
             })
             session_log("sortering",
                         f"{path.name}  GRANSKNING: "
                         f"{best.name if best else 'ingen kategori'} föreslås; "
-                        "filen lämnas kvar tills ett manuellt val", "warn")
+                        "filen lämnas kvar tills användaren bekräftar", "warn")
             emit(f"{path.name}  GRANSKNING: "
                  f"{best.name if best else 'ingen kategori'} föreslås; "
                  "filen ligger kvar tills du bekräftar flytten")
@@ -12007,7 +12307,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--rules", help="Sökväg till en egen rules.json")
     p.add_argument("--watch", action="store_true", help="Bevaka mappen kontinuerligt")
     p.add_argument("--no-ask", action="store_true",
-                   help="Föråldrad: manuellt bekräfta varje flytt; matchningar föreslås")
+                   help="Föråldrad: bara exakta, unika stödordsträffar får flyttas automatiskt")
     p.add_argument("--dry-run", action="store_true", help="Testkör, ändra inget på disk")
     p.add_argument("--copy", action="store_true", help="Kopiera i stället för att flytta")
     p.add_argument("--exclude", action="append", default=None,

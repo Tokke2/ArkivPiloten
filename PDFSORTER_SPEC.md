@@ -534,17 +534,21 @@ Allt sker lokalt på datorn — inga nätverksanrop, ingen molntjänst.
 
 ## 2. Kärnidé
 
-> **Ingen automatisk flyttning.** Matchningspoäng, starka bevis och
-> inlärda träffar får bara föreslå en kategori. Varje fil måste ligga kvar
-> tills användaren bekräftar flytten — även vid mappbevakning, batchkörning
-> och omskanning efter inlärning. Obekräftade filer går inte automatiskt till
-> `_Osorterat`.
+> **Endast exakt användarsparat stödord får flytta automatiskt.** Ett
+> stödord eller en fras måste finnas bokstavligt som helt ord i PDF-texten,
+> och exakt en aktiv kategori får ha en sådan träff. Skiftläge och upprepade
+> blanksteg normaliseras; stavning och skiljetecken i stödordet/frasen
+> måste annars vara lika.
+> Poäng, inlärda modeller, flexibla ID, delord och OCR-denoising ger bara
+> förslag. Vid konflikt eller osäkerhet ligger filen kvar för granskning.
+> Regeln gäller batch, mappbevakning och omskanning; obekräftade filer går
+> aldrig automatiskt till `_Osorterat`.
 
-Varje bekräftat användarval får fortfarande lära appen. Inlärning och
-reskanning uppdaterar förslag och granskningskö, men flyttar aldrig andra
-filer i bakgrunden. Detta ersätter äldre krav längre ned som beskriver
-automatisk flyttning eller automatisk borttagning från granskningskön; de
-beskriver tidigare beteende och gäller inte längre.
+Stödordsförslag sparas inte automatiskt: användaren väljer vilka ord som ska
+sparas. En bekräftad inlärning får flytta andra filer endast om de också
+uppfyller den strikta, unika exakta stödordsträffen. Detta ersätter äldre
+krav längre ned som beskriver bredare automatisk flyttning eller automatisk
+borttagning från granskningskön.
 
 ## 3. Arkitektur — fem samverkande moduler
 
@@ -1310,16 +1314,16 @@ En osäker fil öppnas med **tio föreslagna stödord** som användaren bockar i
   fält; okänt skrivet namn växlar till Ny mapp-läge.
 
 ### REQ-F2 (M) — Inlärning & omskanning
-När användaren svarat ska appen lära sig regeln och uppdatera förslag
-för osorterade filer; varje fil kräver egen användarbekräftelse före flytt.
+När användaren svarat ska appen spara valda stödord och uppdatera
+osorterade filer. Bara unika, bokstavliga stödordsträffar får flyttas;
+övriga filer kräver granskning.
 **AC-F2:**
 - AC-2.1 Valda ord sparas som permanenta regler (om "Spara valda ord" är
   på).
 - AC-2.2 Filen flyttas till vald kategori.
-- AC-2.3 Filer som den nya regeln täcker får uppdaterat förslag i granskningskön; de flyttas inte automatiskt.
+- AC-2.3 Filer som den nya regeln täcker får uppdaterat beslut; bara en exakt, unik helords-/frasträff får flyttas.
 - AC-2.4 `rescan_after_learn` skannar om kön, inmapparna och `_Osorterat`
-  i bakgrunden och lägger matchningar i granskningskön. Ingen fil flyttas
-  förrän användaren bekräftar den.
+  i bakgrunden. Exakta unika stödordsträffar flyttas; övriga läggs i kön.
 
 ### REQ-F3 (M) — Flikar
 **AC-F3:**
@@ -1982,8 +1986,9 @@ varje korrigering.
   sparas i historiken; bara användarbekräftade val/rättelser tränar modellen,
   manuella val väger tyngre, och autosorteringar/omskanningar hoppas över.
   Flush sker vid batchslut/avslut. Integrationen i `decide()` kan förbättra
-  rangordningen men ger endast förslag; ingen score eller modell kan
-  flytta filer utan bekräftelse. Inlärningen är alltid aktiv, utan av/på-kryssruta. Vid uppgradering byggs den gamla
+  rangordningen men kan aldrig ensam flytta en fil; endast en exakt,
+  unik, användarsparad stödordsträff får ge automatisk flytt. Inlärningen är
+  alltid aktiv, utan av/på-kryssruta. Vid uppgradering byggs den gamla
   profilen om en gång från bekräftade historikposter. Verifierat med tester
   för träning, walk-forward, återbyggnad, rättelser och filtrering av
   obekräftade beslut.

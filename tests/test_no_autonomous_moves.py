@@ -36,7 +36,61 @@ def test_learned_match_is_only_a_suggestion(monkeypatch, tmp_path):
     assert decision.learned_hint == ("Acme", 12)
 
 
-def test_apply_rejects_automatic_and_rescan_sources_without_moving(tmp_path):
+def test_only_exact_unique_user_support_match_is_automatic(tmp_path):
+    rules = Rules({"categories": [{
+        "name": "Acme", "folder": "Acme",
+        "keywords": [{"text": "Acme", "weight": 1.0,
+                      "whole_word": True, "source": "user"}],
+    }]}, tmp_path / "rules.json")
+
+    exact = P.decide(rules, P.Extraction(
+        path=tmp_path / "exact.pdf", text="ACME invoice"),
+        {"learned_matching": False})
+    embedded = P.decide(rules, P.Extraction(
+        path=tmp_path / "embedded.pdf", text="XAcmeZ invoice"),
+        {"learned_matching": False})
+
+    assert exact.status == "auto"
+    assert exact.best.name == "Acme"
+    assert embedded.status == "ask"
+
+
+def test_filename_only_support_match_requires_review(tmp_path):
+    rules = Rules({"categories": [{
+        "name": "Acme", "folder": "Acme",
+        "keywords": [{"text": "Acme", "weight": 1.0}],
+    }]}, tmp_path / "rules.json")
+    decision = P.decide(rules, P.Extraction(
+        path=tmp_path / "Acme-invoice.pdf", text="Invoice"),
+        {"learned_matching": False})
+    assert decision.status == "ask"
+
+
+def test_rejected_exact_support_word_requires_review(tmp_path):
+    rules = Rules({"categories": [{
+        "name": "Acme", "folder": "Acme",
+        "keywords": [{"text": "Acme", "weight": 1.0, "rejected": 1}],
+    }]}, tmp_path / "rules.json")
+    decision = P.decide(rules, P.Extraction(
+        path=tmp_path / "corrected.pdf", text="Acme invoice"),
+        {"learned_matching": False})
+    assert decision.status == "ask"
+
+
+def test_same_exact_keyword_in_two_categories_requires_review(tmp_path):
+    rules = Rules({"categories": [
+        {"name": "Acme", "folder": "Acme",
+         "keywords": [{"text": "Acme", "weight": 1.0}]},
+        {"name": "Acme archive", "folder": "Acme archive",
+         "keywords": [{"text": "Acme", "weight": 1.0}]},
+    ]}, tmp_path / "rules.json")
+    decision = P.decide(rules, P.Extraction(
+        path=tmp_path / "ambiguous.pdf", text="Acme invoice"),
+        {"learned_matching": False})
+    assert decision.status == "ask"
+
+
+def test_apply_rejects_automatic_and_rescan_without_exact_rule(tmp_path):
     source = tmp_path / "invoice.pdf"
     source.write_bytes(b"unchanged")
     rules = Rules({"categories": [{"name": "Acme", "folder": "Acme"}]},
@@ -47,9 +101,109 @@ def test_apply_rejects_automatic_and_rescan_sources_without_moving(tmp_path):
         ok, message = engine.apply(
             _decision(source), "Acme", [], decided_by=source_type)
         assert not ok
-        assert "bekräft" in message.lower()
+        assert "exakt" in message.lower()
         assert source.exists()
         assert not (tmp_path / "out" / "Acme" / source.name).exists()
+
+
+def test_exact_support_match_can_move_during_rescan(tmp_path):
+    source = tmp_path / "invoice.pdf"
+    source.write_bytes(b"unchanged")
+    rules = Rules({"categories": [{
+        "name": "Acme", "folder": "Acme",
+        "keywords": [{"text": "Acme", "weight": 1.0}],
+    }]}, tmp_path / "rules.json")
+    engine = P.SortEngine(rules, {
+        "output_dir": str(tmp_path / "out"), "year_subfolder": False,
+        "date_enabled": False,
+    })
+    decision = P.decide(rules, P.Extraction(
+        path=source, text="Acme invoice"), {"learned_matching": False})
+
+    ok, _ = engine.apply(decision, "Acme", decision.best.matched,
+                         decided_by="rescan")
+
+    assert ok
+    assert not source.exists()
+    assert (tmp_path / "out" / "Acme" / "invoice.pdf").exists()
+
+
+def test_clear_all_support_words_preserves_categories(tmp_path):
+    rules = Rules({"categories": [
+        {"name": "Acme", "folder": "Acme",
+         "keywords": [{"text": "Acme", "weight": 1.0}]},
+        {"name": "Other", "folder": "Other",
+         "keywords": [{"text": "Other", "weight": 1.0}]},
+    ]}, tmp_path / "rules.json")
+    app = P.App.__new__(P.App)
+    app.rules = rules
+    app.root = object()
+    app.messagebox = type("MessageBox", (), {
+        "askyesno": staticmethod(lambda *_args, **_kwargs: True),
+    })
+    app._refresh_categories = lambda: None
+    app._log = lambda *_args, **_kwargs: None
+
+    P.App._kw_clear_all(app)
+
+    assert rules.names() == ["Acme", "Other"]
+    assert all(not cat["keywords"] for cat in rules.categories)
+
+
+def test_rescan_worker_moves_exact_support_match(tmp_path, monkeypatch):
+    source = tmp_path / "learned-exact.pdf"
+    source.write_bytes(b"matching content")
+    rules = Rules({"categories": [{
+        "name": "Acme", "folder": "Acme",
+        "keywords": [{"text": "Acme", "weight": 1.0}],
+    }]}, tmp_path / "rules.json")
+    real_engine = P.SortEngine(rules, {
+        "output_dir": str(tmp_path / "out"), "year_subfolder": False,
+        "date_enabled": False,
+    })
+
+    class Engine:
+        def analyze(self, path):
+            return P.decide(rules, P.Extraction(
+                path=path, text="Acme invoice"), {"learned_matching": False})
+
+        def apply(self, *args, **kwargs):
+            return real_engine.apply(*args, **kwargs)
+
+        def flush_rules(self):
+            return None
+
+    monkeypatch.setattr(P, "append_history", lambda _event: None)
+    monkeypatch.setattr(P, "json_dir", lambda: tmp_path / "app-json")
+    app = _bare_app()
+    app.engine = Engine()
+    app.rules = rules
+    app._rescanning = True
+
+    P.App._rescan_worker(app, [source], "Acme")
+
+    assert not source.exists()
+    assert (tmp_path / "out" / "Acme" / source.name).exists()
+
+
+def test_subfolder_override_is_relative_and_traversal_is_rejected(tmp_path):
+    source = tmp_path / "invoice.pdf"
+    source.write_bytes(b"unchanged")
+    rules = Rules({"categories": [{"name": "Acme", "folder": "Acme"}]},
+                  tmp_path / "rules.json")
+    engine = P.SortEngine(rules, {
+        "output_dir": str(tmp_path / "out"), "year_subfolder": False,
+        "date_enabled": False,
+    })
+    decision = P.Decision(source, P.Extraction(path=source), [], "ask")
+
+    ok, _ = engine.apply(decision, "Acme", [], decided_by="user",
+                         subfolder_override="Reviewed/2025")
+
+    assert ok
+    assert (tmp_path / "out" / "Acme" / "Reviewed" / "2025" / "invoice.pdf").exists()
+    assert P.validate_subfolder_override("../escape")[1]
+    assert P.validate_subfolder_override("C:\\outside")[1]
 
 
 def _bare_app() -> P.App:
@@ -66,10 +220,16 @@ def _bare_app() -> P.App:
     return app
 
 
-def test_watch_handler_queues_high_confidence_match_for_confirmation(tmp_path):
+class _RejectInexactEngine:
+    def apply(self, *_args, **_kwargs):
+        return False, "Automatisk flyttning kräver en exakt stödordsträff."
+
+
+def test_watch_handler_queues_non_exact_match_for_review(tmp_path):
     source = tmp_path / "watched.pdf"
     source.write_bytes(b"keep in input")
     app = _bare_app()
+    app.engine = _RejectInexactEngine()
     decision = _decision(source)
 
     P.App._handle(app, decision, from_watch=True)
@@ -77,19 +237,16 @@ def test_watch_handler_queues_high_confidence_match_for_confirmation(tmp_path):
     assert source.exists()
     assert len(app.queue) == 1
     assert app.queue[0].status == "ask"
-    assert "bekräfta" in app.queue[0].reason.lower()
+    assert "exakt" in app.queue[0].reason.lower()
 
 
-def test_rescan_only_queues_suggestions_and_never_applies(tmp_path):
+def test_rescan_queues_inexact_auto_decision_after_apply_rejects(tmp_path):
     source = tmp_path / "learned-match.pdf"
     source.write_bytes(b"keep in input")
 
-    class Engine:
+    class Engine(_RejectInexactEngine):
         def analyze(self, path):
             return _decision(path)
-
-        def apply(self, *_args, **_kwargs):
-            raise AssertionError("rescan must never move files")
 
     app = _bare_app()
     app.engine = Engine()
@@ -103,40 +260,37 @@ def test_rescan_only_queues_suggestions_and_never_applies(tmp_path):
     assert app.queue[0].status == "ask"
 
 
-def test_learned_queue_refreshes_suggestion_without_moving_file(tmp_path, monkeypatch):
+def test_learned_queue_refreshes_suggestion_and_keeps_inexact_file(tmp_path,
+                                                                   monkeypatch):
     source = tmp_path / "queued.pdf"
     source.write_bytes(b"review me")
     existing = P.Decision(source, P.Extraction(path=source), [], "ask")
     suggested = _decision(source, "auto")
     monkeypatch.setattr(P, "decide", lambda *_args: suggested)
 
-    class Engine:
-        def apply(self, *_args, **_kwargs):
-            raise AssertionError("learning may suggest, not move")
-
     app = _bare_app()
     app.queue = [existing]
     app._queued_paths = {str(source)}
     app.rules = Rules({"categories": []}, tmp_path / "rules.json")
-    app.engine = Engine()
+    app.engine = _RejectInexactEngine()
 
     P.App._apply_rule_to_queue(app, 0)
 
     assert source.exists()
     assert app.queue[0] is suggested
     assert app.queue[0].status == "ask"
-    assert "bekräfta" in app.queue[0].reason.lower()
+    assert "exakt" in app.queue[0].reason.lower()
 
 
-def test_cli_no_ask_flag_still_leaves_suggested_file_in_input(tmp_path, monkeypatch,
-                                                                capsys):
+def test_cli_no_ask_flag_still_checks_exact_support_match(tmp_path, monkeypatch,
+                                                          capsys):
     incoming = tmp_path / "incoming"
     incoming.mkdir()
     source = incoming / "invoice.pdf"
     source.write_bytes(b"do not move")
     output = tmp_path / "archive"
 
-    class Engine:
+    class Engine(_RejectInexactEngine):
         stats = {"sorted": 0, "unmatched": 0, "left": 1, "error": 0}
 
         def __init__(self, *_args, **_kwargs):
@@ -144,9 +298,6 @@ def test_cli_no_ask_flag_still_leaves_suggested_file_in_input(tmp_path, monkeypa
 
         def analyze(self, path):
             return _decision(path)
-
-        def apply(self, *_args, **_kwargs):
-            raise AssertionError("CLI must not auto-apply a suggestion")
 
     monkeypatch.setattr(P, "load_settings", lambda: {
         "input_dir": str(incoming), "output_dir": str(output),
