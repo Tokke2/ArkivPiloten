@@ -64,6 +64,17 @@ def test_cancel_button_sets_event_and_reports_safe_stop():
     assert any("övriga filer lämnas kvar" in entry[0] for entry in logs)
 
 
+def test_compact_action_layout_keeps_progress_off_the_error_counters():
+    source = Path(P.__file__).read_text(encoding="utf-8")
+    start = source.index("        def layout_actions(_event=None):")
+    end = source.index("        actcard.bind(\"<Configure>\", layout_actions", start)
+    layout = source[start:end]
+
+    assert 'stats.grid_configure(row=2, column=0, columnspan=3' in layout
+    assert 'self.progress.grid_configure(row=3, column=0, columnspan=3' in layout
+    assert 'self.lbl_progress.grid_configure(row=4, column=0' in layout
+
+
 def test_startup_schedules_task_maintenance_but_not_package_install():
     source = (Path(P.__file__).read_text(encoding="utf-8"))
     assert "_autoinstallera_tillagg" not in source

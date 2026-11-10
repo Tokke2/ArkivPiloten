@@ -6885,15 +6885,23 @@ class App:
                 watch_status.grid_configure(row=1, column=0, columnspan=3,
                                             sticky="ew", padx=T.INNER,
                                             pady=(0, 4))
-                stats.grid_configure(row=2, column=0, columnspan=2,
+                # Keep the three counters on their own full-width row. The
+                # progress bar used to share their row and could cover the
+                # rightmost "fel" counter in a compact window.
+                stats.grid_configure(row=2, column=0, columnspan=3,
                                      sticky="w", padx=T.INNER)
-                self.progress.grid_configure(row=2, column=2, padx=(6, T.INNER))
-                self.progress.configure(length=120)
-                self.pill_dry.grid_configure(row=3, column=0, padx=T.INNER)
-                self.lbl_progress.grid_configure(row=3, column=1, columnspan=2,
-                                                 sticky="e", padx=T.INNER)
+                self.progress.grid_configure(row=3, column=0, columnspan=3,
+                                             sticky="ew", padx=T.INNER,
+                                             pady=(6, 0))
+                self.progress.configure(length=200)
+                self.lbl_progress.configure(width=0, anchor="w")
+                self.lbl_progress.grid_configure(row=4, column=0,
+                                                 columnspan=2, sticky="w",
+                                                 padx=T.INNER, pady=(2, 0))
+                self.pill_dry.grid_configure(row=4, column=2, sticky="e",
+                                             padx=T.INNER)
                 for col in range(3):
-                    actcard.columnconfigure(col, weight=1 if col == 2 else 0)
+                    actcard.columnconfigure(col, weight=1)
                 actcard.columnconfigure(3, weight=0)
             else:
                 self.btn_sort.grid_configure(row=0, column=0,
@@ -6905,9 +6913,11 @@ class App:
                 stats.grid_configure(row=1, column=0, sticky="w",
                                      padx=(T.INNER, 8))
                 self.progress.grid_configure(row=1, column=1,
-                                             padx=(8, 0), sticky="ew")
+                                             padx=(8, 0), pady=0, sticky="ew")
                 self.progress.configure(length=170)
-                self.pill_dry.grid_configure(row=1, column=2, padx=(10, 0))
+                self.pill_dry.grid_configure(row=1, column=2, padx=(10, 0),
+                                             sticky="w")
+                self.lbl_progress.configure(width=16, anchor="e")
                 self.lbl_progress.grid_configure(row=1, column=3,
                                                  padx=(6, T.INNER), sticky="e")
                 actcard.columnconfigure(0, weight=0)
