@@ -1331,6 +1331,8 @@ som träffar bokstavligt och inte finns i andra kategorier; övriga fall kräver
   i bakgrunden. Samma 100 bekräftelser och två kategoriexklusiva exakta träffar krävs; övriga läggs i kön.
 - AC-2.5 Manuellt valda undermappar per fil sparas som användarvalda dokumenttyper. Efter minst 100 manuella bekräftelser i huvudkategorin får en typundermapp väljas automatiskt först när minst två typer har fem manuella exempel vardera, två särskiljande typord träffar och modellen är säker; annars skickas filen till granskning.
 - AC-2.6 Granskningsrutans PDF-förhandsvisning kan valfritt rita en ruta runt markerbar text och spara text, sidnummer, relativ sidposition och vald undermapp som mall. Aktiva mallar kräver samma normaliserade text i samma sidområde; mallar är av/på-valbara per kategori. Ingen eller motstridig mallträff lämnar filen för granskning. Mallar kringgår aldrig 100 manuella bekräftelser eller de två kategoriexklusiva stödorden.
+- AC-2.7 I kategoriredigeraren kan användaren dra sparade stödord från en lista till befintliga eller uttryckligen angivna undermappar, se aktuella kopplingar och välja exakt ett standardord för kategorin. Ett kopplat ord avgör endast undermapp efter att den separata kategorisäkerheten är uppfylld; utebliven eller motstridig undermappsträff lämnar filen för granskning.
+- AC-2.8 När Arkivbevakning är aktiverad kontrollerar appen regelbundet PDF:er under den konfigurerade arkivroten. Den ignorerar mappar som inte motsvarar en aktiv kategori, flyttar endast vid samma säkra kategorikrav som vanlig autosortering och en entydig undermapp, och lägger möjliga men osäkra felplaceringar i granskningskön. Originalet skrivs aldrig över.
 
 ### REQ-F3 (M) — Flikar
 **AC-F3:**

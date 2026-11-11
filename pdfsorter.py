@@ -86,7 +86,7 @@ from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta  # noqa: F401
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 try:
     import pdfsorter_diag as diag
@@ -1891,6 +1891,12 @@ def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, Lis
                 _EXACT_PATTERN_CACHE[word] = pattern
             if pattern.search(body):
                 found.append(word)
+        # A user-selected category anchor must also be present. It is still
+        # only one part of the proof: auto-moves retain the two-exclusive-word
+        # floor and the 100 manually confirmed files requirement.
+        default_word = normalize(cat.get("default_keyword", ""))
+        if default_word and default_word not in found:
+            continue
         # One exact keyword can be coincidental; auto-moves require at least
         # two distinct user-saved support words, even if the category asks for 1.
         required = max(2, int(cat.get("min_keywords", 0) or 0))
@@ -1983,6 +1989,76 @@ def create_pdf_subfolder_template(path: Path, page_index: int,
         "enabled": True,
         "created": now_iso(),
     }
+
+
+def subfolder_keyword_matches(rules: Rules, category: str,
+                              extraction: Extraction) -> Tuple[set, bool]:
+    """Return mapped folders matched literally and whether active links exist."""
+    cat = rules.get(category)
+    mapping = cat.get("subfolder_keyword_map", {}) if cat else {}
+    if not isinstance(mapping, dict) or not mapping:
+        return set(), False
+    body = normalize(getattr(extraction, "text", "") or "")
+    if not body:
+        return set(), True
+    words = {normalize(kw.get("text", "")): kw for kw in cat.get("keywords", [])}
+    matched_folders = set()
+    active_mappings = 0
+    for raw_word, raw_folder in mapping.items():
+        word = normalize(raw_word)
+        kw = words.get(word)
+        folder, error = validate_subfolder_override(str(raw_folder or ""))
+        if (not word or not kw or error or not folder
+                or not kw.get("whole_word", True)
+                or float(kw.get("weight", 1.0) or 0.0) <= 0
+                or int(kw.get("rejected", 0) or 0) > 0
+                or _reject_factor(kw) <= 0):
+            continue
+        active_mappings += 1
+        pattern = _EXACT_PATTERN_CACHE.get(word)
+        if pattern is None:
+            pattern = _kw_pattern({"text": word, "whole_word": True})
+            if len(_EXACT_PATTERN_CACHE) >= 4000:
+                _EXACT_PATTERN_CACHE.clear()
+            _EXACT_PATTERN_CACHE[word] = pattern
+        if pattern.search(body):
+            matched_folders.add(folder)
+    return matched_folders, bool(active_mappings)
+
+
+def match_subfolder_keyword(rules: Rules, category: str,
+                            extraction: Extraction) -> Tuple[str, bool]:
+    """Resolve exact user-mapped support words to one subfolder or review."""
+    matched_folders, has_mappings = subfolder_keyword_matches(
+        rules, category, extraction)
+    if not has_mappings:
+        return "", False
+    return (next(iter(matched_folders)), True) if len(matched_folders) == 1 else ("", True)
+
+
+def resolve_automatic_subfolder(rules: Rules, category: str,
+                                extraction: Extraction) -> Tuple[str, str]:
+    """Return (folder, error) for configured keyword/template/learned routing."""
+    mapped_targets, has_mappings = subfolder_keyword_matches(
+        rules, category, extraction)
+    if len(mapped_targets) > 1:
+        return "", "Kopplade undermappsstödord pekar på olika mappar."
+    if len(mapped_targets) == 1:
+        return next(iter(mapped_targets)), ""
+    template, has_templates = match_subfolder_template(rules, category, extraction)
+    if has_templates:
+        if template:
+            return template, ""
+        return "", "Områdesmallarna matchar inte entydigt någon undermapp."
+    learned, has_examples = learned_manual_subfolder(category, extraction)
+    if learned:
+        return learned, ""
+    if has_examples:
+        return "", ("Dokumenttypen kan inte placeras säkert i en undermapp "
+                    "utifrån tidigare manuella val.")
+    if has_mappings:
+        return "", "Inget kopplat undermappsstödord matchade filen."
+    return "", ""
 
 
 def match_subfolder_template(rules: Rules, category: str,
@@ -2846,6 +2922,34 @@ class SortEngine:
                 sub = "/".join([str(year), *levels])
         return sub, when, källa
 
+    def destination_for(self, decision: Decision, category: str,
+                        subfolder_override: str = "", *,
+                        automatic: bool = False) -> Tuple[Optional[Path], str]:
+        """Resolve the same output path used by apply(), without touching files."""
+        cat = self.rules.get(category)
+        if not cat:
+            return None, "Kategorin finns inte längre."
+        if automatic and not subfolder_override:
+            subfolder_override, error = resolve_automatic_subfolder(
+                self.rules, category, decision.extraction)
+            if error:
+                return None, error
+        sub, _when, _source = self.subfolder_for(
+            decision.extraction, cat.get("subfolder", ""))
+        category_sub, error = validate_subfolder_override(
+            cat.get("subfolder_path", ""))
+        if error:
+            return None, error
+        manual_sub, error = validate_subfolder_override(subfolder_override)
+        if error:
+            return None, error
+        parts = [part for part in (sub, category_sub, manual_sub) if part]
+        folder = Path(self.settings["output_dir"]) / safe_folder_name(cat["folder"])
+        for part in "/".join(parts).split("/"):
+            if part:
+                folder /= safe_folder_name(part)
+        return folder / decision.path.name, ""
+
     def _fil_ändrad(self, decision: Decision) -> bool:
         """Har filen på disk andra byte än den som analyserades?
 
@@ -3074,24 +3178,11 @@ class SortEngine:
                                "och hundra tidigare manuella bekräftelser där. "
                                "Filen ligger kvar för granskning.")
             if decided_by in {"auto", "rescan"} and not subfolder_override:
-                template_sub, has_templates = match_subfolder_template(
+                subfolder_override, routing_error = resolve_automatic_subfolder(
                     self.rules, category, decision.extraction)
-                if has_templates:
-                    if not template_sub:
-                        self.stats["left"] += 1
-                        return False, ("Områdesmallarna matchar inte entydigt "
-                                       "någon undermapp. Filen lämnas för granskning.")
-                    subfolder_override = template_sub
-                else:
-                    learned_sub, has_type_examples = learned_manual_subfolder(
-                        category, decision.extraction)
-                    if has_type_examples and not learned_sub:
-                        self.stats["left"] += 1
-                        return False, ("Dokumenttypen kan inte placeras säkert i en "
-                                       "undermapp utifrån dina tidigare val. Filen "
-                                       "lämnas för granskning.")
-                    if learned_sub:
-                        subfolder_override = learned_sub
+                if routing_error:
+                    self.stats["left"] += 1
+                    return False, routing_error + " Filen lämnas för granskning."
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
                 return False, ("Filen ändrades efter analysen - lämnas "
@@ -3126,7 +3217,13 @@ class SortEngine:
                             dest_dir = dest_dir / safe_folder_name(nivå)
                 namnkrock = dest_dir / decision.path.name
                 if namnkrock.exists():
-                    conflict = "name"
+                    try:
+                        same_source_path = (namnkrock.resolve()
+                                            == decision.path.resolve())
+                    except OSError:
+                        same_source_path = False
+                    if not same_source_path:
+                        conflict = "name"
                 elif decision.path.exists():
                     # Innehållsdubblett var som helst under vald målmapp,
                     # även om filnamn, kategori eller årsmapp skiljer sig.
@@ -5580,11 +5677,35 @@ class ReviewDialog:
                    "mapp. Esc visar alla mappar.")
         lbl.configure(text=msg)
 
+    def _suggest_mapped_subfolder(self) -> None:
+        """Prefill a uniquely mapped type after the user confirms a category."""
+        category = self._category()
+        cat = self.rules.get(category) if category else None
+        if not cat:
+            return
+        previous = getattr(self, "_mapped_subfolder_suggestion", "")
+        if previous and self.var_subfolder.get() == previous:
+            self.var_subfolder.set("")
+        self._mapped_subfolder_suggestion = ""
+        mapped, has_mappings = match_subfolder_keyword(
+            self.rules, category, self.decision.extraction)
+        if mapped:
+            if not self.var_subfolder.get().strip():
+                self.var_subfolder.set(mapped)
+                self._mapped_subfolder_suggestion = mapped
+                self._update_subfolder_hint()
+        elif has_mappings:
+            label = getattr(self, "lbl_subfolder_hint", None)
+            if label is not None:
+                label.configure(text=("Flera eller inga kopplade stödord avgör "
+                                     "undermappen. Välj den manuellt före flytt."))
+
     def _combo_chosen(self, event=None) -> None:
         self.combo._replace_on_type = True
         self.mode.set("existing")
         self._sync()
         self.new_entry.delete(0, "end")
+        self._suggest_mapped_subfolder()
         # Efter valet ska nästa sökning börja från hela kategorilistan.
         self.combo["values"] = self._all_categories
         self.combo._ta_seed = ""
@@ -6588,6 +6709,13 @@ _UI_EN = {
     "Start": "Home", "Kategorier": "Categories",
     "Avancerat": "Advanced", "Inställningar": "Settings",
     "Granska": "Review", "Historik": "History", "Hjälp": "Help",
+    "Koppla stödord till undermappar…": "Map support words to subfolders…",
+    "Bevaka Arkiv efter PDF-filer i fel mapp": "Watch Archive for misplaced PDFs",
+    "STÖDORD": "SUPPORT WORDS", "UNDERMAPPAR": "SUBFOLDERS",
+    "KOPPLING": "MAPPING", "KOPPLADE STÖDORD": "LINKED SUPPORT WORDS",
+    "Använd markerat som standardord": "Use selected as the default word",
+    "+ Lägg till undermapp…": "+ Add subfolder…",
+    "Koppla loss markerat": "Unlink selected", "Klart": "Done",
     "PDF-sortering, enkelt och säkert": "PDF sorting, simply and safely",
     "Sortera dina PDF-filer": "Sort your PDF files",
     "Välj PDF-mappar": "Choose PDF folders",
@@ -7167,6 +7295,8 @@ class App:
         except Exception:
             pass
         self.watcher: Optional[MultiFolderWatcher] = None
+        self.archive_watcher: Optional[MultiFolderWatcher] = None
+        self._archive_watch_root: Optional[Path] = None
         # Senaste aktivitet från bevakningen visas på handlingsraden. Tiderna
         # gäller den här appkörningen; trådlås behövs eftersom varje mapp har
         # en egen watcher-tråd.
@@ -7389,6 +7519,8 @@ class App:
             self._h("bevaka", "Bevakningen återupptas efter omstarten "
                     "(den var på när appen uppdaterades)")
             self.root.after(400, lambda: self._start_watch(quiet=True))
+        if self.settings.get("archive_watch_enabled", True):
+            self.root.after(650, self._sync_archive_watch)
 
         # På Windows säkerställs bara att veckouppgiften finns. Ingen kontroll
         # eller pip-uppdatering av tillägg körs vid vanlig appstart.
@@ -8048,9 +8180,10 @@ class App:
         outbox = outcard.body
         outbox.columnconfigure(0, weight=1)
         self.var_out = tk.StringVar(value=self.settings.get("output_dir", ""))
-        ttk.Entry(outbox, textvariable=self.var_out).grid(
-            row=0, column=0, columnspan=2, sticky="ew",
-            padx=T.INNER, pady=(T.INNER, 8))
+        out_entry = ttk.Entry(outbox, textvariable=self.var_out)
+        out_entry.grid(row=0, column=0, columnspan=2, sticky="ew",
+                       padx=T.INNER, pady=(T.INNER, 8))
+        out_entry.bind("<FocusOut>", lambda _event: self._collect_settings())
         ttk.Button(outbox, text="Bläddra…", command=lambda: self._pick(self.var_out)
                    ).grid(row=1, column=0, sticky="ew", padx=(T.INNER, 4),
                           pady=(0, T.INNER))
@@ -8534,6 +8667,8 @@ class App:
         self.var_min_tray = tk.BooleanVar(
             value=self.settings.get("minimize_to_tray", True))
         self.var_autowatch = tk.BooleanVar(value=self.settings.get("autowatch_on_start", False))
+        self.var_archive_watch = tk.BooleanVar(
+            value=self.settings.get("archive_watch_enabled", True))
         self.var_notify = tk.BooleanVar(value=self.settings.get("notify", True))
 
         cb_auto = ttk.Checkbutton(sysbox, text="Starta automatiskt med datorn",
@@ -8565,6 +8700,11 @@ class App:
                         style="Card.TCheckbutton",
                         variable=self.var_notify).grid(row=2, column=2, columnspan=2,
                                                        sticky="w", padx=8, pady=2)
+        ttk.Checkbutton(
+            sysbox, text="Bevaka Arkiv efter PDF-filer i fel mapp",
+            style="Card.TCheckbutton", variable=self.var_archive_watch,
+            command=self._collect_settings
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=8, pady=2)
         # Uppdateringarna har ett eget kort längre ned (2026-10-26).
         # Kryssrutorna låg här förut, men de hörde inte ihop med
         # autostart och systemfält - och de syntes bara om man rullade.
@@ -8970,9 +9110,16 @@ class App:
         if not hasattr(self, "pill_dry"):
             return
         watching = bool(self.watcher and self.watcher.running)
-        self.lbl_watch.configure(
-            text="● Bevakning: PÅ" if watching else "● Bevakning: AV",
-            style="PillOk.TLabel" if watching else "PillMuted.TLabel")
+        archive_watching = bool(self.archive_watcher and self.archive_watcher.running)
+        if watching and archive_watching:
+            watch_text, watch_style = "● Bevakning: PÅ · inmappar + Arkiv", "PillOk.TLabel"
+        elif watching:
+            watch_text, watch_style = "● Bevakning: PÅ · inmappar", "PillOk.TLabel"
+        elif archive_watching:
+            watch_text, watch_style = "● Arkivkontroll: PÅ", "PillOk.TLabel"
+        else:
+            watch_text, watch_style = "● Bevakning: AV", "PillMuted.TLabel"
+        self.lbl_watch.configure(text=watch_text, style=watch_style)
         self._refresh_watch_activity()
         if self.var_dry.get():
             self.pill_dry.grid()
@@ -9064,6 +9211,8 @@ class App:
         chosen = self.filedialog.askdirectory(initialdir=cur, parent=self.root)
         if chosen:
             var.set(chosen)
+            if var is getattr(self, "var_out", None):
+                self._collect_settings()
 
     # -- inmappar ---------------------------------------------------------
     def input_dirs(self) -> List[str]:
@@ -9121,6 +9270,7 @@ class App:
         self.settings["input_dir"] = dirs[0]
         save_settings(self.settings)
         self._refresh_input_list()
+        self._sync_archive_watch()
         self._log(f"Lade till inmapp: {chosen}", "info")
         if self.watcher and self.watcher.running:
             self._restart_watch()
@@ -9138,6 +9288,7 @@ class App:
         self.settings["input_dir"] = dirs[0] if dirs else ""
         save_settings(self.settings)
         self._refresh_input_list()
+        self._sync_archive_watch()
         if self.watcher and self.watcher.running:
             self._restart_watch()
 
@@ -9245,6 +9396,7 @@ class App:
         self.settings["exclude_dirs"] = exc
         save_settings(self.settings)
         self._refresh_excludes()
+        self._sync_archive_watch()
         self._log(f"Undantagen mapp (hoppas över): {chosen}", "info")
         if self.watcher and self.watcher.running:
             self._restart_watch()
@@ -9261,6 +9413,7 @@ class App:
         self.settings["exclude_dirs"] = exc
         save_settings(self.settings)
         self._refresh_excludes()
+        self._sync_archive_watch()
         if self.watcher and self.watcher.running:
             self._restart_watch()
 
@@ -9325,6 +9478,7 @@ class App:
             "minimize_to_tray": bool(self.var_min_tray.get()),
             "start_minimized": True,
             "autowatch_on_start": bool(self.var_autowatch.get()),
+            "archive_watch_enabled": bool(self.var_archive_watch.get()),
             "notify": bool(self.var_notify.get()),
             "autostart": bool(self.var_autostart.get()),
             "check_updates": bool(self.var_checkupd.get()),
@@ -9354,6 +9508,8 @@ class App:
                 or self.settings.get("ocr_quality", "high") != tidigare_kvalitet):
             TEXT_CACHE.clear()
         save_settings(self.settings)
+        if hasattr(self, "archive_watcher"):
+            self._sync_archive_watch()
         self._update_pills()
         self._refresh_update_status()
         session_log("inställningar",
@@ -9708,6 +9864,169 @@ class App:
             self.watcher = None
             self._start_watch(quiet=True)
 
+    def _stop_archive_watch(self) -> None:
+        watcher = getattr(self, "archive_watcher", None)
+        if watcher:
+            watcher.stop()
+        self.archive_watcher = None
+        self._archive_watch_root = None
+        if hasattr(self, "lbl_watch"):
+            self._update_pills()
+
+    def _sync_archive_watch(self) -> None:
+        """Starta den separata arkivkontrollen när Arkiv-bevakning är på."""
+        if not getattr(self, "settings", {}).get("archive_watch_enabled", True):
+            self._stop_archive_watch()
+            return
+        output = str(getattr(self, "settings", {}).get("output_dir", "") or "").strip()
+        if not output:
+            self._stop_archive_watch()
+            return
+        root = Path(output).expanduser()
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            root = root.resolve()
+        except OSError as exc:
+            self._log(f"Arkivbevakning kunde inte starta: {exc}", "warn")
+            self._stop_archive_watch()
+            return
+        for input_dir in getattr(self, "settings", {}).get("input_dirs", []) or []:
+            source = Path(input_dir).expanduser()
+            if source.exists() and (source.resolve() == root
+                                    or _inuti(root, source)
+                                    or _inuti(source, root)):
+                self._log("Arkivbevakning stoppades: arkiv- och inmapp överlappar.",
+                          "warn")
+                self._stop_archive_watch()
+                return
+        if (self.archive_watcher and self.archive_watcher.running
+                and self._archive_watch_root == root):
+            return
+        self._stop_archive_watch()
+        interval = max(10.0, float(self.settings.get(
+            "archive_watch_interval", 30.0) or 30.0))
+        self.archive_watcher = MultiFolderWatcher(
+            [root], on_file=self._on_archived_file,
+            interval=interval,
+            stable_seconds=float(self.settings.get("stable_seconds", 3.0)),
+            recursive=True,
+            excludes=self.settings.get("exclude_dirs", []),
+        )
+        self._archive_watch_root = root
+        self.archive_watcher.start()
+        if hasattr(self, "lbl_watch"):
+            self._update_pills()
+        self._log(f"Bevakar Arkiv efter felplacerade PDF-filer: {root} "
+                  f"(kontroll var {interval:g}:e sekund).", "info")
+
+    def _on_archived_file(self, path: Path) -> None:
+        """Safely flag or correct a PDF whose archive path conflicts with rules."""
+        watcher = getattr(self, "archive_watcher", None)
+        if not watcher or not watcher.running:
+            return
+        try:
+            root = Path(self.settings.get("output_dir", "")).resolve()
+            relative = Path(path).resolve().relative_to(root)
+        except (OSError, ValueError):
+            return
+        if len(relative.parts) < 2:
+            return
+        current_folder = relative.parts[0]
+        current_categories = [cat for cat in self.rules.categories
+                              if safe_folder_name(cat.get("folder", cat["name"]))
+                              == current_folder]
+        if len(current_categories) != 1:
+            return
+        current_cat = current_categories[0]
+        if not current_cat.get("enabled", True):
+            return
+        try:
+            decision = self.engine.analyze(Path(path))
+        except Exception as exc:
+            self._log_threadsafe(f"Arkivkontroll kunde inte läsa {Path(path).name}: {exc}",
+                                 "warn")
+            return
+        if decision.status in {"ignored", "error"}:
+            return
+
+        exact = exact_support_matches(self.rules, decision.extraction)
+        if len(exact) == 1:
+            target_category = next(iter(exact))
+        elif decision.status == "auto" and decision.best:
+            target_category = decision.best.name
+        else:
+            return
+        target_cat = self.rules.get(target_category)
+        if not target_cat or not target_cat.get("enabled", True):
+            return
+        category_changed = target_cat["name"] != current_cat["name"]
+
+        # For the same category, only audit a subfolder when a user has
+        # configured an exact word/template or confirmed manual types. Merely
+        # lacking a route is not proof that an existing folder is wrong.
+        mapped_sub, has_mapping = match_subfolder_keyword(
+            self.rules, target_category, decision.extraction)
+        mapped_targets, _active_mappings = subfolder_keyword_matches(
+            self.rules, target_category, decision.extraction)
+        template_sub, has_template = match_subfolder_template(
+            self.rules, target_category, decision.extraction)
+        _learned_sub, has_learned_types = learned_manual_subfolder(
+            target_category, decision.extraction)
+        has_type_rules = has_mapping or has_template or has_learned_types
+        if not category_changed and not has_type_rules:
+            return
+
+        if decision.status == "auto":
+            expected, error = self.engine.destination_for(
+                decision, target_category, automatic=True)
+        elif has_mapping and mapped_sub:
+            expected, error = self.engine.destination_for(
+                decision, target_category, mapped_sub)
+        elif has_template and template_sub:
+            expected, error = self.engine.destination_for(
+                decision, target_category, template_sub)
+        elif has_learned_types and _learned_sub:
+            expected, error = self.engine.destination_for(
+                decision, target_category, _learned_sub)
+        else:
+            expected, error = None, "Dokumenttypen matchar inte entydigt."
+
+        if expected is not None and not error:
+            try:
+                if expected.resolve() == Path(path).resolve():
+                    return
+            except OSError:
+                pass
+        if not category_changed and not (has_mapping and mapped_sub
+                                         or has_template and template_sub
+                                         or has_learned_types and _learned_sub):
+            # No matching folder word just means we cannot infer its type.
+            # Multiple mapped destinations are a real conflict, so queue them.
+            unresolved_template = has_template and not template_sub
+            unresolved_learned = has_learned_types and not _learned_sub
+            if len(mapped_targets) < 2 and not unresolved_template and not unresolved_learned:
+                return
+        if decision.status == "auto" and self.settings.get("action", "move") == "move" \
+                and not self.settings.get("dry_run", False) and not error:
+            ok, message = self.engine.apply(
+                decision, target_category,
+                decision.best.matched if decision.best else [], "auto")
+            if ok:
+                self._log_threadsafe(
+                    f"Arkivkontroll flyttade {Path(path).name} från "
+                    f"{current_cat['name']} till {target_cat['name']}.", "ok")
+                self._note_watch_activity(sorted_file=True)
+                return
+            decision.status = "ask"
+            decision.reason = message
+        else:
+            decision.status = "ask"
+            decision.reason = ("Arkivkontrollen hittade en möjlig felplacering "
+                               f"(nu: {current_cat['name']}, förslag: "
+                               f"{target_cat['name']}). "
+                               + (error or "Bekräfta rätt kategori/undermapp."))
+        self._handle(decision, from_watch=True)
+
     def _on_watched_file(self, path: Path) -> None:
         # En watcher-tråd kan precis hinna lämna sin callback när användaren
         # stänger av bevakningen. Kontrollera tillståndet innan någon analys
@@ -9904,6 +10223,10 @@ class App:
         self.spin_catkw.bind("<FocusOut>", lambda e: self._cat_save_kw())
         self.lbl_catkw = ttk.Label(krav, text="", style="CardMuted.TLabel")
         self.lbl_catkw.pack(side="left", padx=10)
+        ttk.Button(
+            meta, text="Koppla stödord till undermappar…",
+            command=self._open_subfolder_keyword_editor
+        ).grid(row=5, column=0, columnspan=5, sticky="w", pady=(8, 0))
 
         cols = ("word", "kind", "weight", "whole", "hits")
         self.kw_tree = ttk.Treeview(right, columns=cols, show="headings",
@@ -10448,6 +10771,284 @@ class App:
                   else "")
         self.lbl_sub_ex.configure(
             text=f"idag → {cat['folder']}/{example}/" + suffix)
+
+    def _subfolder_mapping_options(self, cat: Dict[str, Any],
+                                   extra: Iterable[str] = ()) -> List[str]:
+        """Existing document-type folders under a category, plus saved targets."""
+        folders = set()
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if output:
+            base = self._category_subfolder_base(cat)
+            category_sub, error = validate_subfolder_override(
+                str(cat.get("subfolder_path", "") or ""))
+            if not error:
+                for part in category_sub.split("/"):
+                    if part:
+                        base /= safe_folder_name(part)
+            if base.is_dir():
+                try:
+                    for path in base.rglob("*"):
+                        if not path.is_dir():
+                            continue
+                        try:
+                            relative = path.relative_to(base)
+                        except ValueError:
+                            continue
+                        if relative.parts:
+                            folders.add(relative.as_posix())
+                except OSError:
+                    pass
+        for mapping in (cat.get("subfolder_keyword_map", {}),):
+            if isinstance(mapping, dict):
+                for raw in mapping.values():
+                    value, error = validate_subfolder_override(str(raw or ""))
+                    if value and not error:
+                        folders.add(value)
+        for template in cat.get("subfolder_templates", []):
+            if isinstance(template, dict):
+                value, error = validate_subfolder_override(
+                    str(template.get("folder", "")))
+                if value and not error:
+                    folders.add(value)
+        for raw in extra:
+            value, error = validate_subfolder_override(str(raw or ""))
+            if value and not error:
+                folders.add(value)
+        return sorted(folders, key=str.casefold)
+
+    def _open_subfolder_keyword_editor(self) -> None:
+        """Let the user drag category support words onto document-type folders."""
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            self.messagebox.showinfo(APP_NAME, "Välj först en kategori.", parent=self.root)
+            return
+        if not cat.get("keywords"):
+            self.messagebox.showinfo(
+                APP_NAME, "Lägg till stödord i kategorin innan du kopplar dem "
+                "till undermappar.", parent=self.root)
+            return
+
+        tk, ttk = self.tk, self.ttk
+        dialog = tk.Toplevel(self.root)
+        dialog._icon_ref = brand_window(dialog)
+        dialog.title(f"Stödord och undermappar · {cat['name']}")
+        dialog.transient(self.root)
+        screen_w = max(520, int(self.root.winfo_screenwidth()) - 80)
+        screen_h = max(380, int(self.root.winfo_screenheight()) - 120)
+        dialog_w = min(860, screen_w)
+        dialog_h = min(660, screen_h)
+        dialog.minsize(min(520, dialog_w), min(360, dialog_h))
+        dialog.geometry(f"{dialog_w}x{dialog_h}")
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(2, weight=1)
+        try:
+            dialog.configure(background=self.theme.c["bg"])
+        except Exception:
+            pass
+
+        ttk.Label(
+            dialog,
+            text=(f"{cat['name']}  ·  dra ett stödord från vänster till en "
+                  "undermapp till höger"),
+            style="CardTitle.TLabel", wraplength=dialog_w - 40, justify="left"
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 4))
+        ttk.Label(
+            dialog,
+            text=("Välj också ett standardord som ska kännas igen för kategorin. "
+                  "Ord kopplade till undermappar styr bara dokumenttypen; de "
+                  "ersätter inte kravet på säker kategorimatchning."),
+            style="CardMuted.TLabel", wraplength=dialog_w - 40, justify="left"
+        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 10))
+
+        body = ttk.Frame(dialog, style="Card.TFrame")
+        body.grid(row=2, column=0, sticky="nsew", padx=14, pady=(0, 8))
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=1)
+        ttk.Label(body, text="STÖDORD", style="CardKey.TLabel").grid(
+            row=0, column=0, sticky="w", padx=10, pady=(10, 4))
+        ttk.Label(body, text="UNDERMAPPAR", style="CardKey.TLabel").grid(
+            row=0, column=1, sticky="w", padx=10, pady=(10, 4))
+
+        left_frame = ttk.Frame(body, style="CardInner.TFrame")
+        left_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=(0, 10))
+        left_frame.columnconfigure(0, weight=1)
+        left_frame.rowconfigure(0, weight=1)
+        left_tree = ttk.Treeview(
+            left_frame, columns=("word", "mapping"), show="headings",
+            selectmode="browse", height=12)
+        left_tree.heading("word", text="STÖDORD")
+        left_tree.heading("mapping", text="KOPPLING")
+        left_tree.column("word", width=150, anchor="w", stretch=True)
+        left_tree.column("mapping", width=110, anchor="w", stretch=True)
+        left_tree.grid(row=0, column=0, sticky="nsew")
+        left_scroll = ttk.Scrollbar(left_frame, orient="vertical",
+                                   command=left_tree.yview)
+        left_scroll.grid(row=0, column=1, sticky="ns")
+        left_tree.configure(yscrollcommand=left_scroll.set)
+
+        right_frame = ttk.Frame(body, style="CardInner.TFrame")
+        right_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=(0, 10))
+        right_frame.columnconfigure(0, weight=1)
+        right_frame.rowconfigure(0, weight=1)
+        right_tree = ttk.Treeview(
+            right_frame, columns=("folder", "words"), show="headings",
+            selectmode="browse", height=12)
+        right_tree.heading("folder", text="UNDERMAPP")
+        right_tree.heading("words", text="KOPPLADE STÖDORD")
+        right_tree.column("folder", width=130, anchor="w", stretch=True)
+        right_tree.column("words", width=140, anchor="w", stretch=True)
+        right_tree.grid(row=0, column=0, sticky="nsew")
+        right_scroll = ttk.Scrollbar(right_frame, orient="vertical",
+                                     command=right_tree.yview)
+        right_scroll.grid(row=0, column=1, sticky="ns")
+        right_tree.configure(yscrollcommand=right_scroll.set)
+
+        footer = ttk.Frame(dialog, style="CardInner.TFrame")
+        footer.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
+        footer.columnconfigure(0, weight=1)
+        footer.columnconfigure(1, weight=1)
+        status = ttk.Label(footer, text="Dra stödord till en mapp för att koppla.",
+                           style="CardMuted.TLabel", wraplength=dialog_w - 48)
+        status.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        default_button = ttk.Button(
+            footer, text="Använd markerat som standardord")
+        default_button.grid(row=1, column=0, padx=(0, 4), pady=2, sticky="ew")
+        add_folder_button = ttk.Button(footer, text="+ Lägg till undermapp…")
+        add_folder_button.grid(row=1, column=1, padx=4, pady=2, sticky="ew")
+        remove_button = ttk.Button(footer, text="Koppla loss markerat")
+        remove_button.grid(row=2, column=0, padx=(0, 4), pady=2, sticky="ew")
+        ttk.Button(footer, text="Klart", command=dialog.destroy).grid(
+            row=2, column=1, padx=4, pady=2, sticky="e")
+
+        dragged = {"word": ""}
+        extra_folders = set()
+
+        def refresh(select_word: str = "") -> None:
+            mapping = cat.get("subfolder_keyword_map", {})
+            if not isinstance(mapping, dict):
+                mapping = {}
+                cat["subfolder_keyword_map"] = mapping
+            for tree in (left_tree, right_tree):
+                for item in tree.get_children():
+                    tree.delete(item)
+            for index, kw in enumerate(cat.get("keywords", [])):
+                word = normalize(kw.get("text", ""))
+                assigned = mapping.get(word, "")
+                marker = "★ standardord" if word == cat.get("default_keyword") else ""
+                shown = assigned if assigned else marker
+                left_tree.insert("", "end", iid=f"word-{index}",
+                                 values=(word, shown))
+                if word == select_word:
+                    left_tree.selection_set(f"word-{index}")
+                    left_tree.see(f"word-{index}")
+            folders = self._subfolder_mapping_options(cat, extra_folders)
+            for index, folder in enumerate(folders):
+                words = sorted((word for word, target in mapping.items()
+                                if target == folder), key=str.casefold)
+                right_tree.insert("", "end", iid=f"folder-{index}",
+                                  values=(folder, ", ".join(words)))
+
+        def set_default(_event=None) -> None:
+            selection = left_tree.selection()
+            if not selection:
+                status.configure(text="Välj först ett stödord till vänster.")
+                return
+            row = left_tree.item(selection[0], "values")
+            word = normalize(row[0]) if row else ""
+            if word:
+                cat["default_keyword"] = word
+                self.rules.save()
+                refresh(word)
+                status.configure(text=f"{word} är nu standardordet för {cat['name']}.")
+                self._refresh_categories(name)
+
+        def add_folder(_event=None) -> None:
+            value = self.simpledialog.askstring(
+                APP_NAME,
+                "Undermapp relativt kategoriens år-/datumstruktur "
+                "(exempel: Faktura eller Transaktioner/Inbetalningar):",
+                parent=dialog)
+            if value is None:
+                return
+            folder, error = validate_subfolder_override(value)
+            if error or not folder:
+                if error:
+                    self.messagebox.showwarning(APP_NAME, error, parent=dialog)
+                return
+            extra_folders.add(folder)
+            refresh()
+            status.configure(text=f"Undermapp ‘{folder}’ finns nu som kopplingsmål.")
+
+        def remove_mapping(_event=None) -> None:
+            selection = left_tree.selection()
+            if not selection:
+                status.configure(text="Välj först ett stödord till vänster.")
+                return
+            row = left_tree.item(selection[0], "values")
+            word = normalize(row[0]) if row else ""
+            mapping = cat.setdefault("subfolder_keyword_map", {})
+            if word in mapping:
+                mapping.pop(word, None)
+                self.rules.save()
+                refresh(word)
+                status.configure(text=f"Kopplingen för {word} togs bort.")
+            else:
+                status.configure(text="Det markerade stödordet har ingen mappkoppling.")
+
+        def on_press(event) -> None:
+            row_id = left_tree.identify_row(event.y)
+            if row_id:
+                values = left_tree.item(row_id, "values")
+                dragged["word"] = normalize(values[0]) if values else ""
+                if row_id not in left_tree.selection():
+                    left_tree.selection_set(row_id)
+
+        def on_motion(event) -> None:
+            if not dragged["word"]:
+                return
+            target = dialog.winfo_containing(event.x_root, event.y_root)
+            status.configure(
+                text=(f"Släpp {dragged['word']} på en undermapp" if target is right_tree
+                      else f"Dra {dragged['word']} till en undermapp →"))
+
+        def on_release(event) -> None:
+            word = dragged.pop("word", "")
+            dragged["word"] = ""
+            if not word:
+                return
+            target = dialog.winfo_containing(event.x_root, event.y_root)
+            if target is not right_tree:
+                status.configure(text="Dra stödordet till en undermapp i högra kolumnen.")
+                return
+            row_y = event.y_root - right_tree.winfo_rooty()
+            row_id = right_tree.identify_row(row_y)
+            if not row_id:
+                status.configure(text="Släpp på en undermapp i listan.")
+                return
+            row = right_tree.item(row_id, "values")
+            folder = str(row[0]) if row else ""
+            if not folder:
+                return
+            cat.setdefault("subfolder_keyword_map", {})[word] = folder
+            self.rules.save()
+            refresh(word)
+            status.configure(text=f"Kopplade ‘{word}’ till ‘{folder}’.")
+
+        left_tree.bind("<ButtonPress-1>", on_press)
+        left_tree.bind("<B1-Motion>", on_motion)
+        left_tree.bind("<ButtonRelease-1>", on_release)
+        left_tree.bind("<Double-1>", set_default, add="+")
+        default_button.configure(command=set_default)
+        add_folder_button.configure(command=add_folder)
+        remove_button.configure(command=remove_mapping)
+        left_tree.bind("<Delete>", remove_mapping)
+        refresh()
+        if self.settings.get("ui_language") == "en":
+            _translate_ui_tree(dialog, _UI_EN)
+        dialog.grab_set()
+        dialog.wait_window()
 
     def _cat_save_kw(self) -> None:
         """Spara kategorins eget krav på antal matchade stödord."""
@@ -12433,6 +13034,7 @@ class App:
         try:
             if self.watcher:
                 self.watcher.stop()
+            self._stop_archive_watch()
             self.rules.save()
             flush_history()
         except Exception as exc:
@@ -13300,6 +13902,7 @@ class App:
             self._collect_settings()
             if self.watcher:
                 self.watcher.stop()
+            self._stop_archive_watch()
             self.rules.save()
             try:
                 flush_history()

@@ -708,7 +708,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "close_to_tray": True,       # krysset gömmer appen i systemfältet
     "minimize_to_tray": True,    # minimering gömmer också appen i systemfältet
     "tray_minimize_migrated_v1": False,  # intern engångsmigrering av äldre val
-    "autowatch_on_start": False, # slå på bevakning direkt vid start
+    "autowatch_on_start": False, # slå på bevakning av inmappar direkt vid start
+    "archive_watch_enabled": True,  # hitta självmant PDF:er i fel arkivmapp
+    "archive_watch_interval": 30.0, # full kontroll av arkivträdet var 30:e sekund
     "notify": True,              # popup-notis när filer sorterats
     "rescan_after_learn": True,  # skanna om allt när ett nytt stödord lärts in
     # -- datum och undermappar --
@@ -927,11 +929,25 @@ class Rules:
             templates = ([dict(template) for template in raw_templates
                           if isinstance(template, dict)]
                          if isinstance(raw_templates, list) else [])
+            keyword_texts = {kw["text"] for kw in keywords}
+            default_keyword = normalize(cat.get("default_keyword", ""))
+            if default_keyword not in keyword_texts:
+                default_keyword = ""
+            raw_subfolder_map = cat.get("subfolder_keyword_map", {})
+            subfolder_keyword_map = {}
+            if isinstance(raw_subfolder_map, dict):
+                for word, folder in raw_subfolder_map.items():
+                    word = normalize(word)
+                    folder = str(folder or "").strip()
+                    if word in keyword_texts and folder:
+                        subfolder_keyword_map[word] = folder
             name = str(cat["name"]).strip()
             self.categories.append({
                 "name": name,
                 "folder": safe_folder_name(cat.get("folder") or name),
                 "keywords": keywords,
+                "default_keyword": default_keyword,
+                "subfolder_keyword_map": subfolder_keyword_map,
                 "enabled": bool(cat.get("enabled", True)),
                 "subfolder": str(cat.get("subfolder", "") or ""),
                 "subfolder_path": str(cat.get("subfolder_path", "") or ""),
@@ -961,6 +977,16 @@ class Rules:
 
     def save(self) -> None:
         self._rebuild_index()   # täcker även externa .categories-tilldelningar
+        for cat in self.categories:
+            words = {kw["text"] for kw in cat.get("keywords", [])}
+            default = normalize(cat.get("default_keyword", ""))
+            cat["default_keyword"] = default if default in words else ""
+            mapping = cat.get("subfolder_keyword_map", {})
+            cat["subfolder_keyword_map"] = {
+                normalize(word): str(folder).strip()
+                for word, folder in mapping.items()
+                if normalize(word) in words and str(folder or "").strip()
+            } if isinstance(mapping, dict) else {}
         with _io_lock():
             _write_json(self.path, {
                 "schema_version": SCHEMA_VERSION,
@@ -1007,6 +1033,8 @@ class Rules:
             "name": name.strip(),
             "folder": safe_folder_name(folder or name),
             "keywords": [],
+            "default_keyword": "",
+            "subfolder_keyword_map": {},
             "enabled": True,
             "subfolder": "",
             "subfolder_path": "",
@@ -1791,6 +1819,11 @@ def place_file(src: Path, out_root: Path, folder: str, action: str = "move",
     target = dest_dir / src.name
 
     if target.exists():
+        try:
+            if target.resolve() == src.resolve():
+                return True, "Filen ligger redan i den valda mappen", target
+        except OSError:
+            pass
         if on_conflict == "skip":
             return False, "Finns redan i målmappen - hoppade över", None
         if on_conflict == "rename":
