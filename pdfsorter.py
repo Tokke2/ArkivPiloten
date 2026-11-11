@@ -14,8 +14,8 @@ en undermapp i utmappen efter en exakt stödordsträff eller användarens val.
 Undermappar skapas automatiskt vid behov.
 
 Appen lär bara in stödord som användaren själv väljer och sparar. En fil
-flyttas automatiskt endast när ett sparat stödord matchar exakt som helt
-ord/fras i PDF-texten, exakt en kategori har en sådan träff och den
+flyttas automatiskt endast när minst två olika sparade stödord matchar exakt
+som helord/fras i PDF-texten, exakt en kategori har dessa träffar och den
 kategorin ligger först. Case och upprepade blanksteg normaliseras; stavning
 och skiljetecken inne i stödordet/frasen måste annars stämma. Inlärning, lösa poäng,
 OCR-brus, delord och flexibla ID-matchningar kan aldrig själva flytta filer.
@@ -1833,6 +1833,8 @@ def validate_subfolder_override(value: str) -> Tuple[str, str]:
 def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, List[str]]:
     """Return literal, whole-word support matches from PDF text by category.
 
+    A category is returned only when at least two different saved support
+    words match exactly, regardless of a lower per-category minimum.
     This deliberately does not use OCR denoising, flexible identifier
     separators, the filename, learned-model scores, or substring rules.
     Text is case-folded and whitespace-normalized only; punctuation and the
@@ -1868,14 +1870,16 @@ def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, Lis
                 _EXACT_PATTERN_CACHE[word] = pattern
             if pattern.search(body):
                 found.append(word)
-        required = max(1, int(cat.get("min_keywords", 0) or 0))
+        # One exact keyword can be coincidental; auto-moves require at least
+        # two distinct user-saved support words, even if the category asks for 1.
+        required = max(2, int(cat.get("min_keywords", 0) or 0))
         if len(found) >= required:
             matches[cat["name"]] = found
     return matches
 
 
 def exact_auto_category(rules: Rules, decision: Decision) -> str:
-    """Category that may auto-move: one exact-match category and top score."""
+    """Category that may auto-move: two exact words, one category, top score."""
     if (decision.status != "auto" or decision.best is None
             or decision.best.only_recipient):
         return ""
@@ -1887,10 +1891,10 @@ def exact_auto_category(rules: Rules, decision: Decision) -> str:
 
 
 def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> Decision:
-    """Besluta mellan exakt unik stödordsträff och förslag för granskning.
+    """Besluta mellan flera exakta stödordsträffar och granskning.
 
-    Endast en bokstavlig helords-/frasträff som tillhör exakt en kategori
-    kan ge status ``auto``; all annan evidens skickas till granskning.
+    Minst två olika bokstavliga helords-/frasträffar i exakt en kategori
+    krävs för status ``auto``; all annan evidens skickas till granskning.
     """
     if extraction.error and not extraction.text:
         return Decision(extraction.path, extraction, [], "error", extraction.error)
@@ -1913,10 +1917,10 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
     if lm_pred is not None and scores:
         _apply_learned_ranking(scores, lm_pred)
 
-    # A move is allowed only when a user-owned support word or phrase occurs
-    # literally in the document text, with whole-word boundaries, and exactly
-    # one category has such a match. Learned scores and flexible/substring
-    # matches can never authorize a move.
+    # A move is allowed only when at least two different user-owned support
+    # words/phrases occur literally in the document text, with whole-word
+    # boundaries, and exactly one category has those matches. Learned scores
+    # and flexible/substring matches can never authorize a move.
     exact = exact_support_matches(rules, extraction)
     if (len(exact) == 1 and scores and scores[0].name in exact
             and not scores[0].only_recipient):
@@ -2834,8 +2838,9 @@ class SortEngine:
             if (decided_by in {"auto", "rescan"}
                     and exact_auto_category(self.rules, decision) != category):
                 self.stats["left"] += 1
-                return False, ("Automatisk flyttning kräver en exakt, unik "
-                               "stödordsträff. Filen ligger kvar för granskning.")
+                return False, ("Automatisk flyttning kräver minst två olika "
+                               "exakta stödordsträffar i en unik kategori. "
+                               "Filen ligger kvar för granskning.")
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
                 return False, ("Filen ändrades efter analysen - lämnas "
@@ -7807,8 +7812,8 @@ class App:
         ttk.Label(
             opt,
             text=("Stödordsförslag sparas först när du väljer dem. Automatisk "
-                  "flytt kräver en exakt, unik helords- eller frasträff; övriga filer "
-                  "ligger kvar för granskning."),
+                  "flytt kräver minst två olika, exakta helords- eller frasträffar "
+                  "i en unik kategori; övriga filer ligger kvar för granskning."),
             style="CardMuted.TLabel", wraplength=460, justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
         ocr_cb = ttk.Checkbutton(opt, text="OCR för skannade PDF:er",

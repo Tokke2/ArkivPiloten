@@ -36,23 +36,49 @@ def test_learned_match_is_only_a_suggestion(monkeypatch, tmp_path):
     assert decision.learned_hint == ("Acme", 12)
 
 
-def test_only_exact_unique_user_support_match_is_automatic(tmp_path):
+def test_auto_requires_two_distinct_exact_user_support_words(tmp_path):
     rules = Rules({"categories": [{
         "name": "Acme", "folder": "Acme",
         "keywords": [{"text": "Acme", "weight": 1.0,
+                      "whole_word": True, "source": "user"},
+                     {"text": "invoice", "weight": 1.0,
                       "whole_word": True, "source": "user"}],
     }]}, tmp_path / "rules.json")
 
-    exact = P.decide(rules, P.Extraction(
+    one_exact = P.decide(rules, P.Extraction(
+        path=tmp_path / "one.pdf", text="ACME receipt"),
+        {"learned_matching": False})
+    both_exact = P.decide(rules, P.Extraction(
         path=tmp_path / "exact.pdf", text="ACME invoice"),
         {"learned_matching": False})
     embedded = P.decide(rules, P.Extraction(
         path=tmp_path / "embedded.pdf", text="XAcmeZ invoice"),
         {"learned_matching": False})
 
-    assert exact.status == "auto"
-    assert exact.best.name == "Acme"
+    assert one_exact.status == "ask"
+    assert both_exact.status == "auto"
+    assert both_exact.best.name == "Acme"
     assert embedded.status == "ask"
+
+
+def test_apply_rejects_forged_auto_with_only_one_exact_support_word(tmp_path):
+    source = tmp_path / "invoice.pdf"
+    source.write_bytes(b"unchanged")
+    rules = Rules({"categories": [{
+        "name": "Acme", "folder": "Acme",
+        "keywords": [{"text": "Acme", "weight": 1.0}],
+    }]}, tmp_path / "rules.json")
+    engine = P.SortEngine(rules, {
+        "output_dir": str(tmp_path / "out"), "year_subfolder": False,
+    })
+    forged = _decision(source, "auto")
+
+    ok, message = engine.apply(forged, "Acme", ["Acme"], decided_by="auto")
+
+    assert not ok
+    assert "minst två" in message.lower()
+    assert source.exists()
+    assert not (tmp_path / "out" / "Acme" / source.name).exists()
 
 
 def test_filename_only_support_match_requires_review(tmp_path):
@@ -111,7 +137,8 @@ def test_exact_support_match_can_move_during_rescan(tmp_path):
     source.write_bytes(b"unchanged")
     rules = Rules({"categories": [{
         "name": "Acme", "folder": "Acme",
-        "keywords": [{"text": "Acme", "weight": 1.0}],
+        "keywords": [{"text": "Acme", "weight": 1.0},
+                     {"text": "invoice", "weight": 1.0}],
     }]}, tmp_path / "rules.json")
     engine = P.SortEngine(rules, {
         "output_dir": str(tmp_path / "out"), "year_subfolder": False,
@@ -155,7 +182,8 @@ def test_rescan_worker_moves_exact_support_match(tmp_path, monkeypatch):
     source.write_bytes(b"matching content")
     rules = Rules({"categories": [{
         "name": "Acme", "folder": "Acme",
-        "keywords": [{"text": "Acme", "weight": 1.0}],
+        "keywords": [{"text": "Acme", "weight": 1.0},
+                     {"text": "invoice", "weight": 1.0}],
     }]}, tmp_path / "rules.json")
     real_engine = P.SortEngine(rules, {
         "output_dir": str(tmp_path / "out"), "year_subfolder": False,

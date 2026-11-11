@@ -4,8 +4,8 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.4.14 — exact saved support-word matches can move automatically; all other files wait for you.**
-**PDF Sorter 1.4.14 — exakta stödordsträffar kan flyttas automatiskt; alla andra filer väntar på dig.**
+**PDF Sorter 1.4.14 — at least two exact saved support-word matches can move a file automatically; all other files wait for you.**
+**PDF Sorter 1.4.14 — minst två exakta sparade stödordsträffar krävs för automatflytt; alla andra filer väntar på dig.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
@@ -22,27 +22,27 @@ Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
 
 ## What is ArkivPiloten?
 
-ArkivPiloten watches one or more **inbox folders**, reads every new PDF, and suggests which company or project it belongs to. A file moves automatically only when one saved support word or phrase matches literally as a whole word in the PDF text, and exactly one category owns such a match. Every other file stays in the inbox for your review.
+ArkivPiloten watches one or more **inbox folders**, reads every new PDF, and suggests which company or project it belongs to. A file moves automatically only when at least two different saved support words or phrases match literally as whole words in the PDF text, and exactly one category owns those matches. Every other file stays in the inbox for your review.
 
 It recognises senders by organisation number, VAT number, bankgiro, domain and company name, reads scanned documents with OCR, and **learns only from support words you choose and save**. Learned scores, fuzzy/partial matches and OCR-noise tolerance can suggest a destination but cannot authorize a move; rescans can move a file only when the same exact-match rule is met. Matching is case-insensitive and ignores repeated whitespace; punctuation and the spelling inside the full word or phrase must match exactly. Everything runs locally — no cloud, no account, no network calls for sorting.
 
-> **Strict automatic rule.** Only a literal saved whole-word/phrase match that identifies a single category can move automatically. If there is no exact match, categories conflict, or the match is learned-only, partial, fuzzy, or OCR-tolerant, the file stays for review. The same rule applies during watching and rescanning.
+> **Strict automatic rule.** At least two different literal saved whole-word/phrase matches must identify a single category before a file can move automatically. If there are fewer exact matches, categories conflict, or the match is learned-only, partial, fuzzy, or OCR-tolerant, the file stays for review. The same rule applies during watching and rescanning.
 
 ### How a decision is made
 
 | Result | Meaning | What happens |
 |---|---|---|
-| ✅ **Exact match** | One saved whole word/phrase appears literally in the PDF text and identifies one category | The file can move automatically to that category |
+| ✅ **Exact match** | At least two different saved whole words/phrases appear literally in the PDF text and identify one category | The file can move automatically to that category |
 | 💡 **Suggestion** | Scores, learned matches, partial/flexible matches, or conflicting exact matches | The file stays in the inbox for your review; learned scores never trigger a move |
 | ⚠️ **Error** | The file could not be read | The error is logged and the file is left untouched |
 
 ## Features
 
 - 🧭 **Clearer design** — a branded header, highlighted three-step Start screen, compact cards and clearly ordered tabs keep everyday actions separate from advanced tools
-- 📥 **Watched folders + review queue** — only an exact, unique saved support-word match can move automatically; every other PDF stays in the review queue
-- 🎯 **Zone-weighted matching** — letterhead, footer and sender zones weigh more than body text, plus multi-page matching; an organisation-number support word can auto-move only when its exact spelling is saved and uniquely identifies one category
+- 📥 **Watched folders + review queue** — at least two different exact saved support-word matches in one unique category are required for an automatic move; every other PDF stays in the review queue
+- 🎯 **Zone-weighted matching** — letterhead, footer and sender zones weigh more than body text, plus multi-page matching; an organisation-number support word contributes to auto-movement only alongside another exact saved support word in a unique category
 - 🧠 **User-controlled learning** — suggested support words are never preselected or saved automatically; you choose which words to save. The learned model ranks suggestions but never authorizes a move
-- 🔐 **Exact-match safety** — automatic moves require a literal whole-word/phrase match in PDF text, a unique category, and non-recipient evidence; partial, fuzzy, OCR-denoised, filename-only, or learned-only matches require review
+- 🔐 **Exact-match safety** — automatic moves require at least two different literal whole-word/phrase matches in PDF text, a unique category, and non-recipient evidence; partial, fuzzy, OCR-denoised, filename-only, or learned-only matches require review
 - 🔍 **OCR for scanned PDFs** (Tesseract), including logos in letterheads of otherwise text-based files
 - 💡 **Clearer review dialog (1.4.14)** — file details, keyword suggestions and destination are grouped into clean cards. The existing-folder field accepts free text and filters the dropdown as you type; choose a match with Enter. The primary “Save & move” action is easy to spot.
 - 💡 **Review controls** — see up to 25 support-word suggestions per PDF in a dedicated scrollable list; each shows its type and match count, while a bar indicates relative relevance. Suggestions are never selected or saved automatically. Set a default subfolder per category, then leave the review-dialog extra-subfolder field empty to use it or add a deeper per-file folder. You can browse existing folders or name one to create when the first file is sorted. Kategorier has clearly separated actions to clear keywords while keeping categories, or remove all categories and keywords. Removing all categories creates a rules backup and enables Undo; the empty-state panel offers create/import shortcuts.

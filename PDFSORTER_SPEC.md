@@ -1319,15 +1319,16 @@ En osäker fil öppnas med **tio föreslagna stödord** som användaren bockar i
 
 ### REQ-F2 (M) — Inlärning & omskanning
 När användaren svarat ska appen spara valda stödord och uppdatera
-osorterade filer. Bara unika, bokstavliga stödordsträffar får flyttas;
-övriga filer kräver granskning.
+osorterade filer. Automatflytt kräver minst två olika sparade stödord som
+träffar bokstavligt i exakt en kategori; enstaka träffar och övriga fall
+kräver granskning.
 **AC-F2:**
 - AC-2.1 Valda ord sparas som permanenta regler (om "Spara valda ord" är
   på).
 - AC-2.2 Filen flyttas till vald kategori.
-- AC-2.3 Filer som den nya regeln täcker får uppdaterat beslut; bara en exakt, unik helords-/frasträff får flyttas.
+- AC-2.3 Filer som de nya reglerna täcker får uppdaterat beslut; automatflytt kräver minst två olika exakta helords-/frasträffar i en unik kategori.
 - AC-2.4 `rescan_after_learn` skannar om kön, inmapparna och `_Osorterat`
-  i bakgrunden. Exakta unika stödordsträffar flyttas; övriga läggs i kön.
+  i bakgrunden. Minst två olika exakta träffar i en unik kategori krävs för flytt; övriga läggs i kön.
 
 ### REQ-F3 (M) — Flikar
 **AC-F3:**

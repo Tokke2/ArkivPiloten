@@ -55,10 +55,11 @@ def _decide(path, rules):
 
 
 def test_only_literal_orgnr_support_word_match_can_auto_move(tmp_path):
-    """Bara exakt skrivsätt av stödordet får auto-flytta; varianter föreslår."""
+    """Två exakta stödord krävs; ändrat orgnr-skrivsätt skickas till granskning."""
     rules = _rules(tmp_path, [{
         "name": "Pilkington", "folder": "Pilkington",
-        "keywords": [{"text": "556033-9086", "weight": 1.0}],
+        "keywords": [{"text": "556033-9086", "weight": 1.0},
+                     {"text": "Pilkington Sverige", "weight": 1.0}],
     }])
     # Fyra skrivsätt, inklusive "·" som en del typsnitt/OCR ger i
     # stället för bindestreck.
