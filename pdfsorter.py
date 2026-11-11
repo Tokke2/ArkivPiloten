@@ -14,7 +14,7 @@ en undermapp i utmappen efter en exakt stödordsträff eller användarens val.
 Undermappar skapas automatiskt vid behov.
 
 Appen lär bara in stödord som användaren själv väljer och sparar. En fil
-flyttas automatiskt först efter fem manuellt bekräftade filer i kategorin,
+flyttas automatiskt först efter hundra manuellt bekräftade filer i kategorin,
 och därefter endast när minst två olika sparade stödord som bara finns i den
 kategorin matchar exakt som helord/fras i PDF-texten och kategorin ligger först.
 Case och upprepade blanksteg normaliseras; stavning
@@ -1899,7 +1899,7 @@ def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, Lis
     return matches
 
 
-AUTO_MOVE_MANUAL_CONFIRMATIONS = 5
+AUTO_MOVE_MANUAL_CONFIRMATIONS = 100
 
 
 def manual_category_confirmations(category: str,
@@ -1939,7 +1939,7 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
     """Besluta mellan flera exakta stödordsträffar och granskning.
 
     Minst två olika, kategoriexklusiva bokstavliga helords-/frasträffar och
-    fem tidigare manuella bekräftelser i kategorin krävs för ``auto``.
+    hundra tidigare manuella bekräftelser i kategorin krävs för ``auto``.
     All annan evidens skickas till granskning.
     """
     if extraction.error and not extraction.text:
@@ -2897,7 +2897,7 @@ class SortEngine:
                 self.stats["left"] += 1
                 return False, ("Automatisk flyttning kräver minst två olika "
                                "exakta stödord som inte delas med andra kategorier "
-                               "och fem tidigare manuella bekräftelser där. "
+                               "och hundra tidigare manuella bekräftelser där. "
                                "Filen ligger kvar för granskning.")
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
@@ -7870,7 +7870,7 @@ class App:
         ttk.Label(
             opt,
             text=("Stödordsförslag sparas först när du väljer dem. En kategori "
-                  "behöver fem manuella bekräftelser; därefter krävs minst två "
+                  "behöver hundra manuella bekräftelser; därefter krävs två "
                   "exakta stödord som inte delas med andra kategorier."),
             style="CardMuted.TLabel", wraplength=460, justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)

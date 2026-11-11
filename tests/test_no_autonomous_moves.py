@@ -74,7 +74,7 @@ def test_manual_confirmation_count_is_distinct_and_category_specific():
     assert P.manual_category_confirmations("Other", events) == 1
 
 
-def test_auto_requires_two_exact_words_and_five_manual_category_confirms(
+def test_auto_requires_two_exclusive_words_and_100_manual_category_confirms(
         monkeypatch, tmp_path):
     rules = Rules({"categories": [{
         "name": "Acme", "folder": "Acme",
@@ -84,7 +84,7 @@ def test_auto_requires_two_exact_words_and_five_manual_category_confirms(
                       "whole_word": True, "source": "user"}],
     }]}, tmp_path / "rules.json")
 
-    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 4))
+    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 99))
     one_exact = P.decide(rules, P.Extraction(
         path=tmp_path / "one.pdf", text="ACME receipt"),
         {"learned_matching": False})
@@ -92,9 +92,9 @@ def test_auto_requires_two_exact_words_and_five_manual_category_confirms(
         path=tmp_path / "under-threshold.pdf", text="ACME invoice"),
         {"learned_matching": False})
     assert under_threshold.status == "ask"
-    assert "4/5" in under_threshold.reason
+    assert "99/100" in under_threshold.reason
 
-    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 5))
+    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 100))
     both_exact = P.decide(rules, P.Extraction(
         path=tmp_path / "exact.pdf", text="ACME invoice"),
         {"learned_matching": False})
@@ -128,9 +128,9 @@ def test_apply_rejects_forged_auto_with_only_one_exact_support_word(tmp_path):
     assert not (tmp_path / "out" / "Acme" / source.name).exists()
 
 
-def test_apply_rejects_forged_auto_before_five_manual_confirms(
+def test_apply_rejects_forged_auto_before_100_manual_confirms(
         monkeypatch, tmp_path):
-    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 4))
+    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 99))
     source = tmp_path / "invoice.pdf"
     source.write_bytes(b"unchanged")
     rules = Rules({"categories": [{
@@ -149,7 +149,7 @@ def test_apply_rejects_forged_auto_before_five_manual_confirms(
                                decided_by="auto")
 
     assert not ok
-    assert "fem" in message.lower()
+    assert "hundra" in message.lower()
     assert source.exists()
 
 
@@ -205,7 +205,7 @@ def test_apply_rejects_automatic_and_rescan_without_exact_rule(tmp_path):
 
 
 def test_exact_support_match_can_move_during_rescan(monkeypatch, tmp_path):
-    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 5))
+    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 100))
     source = tmp_path / "invoice.pdf"
     source.write_bytes(b"unchanged")
     rules = Rules({"categories": [{
@@ -251,7 +251,7 @@ def test_clear_all_support_words_preserves_categories(tmp_path):
 
 
 def test_rescan_worker_moves_exact_support_match(tmp_path, monkeypatch):
-    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 5))
+    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 100))
     source = tmp_path / "learned-exact.pdf"
     source.write_bytes(b"matching content")
     rules = Rules({"categories": [{
