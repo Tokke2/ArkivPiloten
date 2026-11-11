@@ -161,6 +161,7 @@ try:
         _RECIPIENT_MARKERS,
         _luhn_ok,
         _recipient_zone,
+        _deskew_angle,
         backend_status,
         extract,
         guess_category_name,
@@ -250,6 +251,7 @@ try:
         mark_ignored_file,
         request_show,
         load_settings,
+        migrate_review_preview_setting,
         now_iso,
         place_file,
         render_subfolder,
@@ -3603,6 +3605,138 @@ def open_externally(path: Path) -> None:
         session_error("ui", exc)
 
 
+def rules_transfer_dir(kind: str) -> Path:
+    """Return and create the dedicated category-rules import/export folder."""
+    if kind not in {"imports", "exports"}:
+        raise ValueError("kind must be 'imports' or 'exports'")
+    folder = Path(config_dir()) / kind
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _write_pdf_copy(destination: Path, write_to_temp: Callable[[Path], None]) -> Path:
+    """Write a PDF beside its destination, then atomically publish the copy."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{destination.stem}-", suffix=".tmp.pdf",
+        dir=str(destination.parent))
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        write_to_temp(temp_path)
+        os.replace(temp_path, destination)
+    except Exception:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return destination
+
+
+def rotate_pdf_copy(source: Path, destination: Path, degrees: int) -> Path:
+    """Create a vector-preserving rotated PDF copy; never modify source."""
+    source, destination = Path(source), Path(destination)
+    angle = int(degrees) % 360
+    if angle not in (90, 180, 270):
+        raise ValueError("Rotation must be 90, 180 or 270 degrees")
+    if source.resolve() == destination.resolve():
+        raise ValueError("Choose a new filename; the original must remain unchanged")
+
+    def write(temp_path: Path) -> None:
+        from pypdf import PdfReader, PdfWriter
+        reader = PdfReader(str(source))
+        writer = PdfWriter()
+        for page in reader.pages:
+            page.rotate(angle)
+            writer.add_page(page)
+        if reader.metadata:
+            metadata = {str(k): str(v) for k, v in reader.metadata.items()
+                        if k and v is not None}
+            if metadata:
+                writer.add_metadata(metadata)
+        with temp_path.open("wb") as stream:
+            writer.write(stream)
+
+    return _write_pdf_copy(destination, write)
+
+
+def deskew_pdf_copy(source: Path, destination: Path,
+                    degrees: Optional[float] = None, dpi: int = 216) -> Path:
+    """Create a per-page deskewed copy, or apply a fixed angle; source stays untouched."""
+    source, destination = Path(source), Path(destination)
+    angle = None if degrees is None else float(degrees)
+    if angle is not None and not -15.0 <= angle <= 15.0:
+        raise ValueError("Deskew angle must be between -15 and +15 degrees")
+    if source.resolve() == destination.resolve():
+        raise ValueError("Choose a new filename; the original must remain unchanged")
+    if not has_pymupdf():
+        raise RuntimeError("Rätning kräver PyMuPDF")
+
+    def write(temp_path: Path) -> None:
+        import io
+        from PIL import Image
+        fitz = _open_pymupdf()
+        scale = max(1.0, min(4.0, float(dpi) / 72.0))
+        resampling = getattr(Image, "Resampling", Image).BICUBIC
+        with fitz.open(str(source)) as original:
+            output = fitz.open()
+            try:
+                for page in original:
+                    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                    with Image.open(io.BytesIO(pix.tobytes("png"))) as opened:
+                        image = opened.convert("RGB")
+                    correction = (angle if angle is not None else
+                                 float(_deskew_angle(image, max_angle=5.0, steps=11)))
+                    correction = max(-15.0, min(15.0, correction))
+                    corrected = image.rotate(
+                        correction, resample=resampling, expand=True, fillcolor="white")
+                    payload = io.BytesIO()
+                    corrected.save(payload, format="PNG", optimize=True)
+                    new_page = output.new_page(
+                        width=corrected.width / scale,
+                        height=corrected.height / scale)
+                    new_page.insert_image(new_page.rect, stream=payload.getvalue())
+                try:
+                    metadata = {k: v for k, v in original.metadata.items()
+                                if k in {"title", "author", "subject", "keywords",
+                                         "creator", "producer", "creationDate",
+                                         "modDate", "trapped"} and v}
+                    if metadata:
+                        output.set_metadata(metadata)
+                except Exception:
+                    pass
+                output.save(str(temp_path), garbage=3, deflate=True)
+            finally:
+                output.close()
+
+    return _write_pdf_copy(destination, write)
+
+
+def error_next_step(exc: BaseException) -> str:
+    """Return one safe, practical next step for common user-facing failures."""
+    err_no = getattr(exc, "errno", None)
+    if isinstance(exc, PermissionError) or err_no in (13, 1):
+        return ("Stäng program som kan ha filen öppen och kontrollera att du "
+                "har läs-/skrivbehörighet till mappen.")
+    if isinstance(exc, FileNotFoundError) or err_no == 2:
+        return ("Kontrollera att filen eller mappen inte har flyttats eller "
+                "bytt namn och uppdatera sedan listan.")
+    if err_no == 28:
+        return "Frigör diskutrymme på målenheten och försök igen."
+    if err_no in (16, 32, 33):
+        return "Stäng PDF:en i andra program och försök igen."
+    if isinstance(exc, ImportError):
+        return "Kör den officiella uppdateraren eller be administratören reparera installationen."
+    message = str(exc).casefold()
+    if any(term in message for term in ("not a pdf", "invalid pdf", "pdf header")):
+        return "Kontrollera att filen verkligen är en giltig PDF; originalet har inte ändrats."
+    if "no space" in message or "disk full" in message:
+        return "Frigör diskutrymme på målenheten och försök igen."
+    return "Kontrollera filen och målmappen; originalfilen lämnas kvar om åtgärden misslyckas."
+
+
 def create_pdf_split_copies(path: Path, break_pages: List[int],
                             output_dir: Path) -> List[Path]:
     """Skapa separata PDF-kopior vid föreslagna sidstarter.
@@ -4122,12 +4256,40 @@ class ReviewDialog:
             self._prev_pil: List[Any] = []
             self._prev_pages: List[Any] = []
             self._prev_page = 0
+            self._prev_rotation = 0
             ttk.Button(nav, text="‹", width=3,
                        command=lambda: self._prev_show(self._prev_page - 1)).pack(pady=2)
             self._prev_info = ttk.Label(nav, text="–", style="CardMuted.TLabel")
             self._prev_info.pack(pady=2)
             ttk.Button(nav, text="›", width=3,
                        command=lambda: self._prev_show(self._prev_page + 1)).pack(pady=2)
+            tools = ttk.Frame(prev, style="CardInner.TFrame")
+            tools.grid(row=2, column=0, columnspan=2, sticky="ew",
+                       padx=12, pady=(0, 8))
+            tools.columnconfigure(0, weight=1)
+            tools.columnconfigure(1, weight=1)
+            self._preview_tool_buttons = []
+            for index, (text, command) in enumerate((
+                    ("↶ Rotera 90°", lambda: self._rotate_preview(90)),
+                    ("↷ Rotera 90°", lambda: self._rotate_preview(-90)),
+                    ("Spara roterad kopia…", self._save_rotated_copy),
+                    ("Räta skannad kopia…", self._save_deskewed_copy))):
+                button = ttk.Button(tools, text=text, command=command)
+                button.grid(row=index // 2, column=index % 2, sticky="ew",
+                            padx=4, pady=2)
+                self._preview_tool_buttons.append(button)
+            if not has_pymupdf():
+                for button in self._preview_tool_buttons:
+                    button.state(["disabled"])
+            preview_note = ttk.Label(
+                prev,
+                text=("Rotera hela PDF-kopian vid sparning. Rätning bildbehandlar "
+                      "alla sidor till en separat kopia; originalet ändras aldrig."),
+                style="CardMuted.TLabel", wraplength=review_text_width(),
+                justify="left")
+            wrap_widgets.append(preview_note)
+            preview_note.grid(row=3, column=0, columnspan=2,
+                              sticky="w", padx=12, pady=(0, 8))
             self._start_preview_load()
             row_box = 3
 
@@ -4401,7 +4563,7 @@ class ReviewDialog:
         actions = [
             ttk.Button(btns, text="Förhandsgranska PDF",
                        command=lambda: open_externally(decision.path)),
-            ttk.Button(btns, text="Hoppa över", command=self._skip),
+            ttk.Button(btns, text="Vänta med den här", command=self._defer),
             ttk.Button(btns, text="Ignorera filen", command=self._ignore_file),
             ttk.Button(btns, text="Lägg i _Osorterat", command=self._unmatched),
         ]
@@ -4644,6 +4806,71 @@ class ReviewDialog:
         except Exception:
             pass
 
+    def _rotate_preview(self, degrees: int) -> None:
+        """Rotate the current preview; original file is never changed."""
+        self._prev_rotation = (getattr(self, "_prev_rotation", 0) + degrees) % 360
+        self._prev_show(getattr(self, "_prev_page", 0))
+
+    def _save_rotated_copy(self) -> None:
+        angle = int(getattr(self, "_prev_rotation", 0)) % 360
+        if angle == 0:
+            self.messagebox.showinfo(
+                APP_NAME, "Rotera förhandsvisningen först. Originalfilen är oförändrad.",
+                parent=self.win)
+            return
+        source = self.decision.path
+        default_name = f"{source.stem} - roterad.pdf"
+        target = self.filedialog.asksaveasfilename(
+            parent=self.win, title="Spara roterad kopia",
+            initialdir=str(source.parent), initialfile=default_name,
+            defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+        if not target:
+            return
+        if Path(target).suffix.lower() != ".pdf":
+            target = str(Path(target).with_suffix(".pdf"))
+        try:
+            # Pillow preview rotations are counter-clockwise; PDF /Rotate is clockwise.
+            saved = rotate_pdf_copy(source, Path(target), -angle)
+            self.messagebox.showinfo(
+                APP_NAME,
+                f"Roterad kopia sparad:\n{saved}\n\nOriginalfilen är oförändrad.",
+                parent=self.win)
+        except Exception as exc:
+            self.messagebox.showerror(
+                APP_NAME,
+                f"Kunde inte spara den roterade kopian. Originalfilen är oförändrad.\n\n"
+                f"{exc}\n\nNästa steg: {error_next_step(exc)}", parent=self.win)
+
+    def _save_deskewed_copy(self) -> None:
+        if not self.messagebox.askyesno(
+                APP_NAME,
+                "ArkivPiloten uppskattar lutningen separat för varje sida och "
+                "bildbehandlar dem till en ny PDF-kopia. Text kan då inte längre "
+                "markeras/sökas i kopian och länkar/formulär följer inte med.\n\n"
+                "Originalet rörs inte. Fortsätta med den här filen?", parent=self.win):
+            return
+        source = self.decision.path
+        target = self.filedialog.asksaveasfilename(
+            parent=self.win, title="Spara rätad kopia",
+            initialdir=str(source.parent),
+            initialfile=f"{source.stem} - rätad.pdf",
+            defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+        if not target:
+            return
+        if Path(target).suffix.lower() != ".pdf":
+            target = str(Path(target).with_suffix(".pdf"))
+        try:
+            saved = deskew_pdf_copy(source, Path(target))
+            self.messagebox.showinfo(
+                APP_NAME,
+                f"Rätad kopia sparad:\n{saved}\n\nOriginalfilen är oförändrad.",
+                parent=self.win)
+        except Exception as exc:
+            self.messagebox.showerror(
+                APP_NAME,
+                f"Kunde inte räta PDF-kopian. Originalfilen är oförändrad.\n\n"
+                f"{exc}\n\nNästa steg: {error_next_step(exc)}", parent=self.win)
+
     def _prev_show(self, i: int) -> None:
         """Visa sida i (0-baserat). PhotoImage skapas i huvudtråden och
         referensen sparas så att den inte sopas bort."""
@@ -4653,11 +4880,15 @@ class ReviewDialog:
             self._prev_page = i
             from PIL import ImageTk
             pil = self._prev_pil[i].copy()
+            rotation = int(getattr(self, "_prev_rotation", 0)) % 360
+            if rotation:
+                pil = pil.rotate(rotation, expand=True, fillcolor="white")
             pil.thumbnail((760, 300))
             foto = ImageTk.PhotoImage(pil)
-            self._prev_pages.append(foto)      # behåll referensen
+            self._prev_pages[:] = [foto]       # behåll bara aktuell sida
             self._prev_img.configure(image=foto)
-            self._prev_info.configure(text=f"{i + 1}/{len(self._prev_pil)}")
+            self._prev_info.configure(
+                text=f"{i + 1}/{len(self._prev_pil)} · {rotation}°")
         except Exception:
             pass
 
@@ -5471,7 +5702,13 @@ class ReviewDialog:
         self.result = {"unmatched": True}
         self._close()
 
+    def _defer(self) -> None:
+        """Lämna filen orörd i kön och fortsätt med nästa fil."""
+        self.result = {"defer": True}
+        self._close()
+
     def _skip(self) -> None:
+        # Escape/krysset lämnar PDF:en orörd och tillbaka i kön.
         self.result = None
         self._close()
 
@@ -5878,6 +6115,7 @@ _UI_EN = {
     "Skanna om allt när ett nytt stödord lärts in": "Rescan everything when a new keyword is learned",
     "Poppa upp dialogen direkt under bevakning": "Pop up the dialog directly while watching",
     "Aktiv": "Active", "Dagar:": "Days:", "Hoppa över": "Skip",
+    "Vänta med den här": "Defer this file",
     "Spara & flytta": "Save & move", "Lägg i _Osorterat": "Put in _Unsorted",
     "Ignorera filen": "Ignore file", "Befintlig mapp:": "Existing folder:",
     "Skapa ny mapp:": "Create new folder:",
@@ -6039,6 +6277,10 @@ def meny_spec() -> List[Dict[str, Any]]:
              "atgard": "open_output"},
             {"id": "oppna_logg", "text": "Öppna loggmappen",
              "atgard": "_open_log_dir"},
+            {"id": "oppna_import", "text": "Öppna importmappen",
+             "atgard": "_open_rules_import_dir"},
+            {"id": "oppna_export", "text": "Öppna exportmappen",
+             "atgard": "_open_rules_export_dir"},
             {"typ": "avdelare"},
             {"id": "avsluta", "text": "Avsluta", "snabb": f"{c}+Q",
              "atgard": "quit_app"},
@@ -6086,6 +6328,8 @@ def meny_spec() -> List[Dict[str, Any]]:
         {"titel": "Hjälp", "poster": [
             {"id": "hjalp", "text": "Användarhjälp", "snabb": "F1",
              "typ": "flik", "flik": "tab_help"},
+            {"id": "kortkommandon", "text": "Tangentbordsgenvägar…",
+             "atgard": "_show_shortcuts"},
             {"typ": "avdelare"},
             {"id": "ai_rapport", "text": "Kopiera AI-rapport (alla fel)",
              "snabb": f"{c}+Shift+A", "atgard": "_copy_ai_report"},
@@ -6098,6 +6342,26 @@ def meny_spec() -> List[Dict[str, Any]]:
             {"id": "om", "text": "Om ArkivPiloten…", "atgard": "_meny_om"},
         ]},
     ]
+
+
+def shortcuts_help_text(plattform: str = "") -> str:
+    """Läsbar lista över menygenvägar och gemensamma dialogkommandon."""
+    modifier = meny_snabbmodifierare(plattform)
+    lines = []
+    for menu in meny_spec():
+        for post in menu["poster"]:
+            shortcut = post.get("snabb", "")
+            if shortcut:
+                shortcut = shortcut.replace(_MENY_SNABB_CTRL, modifier)
+                lines.append(f"{shortcut:<22} {post['text']}")
+    lines.extend((
+        f"{modifier}+Tab / {modifier}+Shift+Tab  Nästa/föregående flik",
+        f"{modifier}+1…7               Välj flik med nummer",
+        "F6 / Shift+F6          Flytta fokus mellan områden",
+        "Escape                 Stäng dialogen eller vänta med PDF:en",
+        "Enter                  Bekräfta markerat val när det är säkert",
+    ))
+    return "Tangentbordsgenvägar\n\n" + "\n".join(lines)
 
 
 def meny_snabbmodifierare(plattform: str = "") -> str:
@@ -6311,6 +6575,8 @@ class App:
         self.filedialog, self.messagebox, self.simpledialog = filedialog, messagebox, simpledialog
 
         self.settings = load_settings()
+        if migrate_review_preview_setting(self.settings):
+            save_settings(self.settings)
         # Every file remains in its source folder until the user confirms a
         # destination; legacy "ask_when_unsure=false" settings cannot bypass this.
         self.settings["ask_when_unsure"] = True
@@ -6409,9 +6675,12 @@ class App:
         # 2026-08-26) - aldrig större än skärmen, centrerat, åtkomligt
         # minsta mått även på små skärmar.
         _fit_geometry(self.root, 1280, 880, 1060, 720)
-        self.theme = Theme(self.root, ttk,
-                           dark=str(self.settings.get("theme", "ljus")) == "mork",
-                           contrast=self.settings.get("contrast", "normal"))
+        self.theme = Theme(
+            self.root, ttk,
+            dark=str(self.settings.get("theme", "ljus")) == "mork",
+            contrast=self.settings.get("contrast", "normal"),
+            text_scale=(1.25 if self.settings.get("ui_text_size") == "large"
+                        else 1.0))
         self.C = self.theme.c
         install_snabbtangenter(self.root)
         # Modern titellist som följer temat (mörk lista i mörkt läge).
@@ -6652,9 +6921,11 @@ class App:
         session_log(category, msg, level)
 
     def _fel(self, exc: BaseException, var: str) -> None:
-        """Logga ett undantag med spårning + visa det i GUI-loggen."""
+        """Logga felet tillsammans med ett konkret och säkert nästa steg."""
         session_error(var, exc)
-        self._log_threadsafe(f"{var}: {type(exc).__name__}: {exc}", "err")
+        hint = error_next_step(exc)
+        self._log_threadsafe(
+            f"{var}: {type(exc).__name__}: {exc} · Nästa steg: {hint}", "err")
 
     def _ui(self, vad: str) -> None:
         """Logga ett användarklick, så att 'vad tryckte jag på?' syns i filen."""
@@ -6960,6 +7231,37 @@ class App:
                                      parent=self.root)
         except Exception as exc:
             self._fel(exc, "meny")
+
+    def _show_shortcuts(self) -> None:
+        self._ui("Visa tangentbordsgenvägar")
+        try:
+            win = self.tk.Toplevel(self.root)
+            brand_window(win)
+            win.title("Tangentbordsgenvägar")
+            win.transient(self.root)
+            win.configure(background=self.C["bg"])
+            _fit_geometry(win, 700, 520, 420, 300)
+            win.columnconfigure(0, weight=1)
+            win.rowconfigure(0, weight=1)
+            text = self.tk.Text(
+                win, wrap="word", state="normal", padx=18, pady=14,
+                background=self.C["surface"], foreground=self.C["text"],
+                font=self.theme.f_mono, borderwidth=0, highlightthickness=0)
+            text.insert("1.0", shortcuts_help_text())
+            text.configure(state="disabled")
+            text.grid(row=0, column=0, sticky="nsew", padx=(12, 0), pady=12)
+            scroll = self.ttk.Scrollbar(win, orient="vertical", command=text.yview)
+            scroll.grid(row=0, column=1, sticky="ns", pady=12, padx=(0, 12))
+            text.configure(yscrollcommand=scroll.set)
+            self.ttk.Button(
+                win, text="Stäng", command=win.destroy).grid(
+                    row=1, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 12))
+            win.bind("<Escape>", lambda _event: win.destroy())
+            win.bind("<Return>", lambda _event: win.destroy())
+            win.transient(self.root)
+            win.grab_set()
+        except Exception as exc:
+            self._fel(exc, "visa tangentbordsgenvägar")
 
     def _bind_meny_snabb(self) -> None:
         """Koppla menyernas genvägar till rotfönstret.
@@ -7754,6 +8056,17 @@ class App:
                             variable=self.var_contrast,
                             command=self._on_theme_radio).pack(
                 side="left", padx=(8, 0))
+        self.var_text_size = tk.StringVar(
+            value=("large" if self.settings.get("ui_text_size") == "large"
+                   else "normal"))
+        ttk.Label(themrad, text="   Text:", style="Card.TLabel"
+                  ).pack(side="left", padx=(12, 0))
+        for txt, val in (("Normal", "normal"), ("Större", "large")):
+            ttk.Radiobutton(themrad, text=txt, value=val,
+                            style="Card.TRadiobutton",
+                            variable=self.var_text_size,
+                            command=self._on_theme_radio).pack(
+                side="left", padx=(6, 0))
 
         extra = ttk.Frame(sysbox, style="CardInner.TFrame")
         extra.grid(row=6, column=0, columnspan=4, sticky="w",
@@ -7980,25 +8293,75 @@ class App:
         return _conflict_ask_impl(self, src, target, kind)
 
     def _on_theme_radio(self) -> None:
-        self._set_theme(self.var_theme.get() == "mork",
-                        contrast=self.var_contrast.get())
+        self._set_theme(
+            self.var_theme.get() == "mork",
+            contrast=self.var_contrast.get(),
+            text_size=self.var_text_size.get())
 
-    def _set_theme(self, dark: bool, contrast: str = "normal") -> None:
-        """Byt tema live: ttk-stilarna är namngivna och ritas om direkt;
-        de råa Tk-widgetarna (listor, logg, textfält) får nya färger här."""
+    def _set_theme(self, dark: bool, contrast: str = "normal",
+                   text_size: Optional[str] = None) -> None:
+        """Byt tema och textstorlek live utan att bygga om flikarna."""
+        text_size = text_size or self.settings.get("ui_text_size", "normal")
+        text_size = "large" if text_size == "large" else "normal"
         if (bool(getattr(self.theme, "dark", False)) == dark
-                and getattr(self.theme, "contrast", "normal") == contrast):
+                and getattr(self.theme, "contrast", "normal") == contrast
+                and self.settings.get("ui_text_size", "normal") == text_size):
             return
+        old_theme = self.theme
         self.settings["theme"] = "mork" if dark else "ljus"
         self.settings["contrast"] = contrast
+        self.settings["ui_text_size"] = text_size
         save_settings(self.settings)
-        self.theme = Theme(self.root, self.ttk, dark=dark, contrast=contrast)
+        self.theme = Theme(
+            self.root, self.ttk, dark=dark, contrast=contrast,
+            text_scale=1.25 if text_size == "large" else 1.0)
         self.C = self.theme.c
         self._retint_raw()
+        self._replace_raw_fonts(old_theme, self.theme)
         self._update_pills()
         self.root.after(60, lambda: dark_titlebar(self.root, bool(dark)))
         self._log(f"Tema: {'mörkt' if dark else 'ljust'}, "
-                  f"kontrast: {contrast}.", "info")
+                  f"kontrast: {contrast}, text: "
+                  f"{'större' if text_size == 'large' else 'normal'}.", "info")
+
+    def _replace_raw_fonts(self, old_theme, new_theme) -> None:
+        """Behåll råa Tk-widgetars typografiska nivå när textstorleken ändras."""
+        pairs = ((old_theme.f_base, new_theme.f_base),
+                 (old_theme.f_small, new_theme.f_small),
+                 (old_theme.f_tiny, new_theme.f_tiny),
+                 (old_theme.f_bold, new_theme.f_bold),
+                 (old_theme.f_head, new_theme.f_head),
+                 (old_theme.f_title, new_theme.f_title),
+                 (old_theme.f_huge, new_theme.f_huge),
+                 (old_theme.f_mono, new_theme.f_mono),
+                 (old_theme.f_mono_bold, new_theme.f_mono_bold))
+        mapping = {tuple(before): after for before, after in pairs}
+
+        def visit(widget) -> None:
+            try:
+                current = widget.cget("font")
+                if isinstance(current, (tuple, list)):
+                    replacement = mapping.get(tuple(current))
+                    if replacement:
+                        widget.configure(font=replacement)
+            except Exception:
+                pass
+            try:
+                children = widget.winfo_children()
+            except Exception:
+                children = ()
+            for child in children:
+                visit(child)
+
+        visit(self.root)
+        for tag, attr in (("h1", "f_title"), ("h2", "f_head"),
+                          ("body", "f_base"), ("bullet", "f_base"),
+                          ("code", "f_mono"), ("note", "f_small"),
+                          ("key", "f_bold")):
+            try:
+                self.help_text.tag_configure(tag, font=getattr(new_theme, attr))
+            except Exception:
+                pass
 
     def _retint_raw(self) -> None:
         """Färglägg om råa Tk-widgets efter temabyte (de följer inte ttk)."""
@@ -9850,9 +10213,14 @@ class App:
         self._refresh_categories(name)
 
     def _export(self) -> None:
+        try:
+            initialdir = rules_transfer_dir("exports")
+        except OSError as exc:
+            self._fel(exc, "förbereda exportmapp")
+            return
         path = self.filedialog.asksaveasfilename(
             parent=self.root, defaultextension=".json",
-            initialfile="pdfsorter-rules.json",
+            initialdir=str(initialdir), initialfile="pdfsorter-rules.json",
             filetypes=[("JSON", "*.json")])
         if not path:
             return
@@ -9861,8 +10229,14 @@ class App:
         self.messagebox.showinfo(APP_NAME, f"Sparade till:\n{path}", parent=self.root)
 
     def _import(self) -> None:
-        path = self.filedialog.askopenfilename(parent=self.root,
-                                               filetypes=[("JSON", "*.json")])
+        try:
+            initialdir = rules_transfer_dir("imports")
+        except OSError as exc:
+            self._fel(exc, "förbereda importmapp")
+            return
+        path = self.filedialog.askopenfilename(
+            parent=self.root, initialdir=str(initialdir),
+            filetypes=[("JSON", "*.json")])
         if not path:
             return
         incoming = Rules(_read_json(Path(path), {}), self.rules.path)
@@ -9913,6 +10287,20 @@ class App:
                    command=self._manual_rescan).pack(side="right", padx=6)
         ttk.Button(top, text="Töm kön", style="Danger.TButton",
                    command=self._clear_queue).pack(side="right", padx=6)
+        self.var_review_auto = self.tk.BooleanVar(
+            value=bool(self.settings.get("review_auto_advance", True)))
+        ttk.Checkbutton(
+            top, text="Fortsätt automatiskt efter bekräftat val",
+            style="Card.TCheckbutton", variable=self.var_review_auto,
+            command=self._toggle_review_auto_advance).pack(
+                side="right", padx=6, pady=T.INNER)
+        self.var_review_preview = self.tk.BooleanVar(
+            value=bool(self.settings.get("preview_in_dialog", True)))
+        ttk.Checkbutton(
+            top, text="Visa sidförhandsvisning",
+            style="Card.TCheckbutton", variable=self.var_review_preview,
+            command=self._toggle_review_preview).pack(
+                side="right", padx=6, pady=T.INNER)
 
         cols = ("file", "reason", "guess", "ocr")
         self.q_tree = ttk.Treeview(f, columns=cols, show="headings")
@@ -9925,6 +10313,22 @@ class App:
                          pady=(T.GAP, T.PAD))
         self.theme.zebra(self.q_tree)
         self.q_tree.bind("<Double-1>", lambda e: self._process_queue(self._queue_index()))
+
+    def _toggle_review_auto_advance(self) -> None:
+        enabled = bool(self.var_review_auto.get())
+        self.settings["review_auto_advance"] = enabled
+        save_settings(self.settings)
+        self._log(
+            "Granskningen fortsätter automatiskt efter bekräftat val."
+            if enabled else
+            "Automatisk fortsättning avstängd; granskningen stannar efter varje val.",
+            "info")
+
+    def _toggle_review_preview(self) -> None:
+        enabled = bool(self.var_review_preview.get())
+        self.settings["preview_in_dialog"] = enabled
+        save_settings(self.settings)
+        self._log("PDF-sidförhandsvisning " + ("på." if enabled else "av."), "info")
 
     def _queue_index(self) -> int:
         sel = self.q_tree.selection()
@@ -10030,6 +10434,7 @@ class App:
         all_learned: List[str] = []
         last_category = ""
         stopped_review = False
+        paused_after_choice = False
         i = start
         while i < len(self.queue):
             # Fönstret kan ha rivits medan förra dialogen var öppen (t.ex.
@@ -10086,8 +10491,13 @@ class App:
                           f"{kvar} filer ligger kvar i kön.", "warn")
                 self._refresh_queue()
                 break
-            if res is None:                        # hoppa över en fil
-                session_log("granska", f"Hoppade över {decision.path.name} "
+            if res and res.get("defer"):
+                session_log("granska", f"Sköt upp {decision.path.name} "
+                            "- filen är orörd och ligger kvar i kön")
+                i += 1
+                continue
+            if res is None:                        # stängd utan beslut
+                session_log("granska", f"Stängde granskningen av {decision.path.name} "
                             "- filen ligger kvar i kön")
                 i += 1
                 continue
@@ -10105,6 +10515,9 @@ class App:
                     self._sync_tray()
                     if self.watcher:
                         self.watcher.forget(decision.path)
+                    if not self.settings.get("review_auto_advance", True):
+                        paused_after_choice = True
+                        break
                     continue
                 # gick inte att läsa/hashen: behandla som hoppa över
                 self._log(f"{decision.path.name}  ✖ kunde inte ignoreras "
@@ -10150,7 +10563,14 @@ class App:
                 self.root.update_idletasks()
             except Exception:
                 return
+            if not self.settings.get("review_auto_advance", True):
+                paused_after_choice = True
+                break
 
+        if paused_after_choice:
+            self._log(
+                "Granskningen stannade efter ditt val. Nästa fil ligger kvar i kön; "
+                "välj ‘Granska alla…’ när du vill fortsätta.", "info")
         self._refresh_queue()
         self._refresh_categories()
         self._refresh_history()
@@ -10748,6 +11168,7 @@ class App:
                  padx=self.theme.PAD, pady=(self.theme.GAP, self.theme.GAP))
         actions = [
             ("Spara hjälpen som textfil…", self._save_help),
+            ("Tangentbordsgenvägar…", self._show_shortcuts),
             ("Öppna inställningsmappen", lambda: open_externally(config_dir())),
             ("Kopiera AI-rapport (alla fel)", self._copy_ai_report),
             ("Kopiera diagnostik för support", self._copy_support_log),
@@ -12113,6 +12534,20 @@ class App:
             open_externally(d)
         except Exception as exc:
             self._fel(exc, "öppna log-mappen")
+
+    def _open_rules_import_dir(self) -> None:
+        self._open_rules_transfer_dir("imports")
+
+    def _open_rules_export_dir(self) -> None:
+        self._open_rules_transfer_dir("exports")
+
+    def _open_rules_transfer_dir(self, kind: str) -> None:
+        label = "importmappen" if kind == "imports" else "exportmappen"
+        self._ui(f"Öppna {label}")
+        try:
+            open_externally(rules_transfer_dir(kind))
+        except Exception as exc:
+            self._fel(exc, f"öppna {label}")
 
     def _save_help(self) -> None:
         path = self.filedialog.asksaveasfilename(

@@ -237,11 +237,15 @@ class Theme:
     INNER = 10      # inuti ett kort
 
     def __init__(self, root, ttk, dark: bool = False,
-                 contrast: str = "normal"):
+                 contrast: str = "normal", text_scale: float = 1.0):
         self.root = root
         self.ttk = ttk
         self.dark = dark
         self.contrast = contrast
+        try:
+            self.text_scale = max(1.0, min(1.5, float(text_scale)))
+        except (TypeError, ValueError):
+            self.text_scale = 1.0
         if contrast == "high":
             self.c = COLORS_HC
         else:
@@ -263,7 +267,8 @@ class Theme:
             dpi = float(root.winfo_fpixels("1i"))
         except Exception:
             dpi = 96.0
-        self.ui_scale = 1.25 if dpi >= 144 else (1.1 if dpi >= 120 else 1.0)
+        self.ui_scale = (1.25 if dpi >= 144 else (1.1 if dpi >= 120 else 1.0))
+        self.ui_scale *= self.text_scale
 
         def _sz(n: int) -> int:
             return max(8, int(round(n * self.ui_scale)))

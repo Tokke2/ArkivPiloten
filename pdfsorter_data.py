@@ -719,10 +719,21 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # -- rapport --
     "report_days": 10,           # hur många dagar matchningsrapporten täcker
     # -- framskjutet --
-    "preview_in_dialog": False,  # PDF-förhandsvisning i granskningsrutan
-                                 # (REQ-N7, FRAMSKJUTEN tills beställaren säger till)
+    "preview_in_dialog": True,   # sidförhandsvisning med rotationsverktyg i granskningen
+    "review_auto_advance": True,  # fortsätt till nästa granskning efter bekräftat val
+    "review_preview_migrated_v1": False,
+    "ui_text_size": "normal",   # normal | large
     "contrast": "normal",        # normal | high (högkontrast, tema rond 3)
 }
+
+
+def migrate_review_preview_setting(settings: Dict[str, Any]) -> bool:
+    """Enable the newly interactive PDF review preview once for old installs."""
+    if settings.get("review_preview_migrated_v1", False):
+        return False
+    settings["preview_in_dialog"] = True
+    settings["review_preview_migrated_v1"] = True
+    return True
 
 
 def _migrate_tray_behavior(settings: Dict[str, Any]) -> bool:

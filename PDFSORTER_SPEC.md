@@ -1780,8 +1780,9 @@ KOMMANDE tills beställaren uttryckligen ger klartecken.
   "bygg nu").
 - AC-4.3 Beställaren kan när som helst skjuta upp, avbryta eller avbeställa
   utan att andra krav påverkas.
-- AC-4.4 Regeln gäller även funktioner som redan kodlevererats men är
-  avstängda i väntan på order (t.ex. N7, `preview_in_dialog=False`).
+- AC-4.4 Kodade funktioner är inte automatiskt aktiverade om de kräver
+  uttryckligt godkännande; användarens senare, uttryckliga klartecken ändrar
+  statusen och dokumenteras i respektive krav.
 ## L. Robusthet mot nya krav — tillägg som ska hållas
 
 ### REQ-L1 (M) — Ta bort matchningar i GUI (se REQ-F5)
@@ -2086,13 +2087,28 @@ bild, med bläddring fram/bakåt, så att användaren kan bocka i stödord med
 - AC-7.2 Knappar för föregående/nästa sida (minst de tre första sidorna).
 - AC-7.3 Saknas PyMuPDF döljs förhandsvisningen och dialogen behåller
   knappen Förhandsgranska PDF (extern visning) — reservväg enligt REQ-A2.
-- AC-7.4 Förhandsvisningen är skrivskyddad och påverkar inte matchning,
-  regler eller filer (AC-K1.5).
-- AC-7.5 Kodleverans finns (3 sidor, ‹/›-bläddring, bakgrundsrendering,
-  pymupdf-fallback), men funktionen är **FRAMSKJUTEN** på beställarens
-  order 2026-08-26: `settings["preview_in_dialog"] = False` är standard och
-  förhandsvisningen visas inte förrän beställaren säger till. Koden är
-  bortkopplad, inte borttagen (INGA FUNKTIONER TAS BORT).
+- AC-7.4 Förhandsvisningen är skrivskyddad; rotation i förhandsvisningen
+  påverkar inte originalfilen, matchning eller regler.
+- AC-7.5 90°-rotation kan sparas som en separat vektorbevarande PDF-kopia.
+  Rätning uppskattar sidornas lutning var för sig och skapar ett separat
+  rasteriserat exemplar efter tydlig varning/ja-nej-fråga för dokumentet.
+  Originalet lämnas orört.
+- AC-7.6 Förhandsvisningen är på som standard efter engångsmigrering, kan
+  stängas av från granskningsfliken och faller tillbaka till extern visning
+  om PyMuPDF saknas.
+
+### REQ-N8 (M) — Granskningsflöde, genvägar och läsbarhet
+**AC-N8:**
+- Användaren väljer om kön går vidare efter ett bekräftat beslut; avstängt
+  läge stannar efter varje fil och lämnar resten i kön.
+- **Vänta med den här** lämnar PDF:en orörd och kvar i kön; nästa PDF kan
+  granskas utan att den uppskjutna filen försvinner.
+- Hjälp-menyn visar tangentbordsgenvägarna och dialogens vanliga kortkommandon.
+- Större text kan väljas live och sparas; inga tecken eller kontroller döljs,
+  och befintlig rullning finns kvar.
+- Import- och exportmappar för kategoriregler kan öppnas från Arkiv-menyn;
+  filväljaren startar i motsvarande mapp.
+- Undantag i GUI-loggen kompletteras med ett konkret säkert nästa steg.
 
 ---
 *Detta är kontraktet för godkännande av PDF Sorter.*
@@ -2260,7 +2276,7 @@ i kravsektionerna ovan (N1-N14 m.fl.).
 | 4 | Mörkt läge & högkontrast | Ny funktion | **GODKÄND → REQ-H3** (designorder 2026-08-26) | | 5 | Förslagsfunktionen i appen (Förslag-vy + utlösare "förslag") | Ny funktion |
 | 6 | Full testsvit tests/test_full_system.py | Kvalitet |
 | 8 | Diagnostikkort i GUI + utökat --status | Ny funktion | **GODKÄND → REQ-N3** | | 9 | CSV-export av historiken | Ny funktion |
-| 10 | Inbyggd PDF-förhandsvisning i granskningsdialogen | Ny funktion | **KOMMANDE (REQ-N7)** — kod finns men är AVSTÄNGD (`preview_in_dialog=False`) tills beställaren säger till | | 11 | Drag-och-släpp batch-import | Ny funktion |
+| 10 | Inbyggd PDF-förhandsvisning i granskningsdialogen | Ny funktion | **GODKÄND OCH LEVERERAD (REQ-N7)** — sidrotation, vektorbevarande kopia och separat varnad rätad kopia | | 11 | Drag-och-släpp batch-import | Ny funktion |
 | 12 | Duplikatspärr + SHA-256, alltid fråga: ersätt eller "(2)" | Ny funktion | **GODKÄND → REQ-N4** | | 13 | Auto-omladdning av rules.json vid extern ändring | Ny funktion |
 | 14 | NAS-/nätverksmappar med återanslutning + status | Förbättring |
 | 15 | Tangentbordsnav, Ctrl+Z (ångra), Ctrl+F (sök) | Förbättring |
