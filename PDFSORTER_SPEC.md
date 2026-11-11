@@ -1321,14 +1321,14 @@ En osäker fil öppnas med **tio föreslagna stödord** som användaren bockar i
 När användaren svarat ska appen spara valda stödord och uppdatera
 osorterade filer. En kategori behöver fem olika manuellt bekräftade filer
 innan automatflytt kan börja. Därefter krävs minst två olika sparade stödord
-som träffar bokstavligt i exakt en kategori; övriga fall kräver granskning.
+som träffar bokstavligt och inte finns i andra kategorier; övriga fall kräver granskning.
 **AC-F2:**
 - AC-2.1 Valda ord sparas som permanenta regler om "Spara valda ord" är
   på; kryssrutan är på som standard så användarval lärs in vid bekräftelse.
 - AC-2.2 Filen flyttas till vald kategori.
-- AC-2.3 Automatflytt aktiveras för en kategori först efter fem distinkta manuella bekräftelser; därefter krävs minst två olika exakta helords-/frasträffar i en unik kategori.
+- AC-2.3 Automatflytt aktiveras för en kategori först efter fem distinkta manuella bekräftelser; därefter krävs minst två olika exakta helords-/frasträffar som inte delas med andra kategorier.
 - AC-2.4 `rescan_after_learn` skannar om kön, inmapparna och `_Osorterat`
-  i bakgrunden. Samma fem bekräftelser och två exakta träffar krävs; övriga läggs i kön.
+  i bakgrunden. Samma fem bekräftelser och två kategoriexklusiva exakta träffar krävs; övriga läggs i kön.
 
 ### REQ-F3 (M) — Flikar
 **AC-F3:**

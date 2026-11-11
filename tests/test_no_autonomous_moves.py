@@ -42,6 +42,27 @@ def test_learned_match_is_only_a_suggestion(monkeypatch, tmp_path):
     assert decision.learned_hint == ("Acme", 12)
 
 
+def test_shared_keywords_do_not_count_as_category_exclusive_exact_evidence(
+        tmp_path):
+    rules = Rules({"categories": [
+        {"name": "Kontoutdrag", "folder": "Kontoutdrag", "keywords": [
+            {"text": "Handelsbanken", "weight": 1.0},
+            {"text": "kontoutdrag", "weight": 1.0},
+            {"text": "saldo", "weight": 1.0},
+        ]},
+        {"name": "Lånebesked", "folder": "Lånebesked", "keywords": [
+            {"text": "Handelsbanken", "weight": 1.0},
+            {"text": "lånebesked", "weight": 1.0},
+        ]},
+    ]}, tmp_path / "rules.json")
+    extraction = P.Extraction(
+        path=tmp_path / "statement.pdf",
+        text="Handelsbanken kontoutdrag saldo")
+
+    assert P.exact_support_matches(rules, extraction) == {
+        "Kontoutdrag": ["kontoutdrag", "saldo"]}
+
+
 def test_manual_confirmation_count_is_distinct_and_category_specific():
     events = _manual_events("Acme", 2)
     events += [dict(events[0]), {"category": "Other", "decided_by": "user",

@@ -15,8 +15,8 @@ Undermappar skapas automatiskt vid behov.
 
 Appen lär bara in stödord som användaren själv väljer och sparar. En fil
 flyttas automatiskt först efter fem manuellt bekräftade filer i kategorin,
-och därefter endast när minst två olika sparade stödord matchar exakt som
-helord/fras i PDF-texten, exakt en kategori har träffarna och den ligger först.
+och därefter endast när minst två olika sparade stödord som bara finns i den
+kategorin matchar exakt som helord/fras i PDF-texten och kategorin ligger först.
 Case och upprepade blanksteg normaliseras; stavning
 och skiljetecken inne i stödordet/frasen måste annars stämma. Inlärning, lösa poäng,
 OCR-brus, delord och flexibla ID-matchningar kan aldrig själva flytta filer.
@@ -1834,8 +1834,8 @@ def validate_subfolder_override(value: str) -> Tuple[str, str]:
 def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, List[str]]:
     """Return literal, whole-word support matches from PDF text by category.
 
-    A category is returned only when at least two different saved support
-    words match exactly, regardless of a lower per-category minimum.
+    A category is returned only when at least two different, category-exclusive
+    saved support words match exactly, regardless of a lower per-category minimum.
     This deliberately does not use OCR denoising, flexible identifier
     separators, the filename, learned-model scores, or substring rules.
     Text is case-folded and whitespace-normalized only; punctuation and the
@@ -1844,21 +1844,41 @@ def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, Lis
     body = normalize(getattr(extraction, "text", "") or "")
     if not body:
         return {}
+    def active_word(kw: Dict[str, Any]) -> str:
+        word = normalize(kw.get("text", ""))
+        if (not word or not kw.get("whole_word", True)
+                or (not any(char.isalpha() for char in word)
+                    and not keyword_strength(word))
+                or float(kw.get("weight", 1.0) or 0.0) <= 0
+                or int(kw.get("rejected", 0) or 0) > 0
+                or _reject_factor(kw) <= 0):
+            return ""
+        return word
+
+    # Shared terms are not category evidence at all: only terms owned by
+    # exactly one enabled category may count toward the two-word threshold.
+    owners: Dict[str, set] = {}
+    for cat in rules.categories:
+        if not cat.get("enabled", True):
+            continue
+        category = str(cat.get("name", ""))
+        for kw in cat.get("keywords", []):
+            word = active_word(kw)
+            if word:
+                owners.setdefault(word, set()).add(category)
+
     zones = _zones_for(body, "", "", "")
     matches: Dict[str, List[str]] = {}
     for cat in rules.categories:
         if not cat.get("enabled", True):
             continue
+        category = str(cat.get("name", ""))
         found = []
         seen = set()
         for kw in cat.get("keywords", []):
-            word = normalize(kw.get("text", ""))
-            if (not word or word in seen or not kw.get("whole_word", True)
-                    or (not any(char.isalpha() for char in word)
-                        and not keyword_strength(word))
-                    or float(kw.get("weight", 1.0) or 0.0) <= 0
-                    or int(kw.get("rejected", 0) or 0) > 0
-                    or _reject_factor(kw) <= 0):
+            word = active_word(kw)
+            if (not word or word in seen
+                    or owners.get(word, set()) != {category}):
                 continue
             seen.add(word)
             if not zones.kan_finnas(kw):
@@ -1918,8 +1938,8 @@ def exact_auto_category(rules: Rules, decision: Decision) -> str:
 def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> Decision:
     """Besluta mellan flera exakta stödordsträffar och granskning.
 
-    Minst två olika bokstavliga helords-/frasträffar i exakt en kategori
-    och fem tidigare manuella bekräftelser i kategorin krävs för ``auto``.
+    Minst två olika, kategoriexklusiva bokstavliga helords-/frasträffar och
+    fem tidigare manuella bekräftelser i kategorin krävs för ``auto``.
     All annan evidens skickas till granskning.
     """
     if extraction.error and not extraction.text:
@@ -1944,9 +1964,9 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
         _apply_learned_ranking(scores, lm_pred)
 
     # A move is allowed only when at least two different user-owned support
-    # words/phrases occur literally in the document text, with whole-word
-    # boundaries, and exactly one category has those matches. Learned scores
-    # and flexible/substring matches can never authorize a move.
+    # words/phrases, exclusive to one category, occur literally in the document
+    # text with whole-word boundaries. Learned scores and flexible/substring
+    # matches can never authorize a move.
     exact = exact_support_matches(rules, extraction)
     if (len(exact) == 1 and scores and scores[0].name in exact
             and not scores[0].only_recipient):
@@ -2876,8 +2896,8 @@ class SortEngine:
                     and exact_auto_category(self.rules, decision) != category):
                 self.stats["left"] += 1
                 return False, ("Automatisk flyttning kräver minst två olika "
-                               "exakta stödordsträffar i en unik kategori och "
-                               "fem tidigare manuella bekräftelser där. "
+                               "exakta stödord som inte delas med andra kategorier "
+                               "och fem tidigare manuella bekräftelser där. "
                                "Filen ligger kvar för granskning.")
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
@@ -7851,7 +7871,7 @@ class App:
             opt,
             text=("Stödordsförslag sparas först när du väljer dem. En kategori "
                   "behöver fem manuella bekräftelser; därefter krävs minst två "
-                  "olika exakta stödord i en unik kategori för automatflytt."),
+                  "exakta stödord som inte delas med andra kategorier."),
             style="CardMuted.TLabel", wraplength=460, justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
         ocr_cb = ttk.Checkbutton(opt, text="OCR för skannade PDF:er",
