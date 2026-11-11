@@ -2843,12 +2843,16 @@ class SortEngine:
             folder = cat["folder"]
             mall = cat.get("subfolder", "")
             sub, when, källa = self.subfolder_for(decision.extraction, mall)
+            category_sub, category_error = validate_subfolder_override(
+                cat.get("subfolder_path", ""))
+            if category_error:
+                self.stats["left"] += 1
+                return False, f"Kategorins standardundermapp är ogiltig: {category_error}"
             manual_sub, sub_error = validate_subfolder_override(subfolder_override)
             if sub_error:
                 self.stats["left"] += 1
                 return False, sub_error
-            if manual_sub:
-                sub = "/".join(part for part in (sub, manual_sub) if part)
+            sub = "/".join(part for part in (sub, category_sub, manual_sub) if part)
 
             # -- REQ-N4: dubblettkontroll innan något rör disken --
             on_conflict = s.get("on_conflict", "rename")
@@ -4290,7 +4294,7 @@ class ReviewDialog:
         self.new_entry = ttk.Entry(catbox)
         self.new_entry.grid(row=5, column=1, sticky="ew",
                             padx=(8, 14), pady=(0, 8))
-        self.new_entry.bind("<KeyRelease>", lambda e: self.mode.set("new"))
+        self.new_entry.bind("<KeyRelease>", self._new_name_changed)
         if self.guess_name:
             self.new_entry.insert(0, self.guess_name)
         if suggested_sender and not (best and best.name in rules.names()):
@@ -4310,7 +4314,7 @@ class ReviewDialog:
         subrow.grid(row=7, column=0, columnspan=2, sticky="ew",
                     padx=14, pady=(4, 4))
         subrow.columnconfigure(1, weight=1)
-        ttk.Label(subrow, text="Undermapp:", style="Card.TLabel").grid(
+        ttk.Label(subrow, text="Extra undermapp:", style="Card.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 8))
         self.var_subfolder = tk.StringVar(value="")
         self.subfolder_entry = ttk.Entry(subrow, textvariable=self.var_subfolder)
@@ -4319,20 +4323,30 @@ class ReviewDialog:
                    command=self._browse_subfolder).grid(
                        row=0, column=2, padx=(0, 4))
         ttk.Button(subrow, text="Skapa ny…",
-                   command=self._create_subfolder).grid(row=0, column=3)
+                   command=self._create_subfolder).grid(row=0, column=3, padx=(0, 4))
+        ttk.Button(subrow, text="Standard",
+                   command=lambda: self.var_subfolder.set("")).grid(row=0, column=4)
         ttk.Label(
-            catbox, text="Valfri sökväg under vald kategori/årsmapp.",
+            catbox,
+            text="Lämna tomt för kategoriens standardundermapp; en extra sökväg läggs under den.",
             style="CardMuted.TLabel").grid(
                 row=8, column=0, columnspan=2, sticky="w",
                 padx=14, pady=(0, 4))
 
+        self.lbl_subfolder_hint = ttk.Label(
+            catbox, text="", style="CardMuted.TLabel",
+            wraplength=review_text_width(), justify="left")
+        wrap_widgets.append(self.lbl_subfolder_hint)
+        self.lbl_subfolder_hint.grid(
+            row=9, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 4))
         self.save_rule = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             catbox, variable=self.save_rule,
             text="Spara valda stödord för framtida exakta matchningar",
             style="Card.TCheckbutton").grid(
-                row=9, column=0, columnspan=2, sticky="w",
+                row=10, column=0, columnspan=2, sticky="w",
                 padx=14, pady=(4, 12))
+        self._update_subfolder_hint()
 
         def layout_review_columns(_event=None):
             # Keep the requested left/right arrangement whenever both
@@ -4725,11 +4739,34 @@ class ReviewDialog:
             return
         self.var_subfolder.set(cleaned)
 
+    def _new_name_changed(self, event=None) -> None:
+        self.mode.set("new")
+        self._update_subfolder_hint()
+
+    def _update_subfolder_hint(self) -> None:
+        label = getattr(self, "lbl_subfolder_hint", None)
+        if label is None:
+            return
+        category = self._category()
+        if not category:
+            label.configure(text="Välj en kategori för att se standardplatsen.")
+            return
+        base = self._subfolder_base()
+        if base is None:
+            label.configure(
+                text="Lämna extraundermappen tom för att använda kategoriens standardplats.")
+            return
+        label.configure(
+            text=f"Standardplats: {base}  ·  Lämna tomt för den här platsen.")
+
     def _sync(self) -> None:
         # Rullgardinen är alltid skrivbar/sökbar; bara "Ny mapp"-fältet
         # växlas mellan aktivt och inaktivt.
         is_new = self.mode.get() == "new"
         self.new_entry.configure(state="normal" if is_new else "disabled")
+        update_hint = getattr(self, "_update_subfolder_hint", None)
+        if update_hint is not None:
+            update_hint()
 
     def _combo_show_hint(self, text: str = "") -> None:
         """Liten hjälprad under fältet: vad sökningen hittade och vad
@@ -5864,6 +5901,14 @@ _UI_EN = {
     "Lär in valda ord för framtida sortering":
         "Learn selected words for future sorting",
     "Mappnamn:": "Folder name:", "Undermapp:": "Subfolder:",
+    "Standardundermapp:": "Default subfolder:", "Datum:": "Date:",
+    "Välj…": "Choose…", "Skapa…": "Create…", "Standard": "Default",
+    "Välj befintlig…": "Choose existing…", "Skapa ny…": "Create new…",
+    "Extra undermapp:": "Additional subfolder:",
+    "Relativt till kategoriens datum-/årsmapp; skapas vid första sorteringen.":
+        "Relative to the category's date/year folder; created on first sort.",
+    "Lämna tomt för kategoriens standardundermapp; en extra sökväg läggs under den.":
+        "Leave empty to use the category default; an extra path is nested below it.",
     "Sök stödord": "Search keywords", "Kontrollera": "Check", "Kontrollera igen": "Check again",
     "Spara hjälpen som textfil…": "Save help as text file…",
     "Stöd projektet 💖": "Support the project 💖",
@@ -8825,10 +8870,8 @@ class App:
         T.fit_columns(self.cat_tree, (
             ("name", "KATEGORI", 16, "w", True),
             ("count", "ORD", 3, "center", False),
-            # Visar avvikelser från standard: "3 ord" eller "{år}". Utan
-            # den måste man klicka på varje kategori för att se om någon
-            # har egna regler.
-            ("regel", "REGEL", 7, "w", False)))
+            # Visa kategorins undermappsinställning direkt i listan.
+            ("regel", "UNDERMAPP", 14, "w", False)))
         self.cat_tree.grid(row=0, column=0, sticky="nsew", padx=(1, 0), pady=(1, 0))
         self.cat_tree.bind("<<TreeviewSelect>>", lambda e: self._on_cat_select())
         # Ta bort en kategori med Delete-tangenten, som en bekväm genväg
@@ -8904,23 +8947,40 @@ class App:
         ttk.Button(meta, text="Spara", command=self._cat_save_meta
                    ).grid(row=0, column=3)
 
-        # -- undermapp per datum --
-        ttk.Label(meta, text="Undermapp:", style="Card.TLabel").grid(
+        # -- standardundermapp per kategori --
+        ttk.Label(meta, text="Standardundermapp:", style="Card.TLabel").grid(
             row=1, column=0, sticky="w", pady=(8, 0))
+        self.var_cat_subpath = tk.StringVar()
+        ttk.Entry(meta, textvariable=self.var_cat_subpath).grid(
+            row=1, column=1, sticky="ew", padx=8, pady=(8, 0))
+        ttk.Button(meta, text="Välj…", command=self._cat_browse_subpath
+                   ).grid(row=1, column=2, padx=(0, 4), pady=(8, 0))
+        ttk.Button(meta, text="Skapa…", command=self._cat_create_subpath
+                   ).grid(row=1, column=3, padx=(0, 4), pady=(8, 0))
+        ttk.Button(meta, text="Spara", command=self._cat_save_subpath
+                   ).grid(row=1, column=4, pady=(8, 0))
+        ttk.Label(
+            meta, text="Relativt till kategoriens datum-/årsmapp; skapas vid första sorteringen.",
+            style="CardMuted.TLabel").grid(
+                row=2, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
+
+        # -- datummall för undermapp --
+        ttk.Label(meta, text="Datum:", style="Card.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(8, 0))
         self.sub_combo = ttk.Combobox(
             meta, state="readonly", width=34,
             values=[etikett for _, etikett in SUBFOLDER_TEMPLATES])
-        self.sub_combo.grid(row=1, column=1, sticky="w", padx=8, pady=(8, 0))
+        self.sub_combo.grid(row=3, column=1, sticky="w", padx=8, pady=(8, 0))
         self.sub_combo.bind("<<ComboboxSelected>>", lambda e: self._cat_save_sub())
         self.lbl_sub_ex = ttk.Label(meta, text="", style="CardMuted.TLabel")
-        self.lbl_sub_ex.grid(row=1, column=2, columnspan=2, sticky="w",
+        self.lbl_sub_ex.grid(row=3, column=2, columnspan=3, sticky="w",
                              pady=(8, 0))
 
         # -- eget krav på antal stödord --
         ttk.Label(meta, text="Kräver:", style="Card.TLabel").grid(
-            row=2, column=0, sticky="w", pady=(8, 0))
+            row=4, column=0, sticky="w", pady=(8, 0))
         krav = ttk.Frame(meta, style="CardInner.TFrame")
-        krav.grid(row=2, column=1, columnspan=3, sticky="w",
+        krav.grid(row=4, column=1, columnspan=4, sticky="w",
                   padx=8, pady=(8, 0))
         self.var_catkw = tk.StringVar(value="0")
         self.spin_catkw = ttk.Spinbox(krav, from_=0, to=9, width=4,
@@ -9036,6 +9096,8 @@ class App:
             n_kw = int(cat.get("min_keywords", 0) or 0)
             if n_kw:
                 märken.append(f"{n_kw} ord")
+            if cat.get("subfolder_path"):
+                märken.append("/" + cat["subfolder_path"])
             if cat.get("subfolder"):
                 märken.append(cat["subfolder"])
             self.cat_tree.insert("", "end", iid=cat["name"], tags=tags,
@@ -9092,6 +9154,7 @@ class App:
         self.kw_buttons.grid()
         self.var_folder.set(cat["folder"])
         self.var_cat_enabled.set(cat.get("enabled", True))
+        self.var_cat_subpath.set(cat.get("subfolder_path", ""))
         mall = cat.get("subfolder", "")
         nycklar = [t for t, _ in SUBFOLDER_TEMPLATES]
         self.sub_combo.current(nycklar.index(mall) if mall in nycklar else 0)
@@ -9333,6 +9396,101 @@ class App:
         finally:
             self.cat_menu.grab_release()
 
+    def _category_subfolder_base(self, cat: Dict[str, Any],
+                                 when: Optional[date] = None) -> Path:
+        """Dagens datum-/årsmapp under vald kategori."""
+        when = when or date.today()
+        dated = ""
+        if self.settings.get("date_enabled", False):
+            template = (cat.get("subfolder", "")
+                        or self.settings.get("date_default_template", "{år}"))
+            if template:
+                dated = render_subfolder(template, when)
+        if self.settings.get("year_subfolder", True):
+            year = str(when.year)
+            levels = [part for part in dated.split("/") if part and part != year]
+            dated = "/".join([year, *levels])
+        base = (Path(self.settings.get("output_dir") or ".")
+                / safe_folder_name(cat["folder"])
+        )
+        for part in dated.split("/"):
+            if part:
+                base = base / safe_folder_name(part)
+        return base
+
+    def _cat_browse_subpath(self) -> None:
+        """Välj en befintlig standardundermapp under dagens kategori-/datummapp."""
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            return
+        if not self.settings.get("output_dir"):
+            self.messagebox.showinfo(
+                APP_NAME, "Välj först en arkivmapp under Start.", parent=self.root)
+            return
+        base = self._category_subfolder_base(cat).resolve()
+        if not base.is_dir():
+            self.messagebox.showinfo(
+                APP_NAME,
+                "Målmappen finns inte ännu. Skriv eller skapa en standardundermapp; "
+                "den skapas när den första filen sorteras dit.", parent=self.root)
+            return
+        chosen = self.filedialog.askdirectory(
+            parent=self.root, title="Välj standardundermapp",
+            initialdir=str(base), mustexist=True)
+        if not chosen:
+            return
+        try:
+            relative = Path(chosen).resolve().relative_to(base)
+        except (OSError, ValueError):
+            self.messagebox.showerror(
+                APP_NAME, "Välj en undermapp inuti kategoriens datum-/årsmapp.",
+                parent=self.root)
+            return
+        value, error = validate_subfolder_override(
+            "" if relative == Path(".") else relative.as_posix())
+        if error:
+            self.messagebox.showerror(APP_NAME, error, parent=self.root)
+            return
+        self.var_cat_subpath.set(value)
+        self._cat_save_subpath()
+
+    def _cat_create_subpath(self) -> None:
+        """Ange en relativ standardundermapp som skapas vid första flytten."""
+        if not self._selected_cat():
+            return
+        value = self.simpledialog.askstring(
+            APP_NAME,
+            "Standardundermapp relativt datum-/årsmappen (exempel: Fakturor/2025). "
+            "Den skapas när första filen sorteras dit:",
+            initialvalue=self.var_cat_subpath.get(), parent=self.root)
+        if value is None:
+            return
+        self.var_cat_subpath.set(value)
+        self._cat_save_subpath()
+
+    def _cat_save_subpath(self) -> None:
+        """Validera och spara kategorins standardundermapp."""
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            return
+        value, error = validate_subfolder_override(self.var_cat_subpath.get())
+        if error:
+            self.messagebox.showerror(APP_NAME, error, parent=self.root)
+            self.var_cat_subpath.set(cat.get("subfolder_path", ""))
+            return
+        self.var_cat_subpath.set(value)
+        if value == cat.get("subfolder_path", ""):
+            self._show_sub_example(cat)
+            return
+        cat["subfolder_path"] = value
+        self.rules.save()
+        self._show_sub_example(cat)
+        self._log(
+            f"Sparade standardundermapp för {cat['name']}: {value or '(ingen)'}",
+            "info")
+
     def _cat_save_sub(self) -> None:
         """Spara vald undermappsmall och visa ett exempel med dagens datum."""
         name = self._selected_cat()
@@ -9349,16 +9507,33 @@ class App:
                       "Slå på den under Inställningar.", "warn")
 
     def _show_sub_example(self, cat: Dict[str, Any]) -> None:
-        """Grå exempelrad: så här hamnar en fil som sorteras idag."""
-        mall = cat.get("subfolder", "")
-        if not mall:
+        """Visa dagens exempel på standard- och datumundermappar."""
+        today = date.today()
+        dated = ""
+        if self.settings.get("date_enabled", False):
+            template = (cat.get("subfolder", "")
+                        or self.settings.get("date_default_template", "{år}"))
+            if template:
+                dated = render_subfolder(template, today)
+        if self.settings.get("year_subfolder", True):
+            year = str(today.year)
+            levels = [part for part in dated.split("/") if part and part != year]
+            dated = "/".join([year, *levels])
+        standard, error = validate_subfolder_override(
+            cat.get("subfolder_path", ""))
+        parts = [part for part in (dated, standard) if part]
+        if error:
+            self.lbl_sub_ex.configure(text="Ogiltig standardundermapp")
+            return
+        if not parts:
             self.lbl_sub_ex.configure(text="")
             return
-        ex = render_subfolder(mall, date.today())
-        på = self.settings.get("date_enabled", False)
+        example = "/".join(parts)
+        suffix = ("   (datummall avstängd)"
+                  if cat.get("subfolder") and not self.settings.get("date_enabled", False)
+                  else "")
         self.lbl_sub_ex.configure(
-            text=f"idag → {cat['folder']}/{ex}/"
-                 + ("" if på else "   (datumsortering är av)"))
+            text=f"idag → {cat['folder']}/{example}/" + suffix)
 
     def _cat_save_kw(self) -> None:
         """Spara kategorins eget krav på antal matchade stödord."""
@@ -9701,7 +9876,11 @@ class App:
             return
         if merge:
             for cat in incoming.categories:
-                self.rules.ensure_category(cat["name"], cat["folder"])
+                target = self.rules.ensure_category(cat["name"], cat["folder"])
+                if cat.get("subfolder"):
+                    target["subfolder"] = cat["subfolder"]
+                if cat.get("subfolder_path"):
+                    target["subfolder_path"] = cat["subfolder_path"]
                 self.rules.add_keywords(cat["name"], [k["text"] for k in cat["keywords"]],
                                         source="import")
         else:
@@ -9814,8 +9993,12 @@ class App:
         template = cat.get("subfolder", "") if cat else ""
         sub, _when, _source = self.engine.subfolder_for(
             decision.extraction, template)
+        category_sub, error = validate_subfolder_override(
+            cat.get("subfolder_path", "") if cat else "")
+        if error:
+            category_sub = ""
         base = Path(self.settings.get("output_dir") or ".") / safe_folder_name(folder)
-        for part in sub.split("/"):
+        for part in "/".join(p for p in (sub, category_sub) if p).split("/"):
             if part:
                 base = base / safe_folder_name(part)
         return base

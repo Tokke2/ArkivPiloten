@@ -637,7 +637,8 @@ pdfsorter_theme.py  ──►  (helt fristående)
 - **Tre JSON-filer**, alla skrivna **atomiskt** (temp-fil + `os.replace`):
   `rules.json`, `settings.json`, `history.json`.
 - **`Rules`** representerar `rules.json`: `categories[]` med
-  `name`, `folder`, `keywords[]`, `enabled`, `subfolder`, `min_keywords`,
+  `name`, `folder`, `keywords[]`, `enabled`, `subfolder` (datumsmall),
+  `subfolder_path` (fast relativ standardundermapp), `min_keywords`,
   `created`, `files_sorted`. Stödord: `{text, weight, whole_word, hits,
   added, source}`.
 - **`InstanceLock`** säkerställer bara en körande instans (PID+starttid,
@@ -747,6 +748,7 @@ identifierar företaget lika säkert ensamt som tillsammans med tio vanliga ord.
       "folder": "Pilkington",
       "enabled": true,
       "subfolder": "{år}",
+      "subfolder_path": "Fakturor",
       "min_keywords": 0,
       "created": "...",
       "files_sorted": 27,
@@ -1269,8 +1271,8 @@ inmapp** (t.ex. Arkiv/ eller redan sorterade undermappar).
   `updated`, `categories`.
 - AC-1.2 Återinläsning av en sparad fil ger identiska kategorier och
   stödord.
-- AC-1.3 Kategorifält `subfolder`, `min_keywords`, `files_sorted`
-  överlever spara/läsa.
+- AC-1.3 Kategorifält `subfolder`, `subfolder_path`, `min_keywords`,
+  `files_sorted` överlever spara/läsa.
 
 ### REQ-E2 (M) — Olika sorters matchningsregler
 **AC-E2:**

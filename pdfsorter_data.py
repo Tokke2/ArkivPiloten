@@ -919,6 +919,7 @@ class Rules:
                 "keywords": keywords,
                 "enabled": bool(cat.get("enabled", True)),
                 "subfolder": str(cat.get("subfolder", "") or ""),
+                "subfolder_path": str(cat.get("subfolder_path", "") or ""),
                 # 0 = använd strikthetsnivåns värde. Sätts den till t.ex. 3
                 # krävs tre olika stödord just för den här kategorin.
                 "min_keywords": max(0, int(cat.get("min_keywords", 0) or 0)),
@@ -990,6 +991,7 @@ class Rules:
             "keywords": [],
             "enabled": True,
             "subfolder": "",
+            "subfolder_path": "",
             "min_keywords": 0,
             "created": now_iso(),
             "files_sorted": 0,
