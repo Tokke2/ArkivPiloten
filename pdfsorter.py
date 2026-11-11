@@ -3724,7 +3724,7 @@ def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None
 
 
 # --------------------------------------------------------------------------
-# Granskningsdialogen - kärnan: 10 stödord att bocka i
+# Granskningsdialogen - kärnan: stödord att själv välja och spara
 # --------------------------------------------------------------------------
 
 #: Widgetklasser som är inmatningsfält: mushjulet får aldrig ändra deras
@@ -3859,7 +3859,7 @@ def _dialog_wheel(inner_canvas, outer_canvas, is_inner, event,
 
 
 class ReviewDialog:
-    """Visar 10 föreslagna stödord för en osäker fil.
+    """Visar upp till 25 föreslagna stödord för en osäker fil.
 
     Resultat i self.result:
         None                                   - avbrutet/hoppa över
@@ -4139,13 +4139,13 @@ class ReviewDialog:
                   style="CardHead.TLabel").grid(
                       row=0, column=0, sticky="w", padx=14, pady=(12, 0))
         ttk.Label(box,
-                  text="Välj orden som bäst beskriver filen och hjälper nästa sortering.",
+                  text="Välj bland upp till 25 förslag. Listan rullar själv; markera bara ord du vill spara.",
                   style="CardMuted.TLabel").grid(
                       row=1, column=0, sticky="w", padx=14, pady=(2, 4))
 
         # Fast höjd på inre listan: den rullar själv, medan resten av
         # fönstret rullas av den yttre canvasen.
-        canvas = tk.Canvas(box, height=300, highlightthickness=0, borderwidth=0,
+        canvas = tk.Canvas(box, height=360, highlightthickness=0, borderwidth=0,
                            background=self.C["surface"])
         keyword_canvas = canvas
         scroll = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
@@ -5842,8 +5842,8 @@ _UI_EN = {
     "Välj en befintlig mapp eller skapa en ny. Ditt val kan läras in.":
         "Choose an existing folder or create a new one. Your choice can be learned.",
     "STÖDORD OCH TRÄFFAR": "KEYWORDS AND MATCHES",
-    "Välj orden som bäst beskriver filen och hjälper nästa sortering.":
-        "Choose the words that best describe the file and help future sorting.",
+    "Välj bland upp till 25 förslag. Listan rullar själv; markera bara ord du vill spara.":
+        "Choose from up to 25 suggestions. The list scrolls; select only words you want to save.",
     "Lär in valda ord för framtida sortering":
         "Learn selected words for future sorting",
     "Mappnamn:": "Folder name:", "Undermapp:": "Subfolder:",
@@ -9677,7 +9677,7 @@ class App:
                 continue
             cands = suggest_keywords(
                 decision.extraction.combined, decision.path.name,
-                limit=int(self.settings.get("keywords_per_file", 10)),
+                limit=int(self.settings.get("keywords_per_file", 25)),
                 existing=existing)
             session_log("granska",
                         f"Dialog öppnas för {decision.path.name} "
@@ -12330,7 +12330,7 @@ def run_cli(args: argparse.Namespace) -> int:
                  "filen ligger kvar tills du bekräftar flytten")
             if args.verbose:
                 cands = suggest_keywords(decision.extraction.combined, path.name,
-                                         limit=int(settings.get("keywords_per_file", 10)),
+                                         limit=int(settings.get("keywords_per_file", 25)),
                                          existing=rules.all_keyword_texts())
                 for c in cands:
                     emit(f"      förslag: {c.display}   ({c.label}, {c.count} ggr, {c.score:.2f})")

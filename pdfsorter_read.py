@@ -1839,7 +1839,7 @@ def _recipient_zone(text: str) -> str:
     return ""
 
 
-def suggest_keywords(text: str, filename: str = "", limit: int = 10,
+def suggest_keywords(text: str, filename: str = "", limit: int = 25,
                      existing: Optional[Counter] = None) -> List[Candidate]:
     """Ta fram de N mest karakteristiska stödorden ur en fil.
 

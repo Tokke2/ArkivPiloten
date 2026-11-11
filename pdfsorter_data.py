@@ -694,7 +694,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "max_pages_text": 0,      # 0 = alla sidor
     "watch_interval": 5.0,
     "stable_seconds": 3.0,
-    "keywords_per_file": 15,     # 2026-10-15: fler matchningsord att välja på
+    "keywords_per_file": 25,     # visa fler valbara ord ur varje PDF
+    "keyword_suggestions_migrated_v1": False,  # intern engångsmigrering till 25
     "dry_run": False,
     # -- nytt --
     "theme": "ljus",             # ljus | mork - växlas live i Inställningar
@@ -764,6 +765,20 @@ def _migrate_start_minimized_default(settings: Dict[str, Any]) -> bool:
     return True
 
 
+def _migrate_keyword_suggestions(settings: Dict[str, Any]) -> bool:
+    """Öka äldre standardvärdet från 15 till 25 förslag, utan att sänka egna högre val."""
+    if settings.get("keyword_suggestions_migrated_v1", False):
+        return False
+    try:
+        current = int(settings.get("keywords_per_file", 15) or 0)
+    except (TypeError, ValueError):
+        current = 15
+    if current <= 15:
+        settings["keywords_per_file"] = 25
+    settings["keyword_suggestions_migrated_v1"] = True
+    return True
+
+
 def load_settings() -> Dict[str, Any]:
     with _io_lock():
         data = _read_json(settings_path(), {})
@@ -818,6 +833,11 @@ def load_settings() -> Dict[str, Any]:
         if int(s.get("keywords_per_file", 10) or 0) <= 10:
             s["keywords_per_file"] = 15
         s["read_upgrade_2026_10"] = True
+        try:
+            save_settings(s)
+        except Exception:
+            pass
+    if _migrate_keyword_suggestions(s):
         try:
             save_settings(s)
         except Exception:

@@ -622,7 +622,7 @@ pdfsorter_theme.py  ──►  (helt fristående)
   undantag; fel hamnar i `Extraction.error`.
 - **Zoneindelning** skiljer *avsändare* från *mottagare* (se §6.2).
 - **`suggest_keywords()`** är helt deterministisk och lokal (ingen AI/nät).
-  Producerar upp till `keywords_per_file` (10) kandidatord.
+  Producerar upp till `keywords_per_file` (25) kandidatord.
 - **`find_document_date()`** väljer dokumentets datum för årsmappar.
 - **`Extraction`** är datakontraktet: `.text`, `.combined`, `.page_header`,
   `.page_footer`, `.used_ocr`, `.ocr_logo`, `.doc_date`, `.date_source`,
@@ -689,7 +689,7 @@ pdfsorter_theme.py  ──►  (helt fristående)
 **GUI (Tkinter):** sju flikar — Start, Granska, Kategorier, Inställningar,
 Historik, Hjälp och Avancerat. En gemensam varumärkesrad ligger ovanför flikarna;
 startsidan visar sorteringens tre steg i tydliga kort. JSON-redigering finns under
-Avancerat. Kärnan är `ReviewDialog` med 10 föreslagna
+Avancerat. Kärnan är `ReviewDialog` med upp till 25 föreslagna
 stödord att bocka i.
 
 ## 6. Matchningslogik i detalj
@@ -2167,7 +2167,7 @@ skannade pdf:er, mer matchningsord".)
   Kryssruta i Datum-kortet; verifierat med egen datum- och unmatched-test.
 - AC-16.2 Bättre avläsning: `ocr_max_pages` 3→6 (engångsmigrering för
   gamla inställningar) + extra OCR-pass (psm 4) i läget "high".
-- AC-16.3 Fler matchningsord: `keywords_per_file` 10→15 (gransknings-
+- AC-16.3 Fler matchningsord: `keywords_per_file` höjs till 25 (gransknings-
   rutan visar fler kandidater att bocka i).
 - AC-16.4 Donationsidan: belöpssektionen ("Välj hur du vill hjälpa")
   borttagen ur HTML-sidan på beställning; hjältenivåer nås via hero-knappar
