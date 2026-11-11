@@ -8842,6 +8842,10 @@ class App:
                    ).pack(side="left", padx=5)
         ttk.Button(cbtn, text="Ta bort", style="Danger.TButton",
                    command=self._cat_delete).pack(side="left")
+        ttk.Button(left, text="Töm alla kategorier…", style="Danger.TButton",
+                   command=self._cat_clear_all).grid(
+                       row=2, column=0, columnspan=2, sticky="ew",
+                       padx=T.INNER, pady=(0, T.INNER))
 
         # -- höger: stödorden --
         rightcard = T.card(f, "Stödord")
@@ -9127,6 +9131,29 @@ class App:
         self.rules.save()
         _PATTERN_CACHE.clear()
         self._refresh_categories()
+
+    def _cat_clear_all(self) -> None:
+        """Ta bort samtliga kategorier och stödord efter uttrycklig bekräftelse."""
+        count = len(self.rules.categories)
+        if not count:
+            self.messagebox.showinfo(
+                APP_NAME, "Det finns inga kategorier att tömma.", parent=self.root)
+            return
+        total_words = sum(len(cat.get("keywords", []))
+                          for cat in self.rules.categories)
+        if not self.messagebox.askyesno(
+                APP_NAME,
+                f"Ta bort alla {count} kategorier och deras {total_words} stödord?\n\n"
+                "Kategorierna och stödorden försvinner från reglerna. Redan "
+                "sorterade filer, historik och originalfiler påverkas inte.",
+                parent=self.root):
+            return
+        self.rules.categories.clear()
+        self.rules._rebuild_index()
+        self.rules.save()
+        _PATTERN_CACHE.clear()
+        self._refresh_categories()
+        self._log(f"Tog bort alla {count} kategorier och {total_words} stödord", "warn")
 
     def _cat_context(self, event) -> None:
         """Visa kategorins högerklicksmeny, med raden under pekaren markerad."""
