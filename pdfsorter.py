@@ -4585,7 +4585,7 @@ class ReviewDialog:
         wrap_widgets.append(self.lbl_subfolder_hint)
         self.lbl_subfolder_hint.grid(
             row=9, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 4))
-        self.save_rule = tk.BooleanVar(value=False)
+        self.save_rule = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             catbox, variable=self.save_rule,
             text="Spara valda stödord för framtida exakta matchningar",

@@ -31,6 +31,13 @@ def test_transfer_directories_are_created_under_config_dir(monkeypatch, tmp_path
         P.rules_transfer_dir("other")
 
 
+def test_review_dialog_saves_selected_support_words_by_default():
+    import inspect
+
+    source = inspect.getsource(P.ReviewDialog.__init__)
+    assert "self.save_rule = tk.BooleanVar(value=True)" in source
+
+
 def test_review_preview_shrinks_to_fit_short_displays():
     short = P._review_preview_height(430)
     medium = P._review_preview_height(720)

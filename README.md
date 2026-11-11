@@ -230,7 +230,7 @@ You can also donate from inside the app via **Help → Support the project 💖*
 
 ## Vad är ArkivPiloten?
 
-ArkivPiloten bevakar en eller flera **inmappar**, läser varje ny PDF och föreslår vilket företag eller projekt den hör till. En fil flyttas automatiskt bara om ett sparat stödord eller en fras matchar bokstavligt som helt ord i PDF-texten och exakt en kategori äger träffen. Alla andra filer ligger kvar för granskning.
+ArkivPiloten bevakar en eller flera **inmappar**, läser varje ny PDF och föreslår vilket företag eller projekt den hör till. En fil flyttas automatiskt bara om minst två olika sparade stödord eller fraser matchar bokstavligt i PDF-texten och exakt en kategori äger träffarna. Alla andra filer ligger kvar för granskning.
 
 Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domän och firmanamn, läser skannade PDF:er med OCR och **lär bara in stödord som du själv väljer och sparar**. Inlärda poäng, delträffar och OCR-tolerans kan föreslå en mapp men aldrig ge flytträtt; en omskanning kan flytta en fil bara när samma exakta stödordsregel är uppfylld. Matchningen är skiftlägesokänslig och slår ihop upprepade blanksteg; skiljetecken och stavningen inne i hela ordet/frasen måste annars vara identiska. Allt sker lokalt — ingen molntjänst, inget konto, inga nätverksanrop för sorteringen.
 

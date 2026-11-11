@@ -1323,8 +1323,8 @@ osorterade filer. Automatflytt kräver minst två olika sparade stödord som
 träffar bokstavligt i exakt en kategori; enstaka träffar och övriga fall
 kräver granskning.
 **AC-F2:**
-- AC-2.1 Valda ord sparas som permanenta regler (om "Spara valda ord" är
-  på).
+- AC-2.1 Valda ord sparas som permanenta regler om "Spara valda ord" är
+  på; kryssrutan är på som standard så användarval lärs in vid bekräftelse.
 - AC-2.2 Filen flyttas till vald kategori.
 - AC-2.3 Filer som de nya reglerna täcker får uppdaterat beslut; automatflytt kräver minst två olika exakta helords-/frasträffar i en unik kategori.
 - AC-2.4 `rescan_after_learn` skannar om kön, inmapparna och `_Osorterat`
