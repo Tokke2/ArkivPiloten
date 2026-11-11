@@ -1919,8 +1919,80 @@ def manual_category_confirmations(category: str,
     return len(sources)
 
 
+_SUBFOLDER_MODEL_LOCK = threading.RLock()
+_SUBFOLDER_MODEL_CACHE: Dict[str, Tuple[Tuple[Any, ...], LearnedMatcher,
+                                       Dict[str, int]]] = {}
+
+
+def learned_manual_subfolder(category: str, extraction: Extraction,
+                             events: Optional[List[Dict[str, Any]]] = None
+                             ) -> Tuple[str, bool]:
+    """Predict a manually chosen type folder; empty means review if labels exist.
+
+    Only distinct, explicitly user-confirmed folder choices are training data.
+    At least two types, five examples per type and a confident margin are
+    required; otherwise the caller must leave the file for review.
+    """
+    history = load_history() if events is None else events
+    category_key = str(category).strip().casefold()
+    by_source: Dict[str, Tuple[str, Tuple[str, ...]]] = {}
+    for event in history:
+        if (str(event.get("category", "")).strip().casefold() != category_key
+                or event.get("decided_by") != "user"):
+            continue
+        choice, error = validate_subfolder_override(
+            str(event.get("subfolder_choice", "") or ""))
+        source = str(event.get("source", "")).strip()
+        features = tuple(_history_features(event))
+        if choice and not error and source and features:
+            source_key = os.path.normcase(os.path.normpath(source)).casefold()
+            # Last confirmed correction for the same source wins.
+            by_source[source_key] = (choice, features)
+    if not by_source:
+        return "", False
+
+    signature = tuple(sorted((source, choice, features)
+                             for source, (choice, features) in by_source.items()))
+    with _SUBFOLDER_MODEL_LOCK:
+        cached = _SUBFOLDER_MODEL_CACHE.get(category_key)
+        if cached is not None and cached[0] == signature:
+            model, counts = cached[1], dict(cached[2])
+        else:
+            model = LearnedMatcher(load=False)
+            counts: Dict[str, int] = {}
+            for choice, features in sorted(by_source.values()):
+                model.train(choice, list(features),
+                            evidence_weight=_LEARNED_MANUAL_WEIGHT)
+                counts[choice] = counts.get(choice, 0) + 1
+            _SUBFOLDER_MODEL_CACHE[category_key] = (
+                signature, model, dict(counts))
+
+    if sum(count >= 5 for count in counts.values()) < 2:
+        return "", True
+    features = learn_features(extraction)
+    prediction = model.predict(features, min_files=5)
+    if (prediction is None or prediction[1] < _LEARNED_CONF_MARGIN):
+        return "", True
+    # A high model margin can still come from a shared brand word or class
+    # prior. Require two distinct observed terms that appeared in manual
+    # examples of the predicted type and in no competing type.
+    tokens = {str(feature).split(":", 1)[-1] for feature in features}
+    target = model.cats.get(prediction[0], {}).get("w", {})
+    competing_tokens = set()
+    for label, profile in model.cats.items():
+        if label != prediction[0]:
+            competing_tokens.update(
+                str(feature).split(":", 1)[-1]
+                for feature in profile.get("w", {}))
+    target_tokens = {str(feature).split(":", 1)[-1] for feature in target}
+    distinctive = tokens & (target_tokens - competing_tokens)
+    if len(distinctive) < 2:
+        return "", True
+    return prediction[0], True
+
+
 def exact_auto_category(rules: Rules, decision: Decision) -> str:
-    """Category that may auto-move after exact evidence and 5 user sorts."""
+    """Category that may auto-move after exact evidence and 100 user sorts."""
     if (decision.status != "auto" or decision.best is None
             or decision.best.only_recipient):
         return ""
@@ -2899,6 +2971,16 @@ class SortEngine:
                                "exakta stödord som inte delas med andra kategorier "
                                "och hundra tidigare manuella bekräftelser där. "
                                "Filen ligger kvar för granskning.")
+            if decided_by in {"auto", "rescan"} and not subfolder_override:
+                learned_sub, has_type_examples = learned_manual_subfolder(
+                    category, decision.extraction)
+                if has_type_examples and not learned_sub:
+                    self.stats["left"] += 1
+                    return False, ("Dokumenttypen kan inte placeras säkert i en "
+                                   "undermapp utifrån dina tidigare val. Filen "
+                                   "lämnas för granskning.")
+                if learned_sub:
+                    subfolder_override = learned_sub
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
                 return False, ("Filen ändrades efter analysen - lämnas "
@@ -3057,6 +3139,7 @@ class SortEngine:
                     "date": when.isoformat() if when else None,
                     "date_source": källa,
                     "subfolder": sub,
+                    "subfolder_choice": manual_sub if decided_by == "user" else "",
                     "conflict": conflict or None,
                 })
             self.stats["sorted"] += 1
@@ -4618,7 +4701,7 @@ class ReviewDialog:
         subrow.grid(row=7, column=0, columnspan=2, sticky="ew",
                     padx=14, pady=(4, 4))
         subrow.columnconfigure(1, weight=1)
-        ttk.Label(subrow, text="Extra undermapp:", style="Card.TLabel").grid(
+        ttk.Label(subrow, text="Dokumenttyp / undermapp:", style="Card.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 8))
         self.var_subfolder = tk.StringVar(value="")
         self.subfolder_entry = ttk.Entry(subrow, textvariable=self.var_subfolder)
@@ -5165,10 +5248,15 @@ class ReviewDialog:
         base = self._subfolder_base()
         if base is None:
             label.configure(
-                text="Lämna extraundermappen tom för att använda kategoriens standardplats.")
+                text=("Lämna tomt för kategoriens standardplats eller ange en "
+                      "dokumenttyp, till exempel Transaktioner eller Utbetalningar. "
+                      "Appen lär av manuella val; annars frågar den.")
+            )
             return
         label.configure(
-            text=f"Standardplats: {base}  ·  Lämna tomt för den här platsen.")
+            text=(f"Standardplats: {base}  ·  Lämna tomt för standarden eller "
+                  "välj en dokumenttyp. Appen lär av manuella undermappsval "
+                  "och frågar när den är osäker."))
 
     def _sync(self) -> None:
         # Rullgardinen är alltid skrivbar/sökbar; bara "Ny mapp"-fältet
@@ -7870,8 +7958,9 @@ class App:
         ttk.Label(
             opt,
             text=("Stödordsförslag sparas först när du väljer dem. En kategori "
-                  "behöver hundra manuella bekräftelser; därefter krävs två "
-                  "exakta stödord som inte delas med andra kategorier."),
+                  "behöver 100 manuella bekräftelser och två exklusiva exakta "
+                  "stödord. Dokumenttyper lärs från dina undermappsval; vid "
+                  "osäkerhet lämnas filen för granskning."),
             style="CardMuted.TLabel", wraplength=460, justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
         ocr_cb = ttk.Checkbutton(opt, text="OCR för skannade PDF:er",

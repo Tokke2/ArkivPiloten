@@ -1329,6 +1329,7 @@ som träffar bokstavligt och inte finns i andra kategorier; övriga fall kräver
 - AC-2.3 Automatflytt aktiveras för en kategori först efter 100 distinkta manuella bekräftelser; därefter krävs minst två olika exakta helords-/frasträffar som inte delas med andra kategorier.
 - AC-2.4 `rescan_after_learn` skannar om kön, inmapparna och `_Osorterat`
   i bakgrunden. Samma 100 bekräftelser och två kategoriexklusiva exakta träffar krävs; övriga läggs i kön.
+- AC-2.5 Manuellt valda undermappar per fil sparas som användarvalda dokumenttyper. Efter minst 100 manuella bekräftelser i huvudkategorin får en typundermapp väljas automatiskt först när minst två typer har fem manuella exempel vardera, två särskiljande typord träffar och modellen är säker; annars skickas filen till granskning.
 
 ### REQ-F3 (M) — Flikar
 **AC-F3:**
