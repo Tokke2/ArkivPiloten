@@ -529,19 +529,43 @@ def _hitta_tesseract_mapp() -> Optional[Path]:
 
 
 def _ladda_ner(url: str, dest: Path, timeout: int = 900) -> None:
-    """Strömmande nedladdning till temp + atomisk ersättning."""
+    """Stream to a unique temporary file, then atomically publish it.
+
+    Unique temp names prevent simultaneous updater attempts from truncating
+    each other's downloads. A short retry handles Windows scanners/indexers
+    that briefly hold the destination during replacement.
+    """
+    import tempfile
     import urllib.request
+
+    dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-    req = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
-    with urllib.request.urlopen(req, timeout=timeout) as svar, \
-            open(tmp, "wb") as ut:
-        while True:
-            bit = svar.read(1 << 20)
-            if not bit:
-                break
-            ut.write(bit)
-    os.replace(tmp, dest)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{dest.name}-", suffix=".tmp", dir=str(dest.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
+        with urllib.request.urlopen(req, timeout=timeout) as svar, \
+                tmp.open("wb") as ut:
+            while True:
+                bit = svar.read(1 << 20)
+                if not bit:
+                    break
+                ut.write(bit)
+        for attempt in range(6):
+            try:
+                os.replace(tmp, dest)
+                return
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.15 * (2 ** attempt))
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def search_tesseract() -> Optional[str]:
@@ -3718,8 +3742,22 @@ def _install_from_folder(staged: Path, root: Path,
                   f"Starta om appen för att köra den nya versionen.")
 
 
+_UPDATE_INSTALL_LOCK = threading.Lock()
+
+
 def perform_update(timeout: int = 180,
                    root: Optional[Path] = None) -> Tuple[bool, str]:
+    """Run at most one release download/install in this process at a time."""
+    if not _UPDATE_INSTALL_LOCK.acquire(blocking=False):
+        return False, "En uppdatering pågår redan. Vänta tills den är klar."
+    try:
+        return _perform_update_locked(timeout=timeout, root=root)
+    finally:
+        _UPDATE_INSTALL_LOCK.release()
+
+
+def _perform_update_locked(timeout: int = 180,
+                           root: Optional[Path] = None) -> Tuple[bool, str]:
     """Hämta senaste versionen från GitHub Releases och installera den.
 
     Paketet verifieras mot release-postens SHA256SUMS.txt innan något
@@ -3740,8 +3778,10 @@ def perform_update(timeout: int = 180,
                        "uppdateringen avbröts. Ladda ner manuellt från "
                        "releasesidan i stället.")
     tmp = root / "temp"; tmp.mkdir(parents=True, exist_ok=True)
-    staging = root / "updates" / "staging"
-    zippath = tmp / "arkivpiloten-update.zip"
+    run_id = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
+    staging = root / "updates" / f"staging-{run_id}"
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    zippath = tmp / f"arkivpiloten-update-{run_id}.zip"
     try:
         # -- kontrollsumma FÖRE nedladdning: ett release-paket som inte
         #    kan verifieras ska aldrig hämtas eller installeras. -------

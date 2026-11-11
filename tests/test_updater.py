@@ -438,3 +438,44 @@ def test_build_release_matches_zip(tmp_path, monkeypatch):
             f'APP_VERSION = "{ver}"') == 1
     digest = hashlib.sha256(zippath.read_bytes()).hexdigest()
     assert digest in pathlib.Path(meta["sums"]).read_text(encoding="utf-8")
+
+
+def test_download_retries_windows_sharing_violation_and_uses_unique_temp(
+        monkeypatch, tmp_path):
+    import urllib.request
+
+    payload = b"verified release zip bytes"
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(payload))
+    real_replace = S.os.replace
+    calls = []
+
+    def replace_with_one_transient_lock(source, destination):
+        calls.append((pathlib.Path(source), pathlib.Path(destination)))
+        if len(calls) == 1:
+            raise PermissionError("Windows sharing violation")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(S.os, "replace", replace_with_one_transient_lock)
+    monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
+    destination = tmp_path / "arkivpiloten-update.zip"
+
+    S._ladda_ner("https://example.test/archive.zip", destination, timeout=1)
+
+    assert destination.read_bytes() == payload
+    assert len(calls) == 2
+    assert calls[0][0] != destination.with_suffix(".zip.tmp")
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_concurrent_release_install_is_rejected_without_touching_files(tmp_path):
+    assert S._UPDATE_INSTALL_LOCK.acquire(blocking=False)
+    try:
+        ok, message = S.perform_update(root=tmp_path)
+    finally:
+        S._UPDATE_INSTALL_LOCK.release()
+
+    assert not ok
+    assert "pågår redan" in message.lower()
+    assert not (tmp_path / "temp").exists()
