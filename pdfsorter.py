@@ -3886,6 +3886,15 @@ def human_size(n: float) -> str:
     return f"{n:.1f} GB"
 
 
+def _review_preview_height(dialog_height: int) -> int:
+    """Use a compact page thumbnail on short displays, larger on tall ones."""
+    try:
+        height = int(dialog_height)
+    except (TypeError, ValueError):
+        height = 720
+    return max(100, min(240, int((height - 360) * 0.55)))
+
+
 def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None:
     """Storleksanpassa och centrera ett fönster inom den synliga skärmen.
 
@@ -4086,6 +4095,7 @@ class ReviewDialog:
         # Use most of the available screen for the two-column review layout;
         # _fit_geometry clamps both dimensions on smaller displays.
         _fit_geometry(self.win, 1440, 960, 760, 600)
+        self._preview_max_height = _review_preview_height(self.win.winfo_height())
         self.win.columnconfigure(0, weight=1)
         self.win.rowconfigure(0, weight=1)
 
@@ -4154,6 +4164,15 @@ class ReviewDialog:
                     keyword_canvas.configure(height=height)
                 except Exception:
                     pass
+            preview_height = _review_preview_height(self.win.winfo_height())
+            if preview_height != self._preview_max_height:
+                self._preview_max_height = preview_height
+                if getattr(self, "_prev_pil", None):
+                    try:
+                        self.win.after_idle(
+                            lambda: self._prev_show(self._prev_page))
+                    except Exception:
+                        pass
             if category_combo is not None:
                 # Keep the editable folder field inside its current column.
                 track = self._all.winfo_width()
@@ -4290,9 +4309,7 @@ class ReviewDialog:
         self._review_separator = ttk.Separator(self._all)
         self._review_separator.grid(row=1, column=1, sticky="ew", padx=14, pady=(10, 0))
 
-        # -- förhandsvisning (REQ-N7, FRAMSKJUTEN) ---------------------------
-        # Koden finns kvar men är AVSTÄNGD som standard tills beställaren
-        # säger till (settings["preview_in_dialog"]).
+        # -- kompakt sidförhandsvisning och PDF-verktyg --------------------
         row_box = 2
         prev = None
         if preview:
@@ -4312,21 +4329,27 @@ class ReviewDialog:
             self._prev_pages: List[Any] = []
             self._prev_page = 0
             self._prev_rotation = 0
-            ttk.Button(nav, text="‹", width=3,
+            ttk.Button(nav, text="‹", width=4,
                        command=lambda: self._prev_show(self._prev_page - 1)).pack(pady=2)
             self._prev_info = ttk.Label(nav, text="–", style="CardMuted.TLabel")
             self._prev_info.pack(pady=2)
-            ttk.Button(nav, text="›", width=3,
+            ttk.Button(nav, text="›", width=4,
                        command=lambda: self._prev_show(self._prev_page + 1)).pack(pady=2)
+            rotate_left = ttk.Button(
+                nav, text="↶ 90°", width=6,
+                command=lambda: self._rotate_preview(90))
+            rotate_left.pack(pady=(8, 2))
+            rotate_right = ttk.Button(
+                nav, text="↷ 90°", width=6,
+                command=lambda: self._rotate_preview(-90))
+            rotate_right.pack(pady=2)
+            self._preview_tool_buttons = [rotate_left, rotate_right]
             tools = ttk.Frame(prev, style="CardInner.TFrame")
             tools.grid(row=2, column=0, columnspan=2, sticky="ew",
-                       padx=12, pady=(0, 8))
+                       padx=12, pady=(0, 6))
             tools.columnconfigure(0, weight=1)
             tools.columnconfigure(1, weight=1)
-            self._preview_tool_buttons = []
             for index, (text, command) in enumerate((
-                    ("↶ Rotera 90°", lambda: self._rotate_preview(90)),
-                    ("↷ Rotera 90°", lambda: self._rotate_preview(-90)),
                     ("Spara i originalet…", self._replace_original_with_rotation),
                     ("Spara roterad kopia som…", self._save_rotated_copy),
                     ("Räta skannad kopia…", self._save_deskewed_copy))):
@@ -4339,9 +4362,8 @@ class ReviewDialog:
                     button.state(["disabled"])
             preview_note = ttk.Label(
                 prev,
-                text=("Spara rotationen i originalet efter bekräftelse (.bak-säkerhetskopia) "
-                      "eller välj en separat kopia. Rätning bildbehandlar alla sidor "
-                      "till en ny kopia."),
+                text=("Originalet sparas med .bak-kopia; Spara som väljer filplats. "
+                      "Rätning skapar en separat bildkopia."),
                 style="CardMuted.TLabel", wraplength=review_text_width(),
                 justify="left")
             wrap_widgets.append(preview_note)
@@ -4612,6 +4634,9 @@ class ReviewDialog:
 
         self._all.bind("<Configure>", layout_review_columns, add="+")
         self.win.after_idle(layout_review_columns)
+        # Every file starts with its filename/status visible at the top, even
+        # if the canvas scrollregion changed while the columns were settling.
+        self.win.after(30, lambda: self._outer.yview_moveto(0))
 
         # -- knappar (ligger utanför rullytan, alltid synliga) -------------
         btns = ttk.Frame(self.win)
@@ -4970,7 +4995,12 @@ class ReviewDialog:
             rotation = int(getattr(self, "_prev_rotation", 0)) % 360
             if rotation:
                 pil = pil.rotate(rotation, expand=True, fillcolor="white")
-            pil.thumbnail((760, 300))
+            content_width = max(1, self._all.winfo_width())
+            thumb_width = (content_width // 2 - 100
+                           if getattr(self, "_review_two_columns", False)
+                           else content_width - 80)
+            pil.thumbnail((max(160, min(760, thumb_width)),
+                           getattr(self, "_preview_max_height", 160)))
             foto = ImageTk.PhotoImage(pil)
             self._prev_pages[:] = [foto]       # behåll bara aktuell sida
             self._prev_img.configure(image=foto)

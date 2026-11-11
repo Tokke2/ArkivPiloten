@@ -2108,6 +2108,8 @@ bild, med bläddring fram/bakåt, så att användaren kan bocka i stödord med
 - Hjälp-menyn visar tangentbordsgenvägarna och dialogens vanliga kortkommandon.
 - Större text kan väljas live och sparas; inga tecken eller kontroller döljs,
   och befintlig rullning finns kvar.
+- Granskningsdialogens förhandsvisning krymper på korta fönster, rotationsknappar
+  ligger intill sidnavigeringen och den fasta beslutsraden hålls synlig.
 - Import- och exportmappar för kategoriregler kan öppnas från Arkiv-menyn;
   filväljaren startar i motsvarande mapp.
 - Undantag i GUI-loggen kompletteras med ett konkret säkert nästa steg.
