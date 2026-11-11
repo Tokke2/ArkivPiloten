@@ -923,6 +923,10 @@ class Rules:
                     post["rejected"] = int(kw.get("rejected", 0) or 0)
                     post["rejected_at"] = str(kw.get("rejected_at", "") or "")
                 keywords.append(post)
+            raw_templates = cat.get("subfolder_templates", [])
+            templates = ([dict(template) for template in raw_templates
+                          if isinstance(template, dict)]
+                         if isinstance(raw_templates, list) else [])
             name = str(cat["name"]).strip()
             self.categories.append({
                 "name": name,
@@ -931,6 +935,9 @@ class Rules:
                 "enabled": bool(cat.get("enabled", True)),
                 "subfolder": str(cat.get("subfolder", "") or ""),
                 "subfolder_path": str(cat.get("subfolder_path", "") or ""),
+                "subfolder_templates": templates,
+                "subfolder_templates_enabled": bool(
+                    cat.get("subfolder_templates_enabled", True)),
                 # 0 = använd strikthetsnivåns värde. Sätts den till t.ex. 3
                 # krävs tre olika stödord just för den här kategorin.
                 "min_keywords": max(0, int(cat.get("min_keywords", 0) or 0)),
@@ -1003,6 +1010,8 @@ class Rules:
             "enabled": True,
             "subfolder": "",
             "subfolder_path": "",
+            "subfolder_templates": [],
+            "subfolder_templates_enabled": True,
             "min_keywords": 0,
             "created": now_iso(),
             "files_sorted": 0,

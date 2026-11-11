@@ -1919,6 +1919,108 @@ def manual_category_confirmations(category: str,
     return len(sources)
 
 
+def _normalized_template_bbox(bbox: Any) -> Tuple[float, float, float, float]:
+    """Validate and clamp a template rectangle expressed as page fractions."""
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        raise ValueError("Mallens markerade område är ogiltigt.")
+    try:
+        x0, y0, x1, y1 = (float(value) for value in bbox)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Mallens markerade område är ogiltigt.") from exc
+    if (not all(math.isfinite(value) for value in (x0, y0, x1, y1))
+            or x0 < 0 or y0 < 0 or x1 > 1 or y1 > 1
+            or x1 - x0 < 0.003 or y1 - y0 < 0.003):
+        raise ValueError("Mallens markerade område måste ligga på sidan.")
+    return x0, y0, x1, y1
+
+
+def _pdf_region_text(page: Any, bbox: Any) -> str:
+    """Extract selectable words whose centres fall inside a normalized region."""
+    pymupdf = _open_pymupdf()
+    x0, y0, x1, y1 = _normalized_template_bbox(bbox)
+    page_rect = page.rect
+    clip = pymupdf.Rect(
+        page_rect.x0 + x0 * page_rect.width,
+        page_rect.y0 + y0 * page_rect.height,
+        page_rect.x0 + x1 * page_rect.width,
+        page_rect.y0 + y1 * page_rect.height,
+    )
+    selected = []
+    words = page.get_text("words") or []
+    for word in sorted(words, key=lambda item: tuple(item[5:8])):
+        if len(word) < 5:
+            continue
+        bounds = pymupdf.Rect(word[:4]) * page.rotation_matrix
+        center_x = (bounds.x0 + bounds.x1) / 2
+        center_y = (bounds.y0 + bounds.y1) / 2
+        if (clip.x0 <= center_x <= clip.x1
+                and clip.y0 <= center_y <= clip.y1):
+            selected.append(str(word[4]))
+    return normalize(" ".join(selected))
+
+
+def create_pdf_subfolder_template(path: Path, page_index: int,
+                                  bbox: Any, folder: str) -> Dict[str, Any]:
+    """Capture the exact text within a drawn page region as an optional rule."""
+    cleaned_folder, error = validate_subfolder_override(folder)
+    if error or not cleaned_folder:
+        raise ValueError(error or "Ange en undermapp/dokumenttyp för mallen.")
+    x0, y0, x1, y1 = _normalized_template_bbox(bbox)
+    pymupdf = _open_pymupdf()
+    with pymupdf.open(str(path)) as doc:
+        if not (0 <= int(page_index) < len(doc)):
+            raise ValueError("Den valda PDF-sidan finns inte.")
+        text = _pdf_region_text(doc[int(page_index)], (x0, y0, x1, y1))
+    if not text:
+        raise ValueError(
+            "Rutan innehåller ingen markerbar PDF-text. Rita runt den utskrivna "
+            "rubriken på en textbaserad PDF.")
+    return {
+        "folder": cleaned_folder,
+        "page": int(page_index),
+        "bbox": [x0, y0, x1, y1],
+        "text": text,
+        "enabled": True,
+        "created": now_iso(),
+    }
+
+
+def match_subfolder_template(rules: Rules, category: str,
+                             extraction: Extraction) -> Tuple[str, bool]:
+    """Return a template target; active templates with no unique match need review."""
+    cat = rules.get(category)
+    if not cat or not cat.get("subfolder_templates_enabled", True):
+        return "", False
+    templates = [item for item in cat.get("subfolder_templates", [])
+                 if isinstance(item, dict) and item.get("enabled", True)]
+    if not templates:
+        return "", False
+    matches = set()
+    try:
+        pymupdf = _open_pymupdf()
+        with pymupdf.open(str(extraction.path)) as doc:
+            page_cache: Dict[int, Any] = {}
+            for template in templates:
+                try:
+                    page_index = int(template.get("page", 0))
+                    bbox = _normalized_template_bbox(template.get("bbox"))
+                    folder, error = validate_subfolder_override(
+                        str(template.get("folder", "")))
+                    expected = normalize(template.get("text", ""))
+                    if (error or not folder or not expected
+                            or not 0 <= page_index < len(doc)):
+                        continue
+                    page = page_cache.setdefault(page_index, doc[page_index])
+                    found = _pdf_region_text(page, bbox)
+                    if expected in found:
+                        matches.add(folder)
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+    except Exception:
+        return "", True
+    return (next(iter(matches)), True) if len(matches) == 1 else ("", True)
+
+
 _SUBFOLDER_MODEL_LOCK = threading.RLock()
 _SUBFOLDER_MODEL_CACHE: Dict[str, Tuple[Tuple[Any, ...], LearnedMatcher,
                                        Dict[str, int]]] = {}
@@ -2972,15 +3074,24 @@ class SortEngine:
                                "och hundra tidigare manuella bekräftelser där. "
                                "Filen ligger kvar för granskning.")
             if decided_by in {"auto", "rescan"} and not subfolder_override:
-                learned_sub, has_type_examples = learned_manual_subfolder(
-                    category, decision.extraction)
-                if has_type_examples and not learned_sub:
-                    self.stats["left"] += 1
-                    return False, ("Dokumenttypen kan inte placeras säkert i en "
-                                   "undermapp utifrån dina tidigare val. Filen "
-                                   "lämnas för granskning.")
-                if learned_sub:
-                    subfolder_override = learned_sub
+                template_sub, has_templates = match_subfolder_template(
+                    self.rules, category, decision.extraction)
+                if has_templates:
+                    if not template_sub:
+                        self.stats["left"] += 1
+                        return False, ("Områdesmallarna matchar inte entydigt "
+                                       "någon undermapp. Filen lämnas för granskning.")
+                    subfolder_override = template_sub
+                else:
+                    learned_sub, has_type_examples = learned_manual_subfolder(
+                        category, decision.extraction)
+                    if has_type_examples and not learned_sub:
+                        self.stats["left"] += 1
+                        return False, ("Dokumenttypen kan inte placeras säkert i en "
+                                       "undermapp utifrån dina tidigare val. Filen "
+                                       "lämnas för granskning.")
+                    if learned_sub:
+                        subfolder_override = learned_sub
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
                 return False, ("Filen ändrades efter analysen - lämnas "
@@ -4222,7 +4333,7 @@ class ReviewDialog:
                  subfolder_base_resolver: Optional[Callable[[str], Path]] = None):
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk, self.ttk, self.messagebox = tk, ttk, messagebox
-        self.filedialog = filedialog
+        self.filedialog, self.simpledialog = filedialog, simpledialog
         self.theme = theme
         self.C = theme.c if theme else COLORS
         self.decision = decision
@@ -4466,9 +4577,18 @@ class ReviewDialog:
             self._prev_status = ttk.Label(prev, text="Läser in förhandsvisning…",
                                           style="CardMuted.TLabel")
             self._prev_status.grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
-            self._prev_img = tk.Label(prev, background=self.C["surface_sunk"],
-                                      anchor="nw")
+            self._prev_img = tk.Canvas(
+                prev, background=self.C["surface_sunk"], highlightthickness=0,
+                borderwidth=0, cursor="crosshair")
             self._prev_img.grid(row=1, column=0, sticky="nsew", padx=12, pady=8)
+            self._prev_img.bind("<ButtonPress-1>", self._template_draw_start)
+            self._prev_img.bind("<B1-Motion>", self._template_draw_motion)
+            self._prev_img.bind("<ButtonRelease-1>", self._template_draw_end)
+            self._template_drawing = False
+            self._template_rect = None
+            self._template_start = None
+            self._template_target = ""
+            self._prev_display_size = (0, 0)
             nav = ttk.Frame(prev, style="CardInner.TFrame")
             nav.grid(row=1, column=1, sticky="ns", padx=(0, 8), pady=8)
             self._prev_pil: List[Any] = []
@@ -4506,14 +4626,33 @@ class ReviewDialog:
             if not has_pymupdf():
                 for button in self._preview_tool_buttons:
                     button.state(["disabled"])
+            template_bar = ttk.Frame(prev, style="CardInner.TFrame")
+            template_bar.grid(row=3, column=0, columnspan=2, sticky="ew",
+                              padx=12, pady=(0, 6))
+            template_bar.columnconfigure(0, weight=1)
+            self.var_use_subfolder_templates = tk.BooleanVar(value=True)
+            self._template_toggle = ttk.Checkbutton(
+                template_bar, text="Använd ritade dokumentmallar",
+                variable=self.var_use_subfolder_templates,
+                command=self._toggle_subfolder_templates)
+            self._template_toggle.grid(row=0, column=0, sticky="w", padx=4)
+            self._template_create_button = ttk.Button(
+                template_bar, text="Rita mall för vald undermapp…",
+                command=self._start_template_drawing)
+            self._template_create_button.grid(row=0, column=1, sticky="e", padx=4)
+            if not has_pymupdf():
+                self._template_toggle.state(["disabled"])
+                self._template_create_button.state(["disabled"])
             preview_note = ttk.Label(
                 prev,
                 text=("Originalet sparas med .bak-kopia; Spara som väljer filplats. "
-                      "Rätning skapar en separat bildkopia."),
+                      "Rätning skapar en separat bildkopia. Mallvalet är frivilligt: "
+                      "rita runt en rubrik, så söker den aktiva mallen samma text "
+                      "på samma sidområde i kommande PDF:er."),
                 style="CardMuted.TLabel", wraplength=review_text_width(),
                 justify="left")
             wrap_widgets.append(preview_note)
-            preview_note.grid(row=3, column=0, columnspan=2,
+            preview_note.grid(row=4, column=0, columnspan=2,
                               sticky="w", padx=12, pady=(0, 8))
             self._start_preview_load()
             row_box = 3
@@ -4614,6 +4753,10 @@ class ReviewDialog:
             # tydlig gissning finns ska Enter inte kunna flytta dit av misstag.
             self.combo.set("")
         self.combo.bind("<<ComboboxSelected>>", self._combo_chosen)
+        if hasattr(self, "var_use_subfolder_templates"):
+            self.combo.bind("<<ComboboxSelected>>",
+                            self._sync_subfolder_template_toggle, add="+")
+            self._sync_subfolder_template_toggle()
         # Sökbar rullgardin: skriv några tecken -> listan filtreras och
         # visar bara matchande kategorier (början på namnet först).
         # Enter väljer första/unika träffen, Escape återställer listan.
@@ -5149,11 +5292,150 @@ class ReviewDialog:
                            getattr(self, "_preview_max_height", 160)))
             foto = ImageTk.PhotoImage(pil)
             self._prev_pages[:] = [foto]       # behåll bara aktuell sida
-            self._prev_img.configure(image=foto)
+            self._prev_display_size = pil.size
+            self._prev_img.delete("all")
+            self._prev_img.configure(width=pil.width, height=pil.height)
+            self._prev_img.create_image(0, 0, image=foto, anchor="nw",
+                                        tags=("preview",))
             self._prev_info.configure(
                 text=f"{i + 1}/{len(self._prev_pil)} · {rotation}°")
         except Exception:
             pass
+
+    def _sync_subfolder_template_toggle(self, _event=None) -> None:
+        variable = getattr(self, "var_use_subfolder_templates", None)
+        if variable is None:
+            return
+        category = self._category()
+        cat = self.rules.get(category) if category else None
+        variable.set(bool(cat.get("subfolder_templates_enabled", True))
+                     if cat else True)
+
+    def _toggle_subfolder_templates(self) -> None:
+        category = self._category()
+        cat = self.rules.get(category) if category else None
+        if cat is None:
+            return
+        cat["subfolder_templates_enabled"] = bool(
+            self.var_use_subfolder_templates.get())
+        self.rules.save()
+
+    def _start_template_drawing(self) -> None:
+        if getattr(self, "_template_drawing", False):
+            self._template_drawing = False
+            self._template_start = None
+            self._prev_status.configure(text="Mallritning avbröts.")
+            return
+        if not getattr(self, "_prev_pil", None):
+            self.messagebox.showinfo(
+                APP_NAME, "Vänta tills PDF-förhandsvisningen har lästs in.",
+                parent=self.win)
+            return
+        if int(getattr(self, "_prev_rotation", 0)) % 360:
+            self.messagebox.showinfo(
+                APP_NAME, "Återställ förhandsvisningens rotation till 0° innan "
+                "du ritar en mall. Original-PDF:en ändras inte.", parent=self.win)
+            return
+        folder = str(self.var_subfolder.get() or "").strip()
+        if not folder:
+            folder = self.simpledialog.askstring(
+                "Undermapp för områdesmallen",
+                "Vilken dokumenttyp/undermapp ska den här texten identifiera?",
+                parent=self.win) or ""
+        folder, error = validate_subfolder_override(folder)
+        if error or not folder:
+            if error:
+                self.messagebox.showwarning(APP_NAME, error, parent=self.win)
+            return
+        self.var_subfolder.set(folder)
+        self._template_target = folder
+        self._template_drawing = True
+        self._template_start = None
+        self._template_rect = None
+        self._prev_status.configure(
+            text=f"Dra en ruta runt rubriken för ‘{folder}’. Släpp för att spara mallen.")
+
+    def _template_draw_start(self, event):
+        if not getattr(self, "_template_drawing", False):
+            return ""
+        width, height = getattr(self, "_prev_display_size", (0, 0))
+        if not (0 <= event.x <= width and 0 <= event.y <= height):
+            return "break"
+        self._template_start = (event.x, event.y)
+        if self._template_rect is not None:
+            self._prev_img.delete(self._template_rect)
+        self._template_rect = self._prev_img.create_rectangle(
+            event.x, event.y, event.x, event.y,
+            outline=self.C["accent"], width=2, dash=(4, 2),
+            tags=("template-selection",))
+        return "break"
+
+    def _template_draw_motion(self, event):
+        if (not getattr(self, "_template_drawing", False)
+                or self._template_start is None or self._template_rect is None):
+            return ""
+        width, height = self._prev_display_size
+        x = max(0, min(width, event.x))
+        y = max(0, min(height, event.y))
+        start_x, start_y = self._template_start
+        self._prev_img.coords(self._template_rect, start_x, start_y, x, y)
+        return "break"
+
+    def _template_draw_end(self, event):
+        if (not getattr(self, "_template_drawing", False)
+                or self._template_start is None):
+            return ""
+        width, height = self._prev_display_size
+        x = max(0, min(width, event.x))
+        y = max(0, min(height, event.y))
+        x0, x1 = sorted((self._template_start[0], x))
+        y0, y1 = sorted((self._template_start[1], y))
+        self._template_drawing = False
+        if width <= 0 or height <= 0 or x1 - x0 < 8 or y1 - y0 < 8:
+            self._prev_status.configure(text="Rutan var för liten. Rita en större ruta.")
+            return "break"
+        bbox = (x0 / width, y0 / height, x1 / width, y1 / height)
+        self._save_drawn_subfolder_template(bbox)
+        return "break"
+
+    def _save_drawn_subfolder_template(self, bbox) -> None:
+        category = self._category()
+        if not category:
+            self.messagebox.showwarning(
+                APP_NAME, "Välj först en kategori för dokumentmallen.",
+                parent=self.win)
+            return
+        try:
+            template = create_pdf_subfolder_template(
+                self.decision.path, self._prev_page, bbox,
+                self._template_target)
+        except Exception as exc:
+            self.messagebox.showwarning(
+                APP_NAME, f"Kunde inte skapa mallen:\n{exc}", parent=self.win)
+            self._prev_status.configure(
+                text="Mallen sparades inte. Kontrollera att rutan täcker markerbar text.")
+            return
+        snippet = template["text"][:180]
+        if len(template["text"]) > 180:
+            snippet += "…"
+        if not self.messagebox.askyesno(
+                "Spara dokumentmall?",
+                f"Undermapp: {template['folder']}\n"
+                f"Text som känns igen: {snippet}\n\n"
+                "Framtida PDF:er skickas hit endast om samma text hittas i "
+                "samma sidområde. Osäkra eller motstridiga träffar granskas. "
+                "Spara mallen?", parent=self.win):
+            self._prev_status.configure(text="Mallritningen sparades inte.")
+            return
+        cat = self.rules.get(category)
+        if cat is None:
+            return
+        cat.setdefault("subfolder_templates", []).append(template)
+        cat["subfolder_templates_enabled"] = True
+        self.rules.save()
+        self.var_use_subfolder_templates.set(True)
+        self._prev_status.configure(
+            text=f"Områdesmall sparad för {category} → {template['folder']}.")
 
     def _add_own(self) -> None:
         tk, ttk, filedialog, messagebox, simpledialog = _tk()

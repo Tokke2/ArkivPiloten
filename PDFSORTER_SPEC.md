@@ -1330,6 +1330,7 @@ som träffar bokstavligt och inte finns i andra kategorier; övriga fall kräver
 - AC-2.4 `rescan_after_learn` skannar om kön, inmapparna och `_Osorterat`
   i bakgrunden. Samma 100 bekräftelser och två kategoriexklusiva exakta träffar krävs; övriga läggs i kön.
 - AC-2.5 Manuellt valda undermappar per fil sparas som användarvalda dokumenttyper. Efter minst 100 manuella bekräftelser i huvudkategorin får en typundermapp väljas automatiskt först när minst två typer har fem manuella exempel vardera, två särskiljande typord träffar och modellen är säker; annars skickas filen till granskning.
+- AC-2.6 Granskningsrutans PDF-förhandsvisning kan valfritt rita en ruta runt markerbar text och spara text, sidnummer, relativ sidposition och vald undermapp som mall. Aktiva mallar kräver samma normaliserade text i samma sidområde; mallar är av/på-valbara per kategori. Ingen eller motstridig mallträff lämnar filen för granskning. Mallar kringgår aldrig 100 manuella bekräftelser eller de två kategoriexklusiva stödorden.
 
 ### REQ-F3 (M) — Flikar
 **AC-F3:**
