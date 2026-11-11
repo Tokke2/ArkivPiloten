@@ -4139,8 +4139,10 @@ class ReviewDialog:
                   style="CardHead.TLabel").grid(
                       row=0, column=0, sticky="w", padx=14, pady=(12, 0))
         ttk.Label(box,
-                  text="Välj bland upp till 25 förslag. Listan rullar själv; markera bara ord du vill spara.",
-                  style="CardMuted.TLabel").grid(
+                  text=("Välj bland upp till 25 förslag. Typ och antal träffar visas "
+                        "bredvid varje ord; stapeln visar relativ relevans. Inget "
+                        "väljs eller sparas automatiskt."),
+                  style="CardMuted.TLabel", wraplength=600, justify="left").grid(
                       row=1, column=0, sticky="w", padx=14, pady=(2, 4))
 
         # Fast höjd på inre listan: den rullar själv, medan resten av
@@ -4448,6 +4450,12 @@ class ReviewDialog:
             pass
 
     # -- rader ------------------------------------------------------------
+    @staticmethod
+    def _candidate_count_note(cand: Candidate) -> str:
+        count = max(0, int(cand.count or 0))
+        noun = "träff" if count == 1 else "träffar"
+        return f"{cand.label} · {count} {noun}"
+
     def _build_rows(self) -> None:
         ttk, tk = self.ttk, self.tk
         for child in self.inner.winfo_children():
@@ -4483,9 +4491,7 @@ class ReviewDialog:
             spår.grid_propagate(False)
             tk.Frame(spår, width=int(BAR_WIDTH * andel), height=8,
                      background=self.C["accent"]).place(x=0, y=0)
-            note = cand.label
-            if cand.count > 1:
-                note += f", {cand.count} ggr"
+            note = self._candidate_count_note(cand)
             owners = [o for o in self.rules.keyword_owners(cand.text)]
             if owners:
                 note += "  ⚠ finns i " + ", ".join(owners[:2])
@@ -5842,8 +5848,19 @@ _UI_EN = {
     "Välj en befintlig mapp eller skapa en ny. Ditt val kan läras in.":
         "Choose an existing folder or create a new one. Your choice can be learned.",
     "STÖDORD OCH TRÄFFAR": "KEYWORDS AND MATCHES",
-    "Välj bland upp till 25 förslag. Listan rullar själv; markera bara ord du vill spara.":
-        "Choose from up to 25 suggestions. The list scrolls; select only words you want to save.",
+    "Välj bland upp till 25 förslag. Typ och antal träffar visas bredvid varje ord; stapeln visar relativ relevans. Inget väljs eller sparas automatiskt.":
+        "Choose from up to 25 suggestions. The type and number of matches appear beside each word; the bar shows relative relevance. Nothing is selected or saved automatically.",
+    "Ta bort alla kategorier…": "Delete all categories…",
+    "Ångra senaste tömning": "Undo the latest category clear",
+    "Rensa alla stödord (behåll kategorier)…": "Clear all keywords (keep categories)…",
+    "Inga kategorier ännu": "No categories yet",
+    "Skapa en kategori eller importera regler för att komma igång.":
+        "Create a category or import rules to get started.",
+    "Ingen kategori vald": "No category selected",
+    "Välj en kategori i listan till vänster för att visa dess stödord.":
+        "Select a category on the left to view its keywords.",
+    "+ Skapa kategori": "+ Create category",
+    "Importera regler…": "Import rules…",
     "Lär in valda ord för framtida sortering":
         "Learn selected words for future sorting",
     "Mappnamn:": "Folder name:", "Undermapp:": "Subfolder:",
@@ -8842,10 +8859,17 @@ class App:
                    ).pack(side="left", padx=5)
         ttk.Button(cbtn, text="Ta bort", style="Danger.TButton",
                    command=self._cat_delete).pack(side="left")
-        ttk.Button(left, text="Töm alla kategorier…", style="Danger.TButton",
-                   command=self._cat_clear_all).grid(
+        ttk.Button(left, text="Ta bort alla kategorier…",
+                   style="Danger.TButton", command=self._cat_clear_all).grid(
                        row=2, column=0, columnspan=2, sticky="ew",
-                       padx=T.INNER, pady=(0, T.INNER))
+                       padx=T.INNER, pady=(0, 4))
+        self.btn_cat_restore = ttk.Button(
+            left, text="Ångra senaste tömning", style="CardLink.TButton",
+            command=self._cat_restore_clear_backup,
+            state="normal" if self._category_clear_backup_path() else "disabled")
+        self.btn_cat_restore.grid(
+            row=3, column=0, columnspan=2, sticky="ew",
+            padx=T.INNER, pady=(0, T.INNER))
 
         # -- höger: stödorden --
         rightcard = T.card(f, "Stödord")
@@ -8972,9 +8996,28 @@ class App:
         # en sjätte knapp gör att raden inte får plats i kortet.
         ttk.Button(kbtn, text="Ta bort", style="Danger.TButton",
                    command=self._kw_remove).grid(row=0, column=5)
-        ttk.Button(kbtn, text="Rensa alla stödord i alla kategorier…",
+        ttk.Button(kbtn, text="Rensa alla stödord (behåll kategorier)…",
                    style="Danger.TButton", command=self._kw_clear_all).grid(
                        row=1, column=0, columnspan=6, sticky="ew", pady=(6, 0))
+        self.kw_hint = hint
+        self.kw_buttons = kbtn
+        self.cat_meta = meta
+        self.kw_scrollbar = ksb
+        self.empty_cat_panel = ttk.Frame(right, style="CardInner.TFrame")
+        self.empty_cat_panel.grid(row=2, column=0, columnspan=2, sticky="nsew",
+                                  padx=12, pady=10)
+        self.empty_cat_panel.columnconfigure(0, weight=1)
+        self.lbl_cat_empty = ttk.Label(
+            self.empty_cat_panel, text="", style="CardMuted.TLabel",
+            justify="center", anchor="center", wraplength=440)
+        self.lbl_cat_empty.grid(row=0, column=0, sticky="ew", padx=12, pady=(24, 14))
+        empty_actions = ttk.Frame(self.empty_cat_panel, style="CardInner.TFrame")
+        empty_actions.grid(row=1, column=0, pady=(0, 24))
+        ttk.Button(empty_actions, text="+ Skapa kategori", style="Accent.TButton",
+                   command=self._cat_new).pack(side="left", padx=5)
+        ttk.Button(empty_actions, text="Importera regler…",
+                   command=self._import).pack(side="left", padx=5)
+        self.empty_cat_panel.grid_remove()
 
         self._kw_sort = ("hits", True)
         self._kw_rows: List[Dict[str, Any]] = []
@@ -9022,11 +9065,31 @@ class App:
         cat = self.rules.get(name) if name else None
         if not cat:
             self.var_folder.set("")
-            self.lbl_cat_title.configure(text="Ingen kategori vald")
+            no_categories = not self.rules.categories
+            self.lbl_cat_title.configure(
+                text="Inga kategorier ännu" if no_categories else "Ingen kategori vald")
             self.lbl_cat_stats.configure(text="")
+            self.lbl_cat_empty.configure(
+                text=("Skapa en kategori eller importera regler för att komma igång."
+                      if no_categories else
+                      "Välj en kategori i listan till vänster för att visa dess stödord."))
+            self.cat_meta.grid_remove()
+            self.kw_tree.grid_remove()
+            self.kw_scrollbar.grid_remove()
+            self.lbl_kw_sum.grid_remove()
+            self.kw_hint.grid_remove()
+            self.kw_buttons.grid_remove()
+            self.empty_cat_panel.grid()
             for row in self.kw_tree.get_children():
                 self.kw_tree.delete(row)
             return
+        self.empty_cat_panel.grid_remove()
+        self.cat_meta.grid()
+        self.kw_tree.grid()
+        self.kw_scrollbar.grid()
+        self.lbl_kw_sum.grid()
+        self.kw_hint.grid()
+        self.kw_buttons.grid()
         self.var_folder.set(cat["folder"])
         self.var_cat_enabled.set(cat.get("enabled", True))
         mall = cat.get("subfolder", "")
@@ -9132,8 +9195,23 @@ class App:
         _PATTERN_CACHE.clear()
         self._refresh_categories()
 
+    def _category_clear_backup_files(self) -> List[Path]:
+        rules_path = self.rules.path
+        pattern = f"{rules_path.stem}.before-clear-*{rules_path.suffix}"
+        return sorted(rules_path.parent.glob(pattern))
+
+    def _category_clear_backup_path(self) -> Optional[Path]:
+        backups = self._category_clear_backup_files()
+        return backups[-1] if backups else None
+
+    def _update_category_restore_button(self) -> None:
+        button = getattr(self, "btn_cat_restore", None)
+        if button is not None:
+            button.configure(
+                state="normal" if self._category_clear_backup_path() else "disabled")
+
     def _cat_clear_all(self) -> None:
-        """Ta bort samtliga kategorier och stödord efter uttrycklig bekräftelse."""
+        """Säkerhetskopiera och ta bort alla kategorier efter bekräftelse."""
         count = len(self.rules.categories)
         if not count:
             self.messagebox.showinfo(
@@ -9144,16 +9222,104 @@ class App:
         if not self.messagebox.askyesno(
                 APP_NAME,
                 f"Ta bort alla {count} kategorier och deras {total_words} stödord?\n\n"
-                "Kategorierna och stödorden försvinner från reglerna. Redan "
+                "Kategorierna och stödorden försvinner från reglerna. En "
+                "säkerhetskopia görs så att tömningen kan ångras. Redan "
                 "sorterade filer, historik och originalfiler påverkas inte.",
                 parent=self.root):
             return
-        self.rules.categories.clear()
+
+        rules_path = self.rules.path
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup = rules_path.with_name(
+            f"{rules_path.stem}.before-clear-{timestamp}{rules_path.suffix}")
+        temporary = backup.with_name(backup.name + ".tmp")
+        try:
+            self.rules.save()
+            shutil.copy2(rules_path, temporary)
+            os.replace(temporary, backup)
+        except Exception as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.messagebox.showerror(
+                APP_NAME,
+                f"Säkerhetskopian kunde inte skapas. Kategorierna är kvar.\n\n{exc}",
+                parent=self.root)
+            return
+
+        original_categories = self.rules.categories
+        self.rules.categories = []
         self.rules._rebuild_index()
-        self.rules.save()
+        try:
+            self.rules.save()
+        except Exception as exc:
+            self.rules.categories = original_categories
+            self.rules._rebuild_index()
+            try:
+                shutil.copy2(backup, rules_path)
+            except OSError:
+                pass
+            self._update_category_restore_button()
+            self.messagebox.showerror(
+                APP_NAME,
+                f"Reglerna kunde inte tömmas; de ursprungliga kategorierna har "
+                f"behållits i minnet. Säkerhetskopia: {backup}\n\n{exc}",
+                parent=self.root)
+            return
+
         _PATTERN_CACHE.clear()
+        self._update_category_restore_button()
         self._refresh_categories()
         self._log(f"Tog bort alla {count} kategorier och {total_words} stödord", "warn")
+
+    def _cat_restore_clear_backup(self) -> None:
+        """Återställ den senaste säkerhetskopian från en kategoritömning."""
+        backup = self._category_clear_backup_path()
+        if backup is None:
+            self._update_category_restore_button()
+            self.messagebox.showinfo(
+                APP_NAME, "Det finns ingen säkerhetskopia att återställa.",
+                parent=self.root)
+            return
+        if self.rules.categories and not self.messagebox.askyesno(
+                APP_NAME,
+                "Återställa kategorier och stödord från den senaste tömningen?\n\n"
+                "Detta ersätter de nuvarande reglerna. Filer och historik påverkas inte.",
+                parent=self.root):
+            return
+        try:
+            restored = Rules.load(backup)
+            if not restored.categories:
+                raise ValueError("Säkerhetskopian innehåller inga kategorier.")
+        except Exception as exc:
+            self.messagebox.showerror(
+                APP_NAME, f"Säkerhetskopian kunde inte läsas:\n{backup}\n\n{exc}",
+                parent=self.root)
+            return
+
+        current_categories = self.rules.categories
+        self.rules.categories = restored.categories
+        self.rules._rebuild_index()
+        try:
+            self.rules.save()
+        except Exception as exc:
+            self.rules.categories = current_categories
+            self.rules._rebuild_index()
+            self.messagebox.showerror(
+                APP_NAME, f"Reglerna kunde inte återställas.\n\n{exc}",
+                parent=self.root)
+            return
+
+        try:
+            backup.unlink()
+        except OSError:
+            pass
+        _PATTERN_CACHE.clear()
+        self._warm_patterns()
+        self._update_category_restore_button()
+        self._refresh_categories()
+        self._log("Återställde kategorier från säkerhetskopian", "info")
 
     def _cat_context(self, event) -> None:
         """Visa kategorins högerklicksmeny, med raden under pekaren markerad."""
