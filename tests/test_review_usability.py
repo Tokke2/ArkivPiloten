@@ -69,6 +69,55 @@ def test_rotation_saves_a_new_pdf_and_preserves_original(tmp_path):
         P.rotate_pdf_copy(source, source, 90)
 
 
+def test_in_place_rotation_keeps_recoverable_backup_and_updates_original(tmp_path):
+    source = tmp_path / "invoice.pdf"
+    original = _one_page_pdf(source)
+
+    updated, backup = P.rotate_pdf_with_backup(source, 90)
+
+    from pypdf import PdfReader
+    assert updated == source
+    assert backup.read_bytes() == original
+    assert backup.suffix == ".bak"
+    assert int(PdfReader(str(source)).pages[0].rotation) == 90
+
+
+def test_in_place_rotation_failure_leaves_original_unchanged(monkeypatch, tmp_path):
+    source = tmp_path / "invoice.pdf"
+    original = _one_page_pdf(source)
+
+    def fail_rotation(*_args, **_kwargs):
+        raise ValueError("invalid PDF")
+
+    monkeypatch.setattr(P, "rotate_pdf_copy", fail_rotation)
+    with pytest.raises(ValueError, match="invalid PDF"):
+        P.rotate_pdf_with_backup(source, 90)
+
+    assert source.read_bytes() == original
+    assert not list(tmp_path.glob("*.bak"))
+
+
+def test_in_place_rotation_replace_failure_keeps_original_and_backup(
+        monkeypatch, tmp_path):
+    source = tmp_path / "invoice.pdf"
+    original = _one_page_pdf(source)
+    real_replace = P.os.replace
+
+    def fail_source_replace(src, dst):
+        if Path(dst) == source:
+            raise PermissionError("file is locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(P.os, "replace", fail_source_replace)
+    with pytest.raises(PermissionError, match="locked"):
+        P.rotate_pdf_with_backup(source, 90)
+
+    assert source.read_bytes() == original
+    backups = list(tmp_path.glob("*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original
+
+
 def test_deskew_saves_image_copy_and_preserves_original(tmp_path):
     pytest.importorskip("fitz")
     source = tmp_path / "source.pdf"

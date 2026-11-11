@@ -2089,11 +2089,13 @@ bild, med bläddring fram/bakåt, så att användaren kan bocka i stödord med
   knappen Förhandsgranska PDF (extern visning) — reservväg enligt REQ-A2.
 - AC-7.4 Förhandsvisningen är skrivskyddad; rotation i förhandsvisningen
   påverkar inte originalfilen, matchning eller regler.
-- AC-7.5 90°-rotation kan sparas som en separat vektorbevarande PDF-kopia.
-  Rätning uppskattar sidornas lutning var för sig och skapar ett separat
-  rasteriserat exemplar efter tydlig varning/ja-nej-fråga för dokumentet.
-  Originalet lämnas orört.
-- AC-7.6 Förhandsvisningen är på som standard efter engångsmigrering, kan
+- AC-7.5 90°-rotation kan antingen sparas direkt i originalet efter en
+  tydlig bekräftelse och skapad `.bak`-säkerhetskopia, eller som separat
+  vektorbevarande PDF-kopia om användaren väljer Spara som.
+- AC-7.6 Rätning uppskattar sidornas lutning var för sig och skapar ett
+  separat rasteriserat exemplar efter tydlig varning/ja-nej-fråga för
+  dokumentet; originalet lämnas orört.
+- AC-7.7 Förhandsvisningen är på som standard efter engångsmigrering, kan
   stängas av från granskningsfliken och faller tillbaka till extern visning
   om PyMuPDF saknas.
 

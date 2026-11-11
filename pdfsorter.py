@@ -3646,20 +3646,72 @@ def rotate_pdf_copy(source: Path, destination: Path, degrees: int) -> Path:
 
     def write(temp_path: Path) -> None:
         from pypdf import PdfReader, PdfWriter
-        reader = PdfReader(str(source))
         writer = PdfWriter()
-        for page in reader.pages:
-            page.rotate(angle)
-            writer.add_page(page)
-        if reader.metadata:
-            metadata = {str(k): str(v) for k, v in reader.metadata.items()
-                        if k and v is not None}
-            if metadata:
-                writer.add_metadata(metadata)
-        with temp_path.open("wb") as stream:
-            writer.write(stream)
+        with source.open("rb") as source_stream:
+            reader = PdfReader(source_stream)
+            for page in reader.pages:
+                page.rotate(angle)
+                writer.add_page(page)
+            if reader.metadata:
+                metadata = {str(k): str(v) for k, v in reader.metadata.items()
+                            if k and v is not None}
+                if metadata:
+                    writer.add_metadata(metadata)
+            with temp_path.open("wb") as output_stream:
+                writer.write(output_stream)
 
     return _write_pdf_copy(destination, write)
+
+
+def rotate_pdf_with_backup(source: Path, degrees: int) -> Tuple[Path, Path]:
+    """Atomically replace a PDF with its rotated copy after making a backup.
+
+    The backup is kept beside the source with a non-.pdf suffix, so the inbox
+    watcher does not mistake it for another document.
+    """
+    source = Path(source)
+    if source.is_symlink():
+        raise ValueError("Choose the PDF file itself, not a symbolic link")
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    angle = int(degrees) % 360
+    if angle not in (90, 180, 270):
+        raise ValueError("Rotation must be 90, 180 or 270 degrees")
+    backup_path = unique_target(source.with_name(
+        f"{source.name}.backup-{datetime.now():%Y%m%d-%H%M%S}.bak"))
+    rotated_fd, rotated_name = tempfile.mkstemp(
+        prefix=f".{source.stem}-rotated-", suffix=".pdf", dir=str(source.parent))
+    os.close(rotated_fd)
+    rotated_path = Path(rotated_name)
+    backup_fd, backup_name = tempfile.mkstemp(
+        prefix=f".{source.name}-backup-", suffix=".tmp", dir=str(source.parent))
+    os.close(backup_fd)
+    backup_temp = Path(backup_name)
+    try:
+        original_hash = sha256_file(source)
+        shutil.copy2(source, backup_temp)
+        if (sha256_file(source) != original_hash
+                or sha256_file(backup_temp) != original_hash):
+            raise RuntimeError(
+                "PDF changed while its backup was being created; original was not replaced")
+        # Rotate the exact snapshot that will serve as the backup, not a
+        # possibly changing source file.
+        rotate_pdf_copy(backup_temp, rotated_path, angle)
+        if sha256_file(source) != original_hash:
+            raise RuntimeError(
+                "PDF changed during rotation; original was not replaced")
+        os.replace(backup_temp, backup_path)
+        if sha256_file(source) != original_hash:
+            raise RuntimeError(
+                "PDF changed before the rotated copy could be installed")
+        os.replace(rotated_path, source)
+        return source, backup_path
+    finally:
+        for temporary in (rotated_path, backup_temp):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def deskew_pdf_copy(source: Path, destination: Path,
@@ -3730,6 +3782,9 @@ def error_next_step(exc: BaseException) -> str:
     if isinstance(exc, ImportError):
         return "Kör den officiella uppdateraren eller be administratören reparera installationen."
     message = str(exc).casefold()
+    if any(term in message for term in ("changed during", "changed while",
+                                        "changed before")):
+        return "Filen ändrades under arbetet. Stäng program som redigerar den och försök igen."
     if any(term in message for term in ("not a pdf", "invalid pdf", "pdf header")):
         return "Kontrollera att filen verkligen är en giltig PDF; originalet har inte ändrats."
     if "no space" in message or "disk full" in message:
@@ -4272,7 +4327,8 @@ class ReviewDialog:
             for index, (text, command) in enumerate((
                     ("↶ Rotera 90°", lambda: self._rotate_preview(90)),
                     ("↷ Rotera 90°", lambda: self._rotate_preview(-90)),
-                    ("Spara roterad kopia…", self._save_rotated_copy),
+                    ("Spara i originalet…", self._replace_original_with_rotation),
+                    ("Spara roterad kopia som…", self._save_rotated_copy),
                     ("Räta skannad kopia…", self._save_deskewed_copy))):
                 button = ttk.Button(tools, text=text, command=command)
                 button.grid(row=index // 2, column=index % 2, sticky="ew",
@@ -4283,8 +4339,9 @@ class ReviewDialog:
                     button.state(["disabled"])
             preview_note = ttk.Label(
                 prev,
-                text=("Rotera hela PDF-kopian vid sparning. Rätning bildbehandlar "
-                      "alla sidor till en separat kopia; originalet ändras aldrig."),
+                text=("Spara rotationen i originalet efter bekräftelse (.bak-säkerhetskopia) "
+                      "eller välj en separat kopia. Rätning bildbehandlar alla sidor "
+                      "till en ny kopia."),
                 style="CardMuted.TLabel", wraplength=review_text_width(),
                 justify="left")
             wrap_widgets.append(preview_note)
@@ -4810,6 +4867,36 @@ class ReviewDialog:
         """Rotate the current preview; original file is never changed."""
         self._prev_rotation = (getattr(self, "_prev_rotation", 0) + degrees) % 360
         self._prev_show(getattr(self, "_prev_page", 0))
+
+    def _replace_original_with_rotation(self) -> None:
+        angle = int(getattr(self, "_prev_rotation", 0)) % 360
+        if angle == 0:
+            self.messagebox.showinfo(
+                APP_NAME, "Rotera förhandsvisningen först. Ingen fil har ändrats.",
+                parent=self.win)
+            return
+        source = self.decision.path
+        if not self.messagebox.askyesno(
+                "Ersätt original-PDF?",
+                "Spara den valda rotationen direkt i originalfilen?\n\n"
+                "ArkivPiloten skapar först en återställningsbar .bak-kopia "
+                "bredvid originalet. Fortsätta?", parent=self.win):
+            return
+        try:
+            # Preview rotation is counter-clockwise; PDF /Rotate is clockwise.
+            saved, backup = rotate_pdf_with_backup(source, -angle)
+            self.messagebox.showinfo(
+                APP_NAME,
+                f"Originalet har roterats och sparats:\n{saved}\n\n"
+                f"Säkerhetskopia:\n{backup}\n\n"
+                "Återställ vid behov genom att byta säkerhetskopians namn så "
+                "att det slutar på .pdf.", parent=self.win)
+        except Exception as exc:
+            self.messagebox.showerror(
+                APP_NAME,
+                f"Kunde inte spara rotationen i originalet. Filen har inte "
+                f"ersatts om inte åtgärden slutfördes.\n\n{exc}\n\n"
+                f"Nästa steg: {error_next_step(exc)}", parent=self.win)
 
     def _save_rotated_copy(self) -> None:
         angle = int(getattr(self, "_prev_rotation", 0)) % 360
