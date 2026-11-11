@@ -1319,16 +1319,16 @@ En osäker fil öppnas med **tio föreslagna stödord** som användaren bockar i
 
 ### REQ-F2 (M) — Inlärning & omskanning
 När användaren svarat ska appen spara valda stödord och uppdatera
-osorterade filer. Automatflytt kräver minst två olika sparade stödord som
-träffar bokstavligt i exakt en kategori; enstaka träffar och övriga fall
-kräver granskning.
+osorterade filer. En kategori behöver fem olika manuellt bekräftade filer
+innan automatflytt kan börja. Därefter krävs minst två olika sparade stödord
+som träffar bokstavligt i exakt en kategori; övriga fall kräver granskning.
 **AC-F2:**
 - AC-2.1 Valda ord sparas som permanenta regler om "Spara valda ord" är
   på; kryssrutan är på som standard så användarval lärs in vid bekräftelse.
 - AC-2.2 Filen flyttas till vald kategori.
-- AC-2.3 Filer som de nya reglerna täcker får uppdaterat beslut; automatflytt kräver minst två olika exakta helords-/frasträffar i en unik kategori.
+- AC-2.3 Automatflytt aktiveras för en kategori först efter fem distinkta manuella bekräftelser; därefter krävs minst två olika exakta helords-/frasträffar i en unik kategori.
 - AC-2.4 `rescan_after_learn` skannar om kön, inmapparna och `_Osorterat`
-  i bakgrunden. Minst två olika exakta träffar i en unik kategori krävs för flytt; övriga läggs i kön.
+  i bakgrunden. Samma fem bekräftelser och två exakta träffar krävs; övriga läggs i kön.
 
 ### REQ-F3 (M) — Flikar
 **AC-F3:**
@@ -1992,8 +1992,9 @@ varje korrigering.
   sparas i historiken; bara användarbekräftade val/rättelser tränar modellen,
   manuella val väger tyngre, och autosorteringar/omskanningar hoppas över.
   Flush sker vid batchslut/avslut. Integrationen i `decide()` kan förbättra
-  rangordningen men kan aldrig ensam flytta en fil; endast en exakt,
-  unik, användarsparad stödordsträff får ge automatisk flytt. Inlärningen är
+  rangordningen men kan aldrig ensam flytta en fil; automatflytt kräver fem
+  manuella bekräftelser i kategorin och därefter två exakta, unika,
+  användarsparade stödordsträffar. Inlärningen är
   alltid aktiv, utan av/på-kryssruta. Vid uppgradering byggs den gamla
   profilen om en gång från bekräftade historikposter. Verifierat med tester
   för träning, walk-forward, återbyggnad, rättelser och filtrering av

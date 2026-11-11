@@ -13,6 +13,12 @@ import pdfsorter as P
 from pdfsorter_data import Rules
 
 
+def _manual_events(category: str, count: int) -> list[dict[str, str]]:
+    return [{"category": category, "decided_by": "user",
+             "source": f"/inbox/manual-{index}.pdf"}
+            for index in range(count)]
+
+
 def _decision(path: Path, status: str = "auto") -> P.Decision:
     extraction = P.Extraction(path=path, text="Acme invoice")
     return P.Decision(
@@ -36,7 +42,19 @@ def test_learned_match_is_only_a_suggestion(monkeypatch, tmp_path):
     assert decision.learned_hint == ("Acme", 12)
 
 
-def test_auto_requires_two_distinct_exact_user_support_words(tmp_path):
+def test_manual_confirmation_count_is_distinct_and_category_specific():
+    events = _manual_events("Acme", 2)
+    events += [dict(events[0]), {"category": "Other", "decided_by": "user",
+                                 "source": "/inbox/other.pdf"},
+               {"category": "Acme", "decided_by": "auto",
+                "source": "/inbox/automatic.pdf"}]
+
+    assert P.manual_category_confirmations("Acme", events) == 2
+    assert P.manual_category_confirmations("Other", events) == 1
+
+
+def test_auto_requires_two_exact_words_and_five_manual_category_confirms(
+        monkeypatch, tmp_path):
     rules = Rules({"categories": [{
         "name": "Acme", "folder": "Acme",
         "keywords": [{"text": "Acme", "weight": 1.0,
@@ -45,9 +63,17 @@ def test_auto_requires_two_distinct_exact_user_support_words(tmp_path):
                       "whole_word": True, "source": "user"}],
     }]}, tmp_path / "rules.json")
 
+    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 4))
     one_exact = P.decide(rules, P.Extraction(
         path=tmp_path / "one.pdf", text="ACME receipt"),
         {"learned_matching": False})
+    under_threshold = P.decide(rules, P.Extraction(
+        path=tmp_path / "under-threshold.pdf", text="ACME invoice"),
+        {"learned_matching": False})
+    assert under_threshold.status == "ask"
+    assert "4/5" in under_threshold.reason
+
+    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 5))
     both_exact = P.decide(rules, P.Extraction(
         path=tmp_path / "exact.pdf", text="ACME invoice"),
         {"learned_matching": False})
@@ -79,6 +105,31 @@ def test_apply_rejects_forged_auto_with_only_one_exact_support_word(tmp_path):
     assert "minst två" in message.lower()
     assert source.exists()
     assert not (tmp_path / "out" / "Acme" / source.name).exists()
+
+
+def test_apply_rejects_forged_auto_before_five_manual_confirms(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 4))
+    source = tmp_path / "invoice.pdf"
+    source.write_bytes(b"unchanged")
+    rules = Rules({"categories": [{
+        "name": "Acme", "folder": "Acme",
+        "keywords": [{"text": "Acme", "weight": 1.0},
+                     {"text": "invoice", "weight": 1.0}],
+    }]}, tmp_path / "rules.json")
+    engine = P.SortEngine(rules, {
+        "output_dir": str(tmp_path / "out"), "year_subfolder": False,
+    })
+    decision = P.Decision(
+        source, P.Extraction(path=source, text="Acme invoice"),
+        [P.CategoryScore("Acme", 10.0)], "auto")
+
+    ok, message = engine.apply(decision, "Acme", ["Acme", "invoice"],
+                               decided_by="auto")
+
+    assert not ok
+    assert "fem" in message.lower()
+    assert source.exists()
 
 
 def test_filename_only_support_match_requires_review(tmp_path):
@@ -132,7 +183,8 @@ def test_apply_rejects_automatic_and_rescan_without_exact_rule(tmp_path):
         assert not (tmp_path / "out" / "Acme" / source.name).exists()
 
 
-def test_exact_support_match_can_move_during_rescan(tmp_path):
+def test_exact_support_match_can_move_during_rescan(monkeypatch, tmp_path):
+    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 5))
     source = tmp_path / "invoice.pdf"
     source.write_bytes(b"unchanged")
     rules = Rules({"categories": [{
@@ -178,6 +230,7 @@ def test_clear_all_support_words_preserves_categories(tmp_path):
 
 
 def test_rescan_worker_moves_exact_support_match(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "load_history", lambda: _manual_events("Acme", 5))
     source = tmp_path / "learned-exact.pdf"
     source.write_bytes(b"matching content")
     rules = Rules({"categories": [{

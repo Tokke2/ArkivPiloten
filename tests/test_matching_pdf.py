@@ -54,8 +54,11 @@ def _decide(path, rules):
     return P.decide(rules, ext, NORMAL)
 
 
-def test_only_literal_orgnr_support_word_match_can_auto_move(tmp_path):
-    """Två exakta stödord krävs; ändrat orgnr-skrivsätt skickas till granskning."""
+def test_only_literal_orgnr_support_word_match_can_auto_move(monkeypatch, tmp_path):
+    """Två exakta stödord + fem manuella val; fel orgnr-skrivsätt granskas."""
+    monkeypatch.setattr(P, "load_history", lambda: [
+        {"category": "Pilkington", "decided_by": "user",
+         "source": f"/inbox/manual-{i}.pdf"} for i in range(5)])
     rules = _rules(tmp_path, [{
         "name": "Pilkington", "folder": "Pilkington",
         "keywords": [{"text": "556033-9086", "weight": 1.0},

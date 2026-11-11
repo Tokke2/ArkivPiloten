@@ -14,9 +14,10 @@ en undermapp i utmappen efter en exakt stödordsträff eller användarens val.
 Undermappar skapas automatiskt vid behov.
 
 Appen lär bara in stödord som användaren själv väljer och sparar. En fil
-flyttas automatiskt endast när minst två olika sparade stödord matchar exakt
-som helord/fras i PDF-texten, exakt en kategori har dessa träffar och den
-kategorin ligger först. Case och upprepade blanksteg normaliseras; stavning
+flyttas automatiskt först efter fem manuellt bekräftade filer i kategorin,
+och därefter endast när minst två olika sparade stödord matchar exakt som
+helord/fras i PDF-texten, exakt en kategori har träffarna och den ligger först.
+Case och upprepade blanksteg normaliseras; stavning
 och skiljetecken inne i stödordet/frasen måste annars stämma. Inlärning, lösa poäng,
 OCR-brus, delord och flexibla ID-matchningar kan aldrig själva flytta filer.
 
@@ -1878,8 +1879,28 @@ def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, Lis
     return matches
 
 
+AUTO_MOVE_MANUAL_CONFIRMATIONS = 5
+
+
+def manual_category_confirmations(category: str,
+                                  events: Optional[List[Dict[str, Any]]] = None
+                                  ) -> int:
+    """Count distinct, completed manual sorts previously confirmed by the user."""
+    history = load_history() if events is None else events
+    category_key = str(category).strip().casefold()
+    sources = set()
+    for event in history:
+        if (str(event.get("category", "")).strip().casefold() != category_key
+                or event.get("decided_by") != "user"):
+            continue
+        source = str(event.get("source", "")).strip()
+        if source:
+            sources.add(os.path.normcase(os.path.normpath(source)).casefold())
+    return len(sources)
+
+
 def exact_auto_category(rules: Rules, decision: Decision) -> str:
-    """Category that may auto-move: two exact words, one category, top score."""
+    """Category that may auto-move after exact evidence and 5 user sorts."""
     if (decision.status != "auto" or decision.best is None
             or decision.best.only_recipient):
         return ""
@@ -1887,14 +1908,19 @@ def exact_auto_category(rules: Rules, decision: Decision) -> str:
     if len(matches) != 1:
         return ""
     category = next(iter(matches))
-    return category if decision.best.name == category else ""
+    if (decision.best.name != category
+            or manual_category_confirmations(category)
+            < AUTO_MOVE_MANUAL_CONFIRMATIONS):
+        return ""
+    return category
 
 
 def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> Decision:
     """Besluta mellan flera exakta stödordsträffar och granskning.
 
     Minst två olika bokstavliga helords-/frasträffar i exakt en kategori
-    krävs för status ``auto``; all annan evidens skickas till granskning.
+    och fem tidigare manuella bekräftelser i kategorin krävs för ``auto``.
+    All annan evidens skickas till granskning.
     """
     if extraction.error and not extraction.text:
         return Decision(extraction.path, extraction, [], "error", extraction.error)
@@ -1924,10 +1950,21 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
     exact = exact_support_matches(rules, extraction)
     if (len(exact) == 1 and scores and scores[0].name in exact
             and not scores[0].only_recipient):
-        matched_words = exact[scores[0].name]
+        category = scores[0].name
+        matched_words = exact[category]
+        confirmed = manual_category_confirmations(category)
+        if confirmed >= AUTO_MOVE_MANUAL_CONFIRMATIONS:
+            return Decision(
+                extraction.path, extraction, scores, "auto",
+                "Exakta stödordsträffar efter "
+                f"{confirmed} manuella bekräftelser: "
+                + ", ".join(matched_words[:4]))
         return Decision(
-            extraction.path, extraction, scores, "auto",
-            "Exakt stödordsträff: " + ", ".join(matched_words[:4]))
+            extraction.path, extraction, scores, "ask",
+            f"Exakt träff i {category}, men automatflytt aktiveras först "
+            f"efter {AUTO_MOVE_MANUAL_CONFIRMATIONS} manuella filer i kategorin "
+            f"({confirmed}/{AUTO_MOVE_MANUAL_CONFIRMATIONS} bekräftade). "
+            "Välj och bekräfta kategorin manuellt.")
 
     if not scores:
         # Säkerhetsrundan 2026-10-16: den lärda klassificeraren får aldrig
@@ -2839,7 +2876,8 @@ class SortEngine:
                     and exact_auto_category(self.rules, decision) != category):
                 self.stats["left"] += 1
                 return False, ("Automatisk flyttning kräver minst två olika "
-                               "exakta stödordsträffar i en unik kategori. "
+                               "exakta stödordsträffar i en unik kategori och "
+                               "fem tidigare manuella bekräftelser där. "
                                "Filen ligger kvar för granskning.")
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
@@ -7811,9 +7849,9 @@ class App:
         confirm_all.state(["disabled"])
         ttk.Label(
             opt,
-            text=("Stödordsförslag sparas först när du väljer dem. Automatisk "
-                  "flytt kräver minst två olika, exakta helords- eller frasträffar "
-                  "i en unik kategori; övriga filer ligger kvar för granskning."),
+            text=("Stödordsförslag sparas först när du väljer dem. En kategori "
+                  "behöver fem manuella bekräftelser; därefter krävs minst två "
+                  "olika exakta stödord i en unik kategori för automatflytt."),
             style="CardMuted.TLabel", wraplength=460, justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
         ocr_cb = ttk.Checkbutton(opt, text="OCR för skannade PDF:er",
