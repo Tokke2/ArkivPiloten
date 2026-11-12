@@ -1342,7 +1342,9 @@ som träffar bokstavligt och inte finns i andra kategorier; övriga fall kräver
 
 ### REQ-F4 (M) — Kategorier: sök, sortera och visa
 **AC-F4:**
-- AC-4.1 Kategorilista till vänster, stödord för vald kategori till höger.
+- AC-4.1 Kategori väljs i en rullgardinsmeny överst. Två huvudkolumner visas: undermappar till vänster och stödord för vald kategori till höger.
+- AC-4.1a Stödord dras från högerlistan till undermapp i vänsterlistan; aktuell koppling visas direkt. Ett stödord får finnas i flera kategorier.
+- AC-4.1b Ett standardstödord väljs per kategori. Standardvalet är kategorispecifikt även när samma ord finns i flera kategorier. Vid automatflytt måste standardordet också finnas; ett delat standardord är bara en ankarkontroll och räknas inte bland de två kategoriexklusiva stödorden eller ersätter kraven på 100 manuella bekräftelser.
 - AC-4.2 Sökfält igenom alla kategorier.
 - AC-4.3 Klick på rubrik sorterar; TYP, VIKT, HELT ORD, TRÄFFAR visas.
 - AC-4.4 Varannan rad tonad + statusfärger (stark/weak/off).

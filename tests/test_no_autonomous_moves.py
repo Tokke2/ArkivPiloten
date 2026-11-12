@@ -63,6 +63,37 @@ def test_shared_keywords_do_not_count_as_category_exclusive_exact_evidence(
         "Kontoutdrag": ["kontoutdrag", "saldo"]}
 
 
+def test_shared_default_is_a_category_anchor_but_not_exclusive_evidence(
+        tmp_path):
+    rules = Rules({"categories": [
+        {"name": "Bank A", "folder": "Bank A",
+         "default_keyword": "shared bank",
+         "keywords": [
+             {"text": "shared bank", "weight": 1.0},
+             {"text": "bank-a-invoice", "weight": 1.0},
+             {"text": "bank-a-account", "weight": 1.0},
+         ]},
+        {"name": "Bank B", "folder": "Bank B",
+         "default_keyword": "shared bank",
+         "keywords": [
+             {"text": "shared bank", "weight": 1.0},
+             {"text": "bank-b-invoice", "weight": 1.0},
+             {"text": "bank-b-account", "weight": 1.0},
+         ]},
+    ]}, tmp_path / "rules.json")
+
+    missing_anchor = P.Extraction(
+        path=tmp_path / "without-anchor.pdf",
+        text="bank-a-invoice bank-a-account")
+    with_anchor = P.Extraction(
+        path=tmp_path / "with-anchor.pdf",
+        text="shared bank bank-a-invoice bank-a-account")
+
+    assert P.exact_support_matches(rules, missing_anchor) == {}
+    assert P.exact_support_matches(rules, with_anchor) == {
+        "Bank A": ["bank-a-invoice", "bank-a-account"]}
+
+
 def test_manual_confirmation_count_is_distinct_and_category_specific():
     events = _manual_events("Acme", 2)
     events += [dict(events[0]), {"category": "Other", "decided_by": "user",

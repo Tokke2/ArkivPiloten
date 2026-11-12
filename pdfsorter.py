@@ -1836,7 +1836,9 @@ def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, Lis
 
     A category is returned only when at least two different, category-exclusive
     saved support words match exactly, regardless of a lower per-category minimum.
-    This deliberately does not use OCR denoising, flexible identifier
+    A selected category default is an additional required anchor; it may be
+    shared with other categories, but never counts toward the exclusive-word
+    minimum. This deliberately does not use OCR denoising, flexible identifier
     separators, the filename, learned-model scores, or substring rules.
     Text is case-folded and whitespace-normalized only; punctuation and the
     spelling of each support word/phrase must otherwise match exactly.
@@ -1868,6 +1870,19 @@ def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, Lis
                 owners.setdefault(word, set()).add(category)
 
     zones = _zones_for(body, "", "", "")
+
+    def exact_present(kw: Dict[str, Any]) -> bool:
+        if not zones.kan_finnas(kw):
+            return False
+        word = normalize(kw.get("text", ""))
+        pattern = _EXACT_PATTERN_CACHE.get(word)
+        if pattern is None:
+            pattern = _kw_pattern({"text": word, "whole_word": True})
+            if len(_EXACT_PATTERN_CACHE) >= 4000:
+                _EXACT_PATTERN_CACHE.clear()
+            _EXACT_PATTERN_CACHE[word] = pattern
+        return bool(pattern.search(body))
+
     matches: Dict[str, List[str]] = {}
     for cat in rules.categories:
         if not cat.get("enabled", True):
@@ -1881,22 +1896,17 @@ def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, Lis
                     or owners.get(word, set()) != {category}):
                 continue
             seen.add(word)
-            if not zones.kan_finnas(kw):
-                continue
-            pattern = _EXACT_PATTERN_CACHE.get(word)
-            if pattern is None:
-                pattern = _kw_pattern({"text": word, "whole_word": True})
-                if len(_EXACT_PATTERN_CACHE) >= 4000:
-                    _EXACT_PATTERN_CACHE.clear()
-                _EXACT_PATTERN_CACHE[word] = pattern
-            if pattern.search(body):
+            if exact_present(kw):
                 found.append(word)
-        # A user-selected category anchor must also be present. It is still
-        # only one part of the proof: auto-moves retain the two-exclusive-word
-        # floor and the 100 manually confirmed files requirement.
+        # A user-selected category anchor must also be present. It can be a
+        # shared word, but remains a gate only: it never counts toward the
+        # two different exclusive words required to authorize an auto-move.
         default_word = normalize(cat.get("default_keyword", ""))
-        if default_word and default_word not in found:
-            continue
+        if default_word:
+            default_kw = next((kw for kw in cat.get("keywords", [])
+                               if active_word(kw) == default_word), None)
+            if default_kw is None or not exact_present(default_kw):
+                continue
         # One exact keyword can be coincidental; auto-moves require at least
         # two distinct user-saved support words, even if the category asks for 1.
         required = max(2, int(cat.get("min_keywords", 0) or 0))
@@ -6851,6 +6861,19 @@ _UI_EN = {
         "Choose from up to 25 suggestions. The type and number of matches appear beside each word; the bar shows relative relevance. Nothing is selected or saved automatically.",
     "Ta bort alla kategorier…": "Delete all categories…",
     "Ångra senaste tömning": "Undo the latest category clear",
+    "Kategori": "Category", "Undermappar": "Subfolders",
+    "Stödord": "Support words",
+    "Dra ett stödord till en undermapp →": "Drag a support word to a subfolder →",
+    "Välj en kategori i menyn ovan för att visa dess stödord och undermappar.":
+        "Choose a category from the menu above to view its support words and subfolders.",
+    "Välj en kategori i menyn ovan.": "Choose a category from the menu above.",
+    "Töm kategorier…": "Clear categories…",
+    "Ångra tömning": "Undo clear",
+    "Standardstödord:": "Default support word:",
+    "Kopplas till vald kategori; samma ord får finnas i flera kategorier.":
+        "Linked to the selected category; the same word may be used in several categories.",
+    "Dra stödord från listan till höger till den undermapp där dokumenttypen ska sparas.":
+        "Drag keywords from the list on the right to the subfolder for that document type.",
     "Rensa alla stödord (behåll kategorier)…": "Clear all keywords (keep categories)…",
     "Inga kategorier ännu": "No categories yet",
     "Skapa en kategori eller importera regler för att komma igång.":
@@ -9142,7 +9165,7 @@ class App:
             t.tag_configure("note", foreground=c["text_muted"])
         except Exception:
             pass
-        for tree in ("cat_tree", "kw_tree", "q_tree", "h_tree"):
+        for tree in ("kw_tree", "q_tree", "h_tree"):
             try:
                 self.theme.zebra(getattr(self, tree))
             except Exception:
@@ -9253,7 +9276,7 @@ class App:
         else:
             self._log("Datumsortering av - filer läggs direkt i "
                       "kategorimappen.", "info")
-        if hasattr(self, "cat_tree"):
+        if hasattr(self, "cat_combo"):
             self._on_cat_select()
 
     def _pick(self, var) -> None:
@@ -10104,22 +10127,50 @@ class App:
     # Flik 3 - Kategorier
     # ======================================================================
     def _build_cats_tab(self) -> None:
-        """Matchningsvyn: kategorier till vänster, deras stödord till höger.
+        """Kategoriväljare överst, undermappar till vänster och stödord till höger.
 
-        Allt går att göra härifrån - lägga till, ändra vikt och ta bort -
-        utan att öppna någon JSON-fil.
+        Stödord dras till undermappar; standardordet sparas separat per kategori.
+        Allt går att göra härifrån utan att öppna någon JSON-fil.
         """
         tk, ttk = self.tk, self.ttk
         T = self.theme
         f = self.tab_cats
-        f.columnconfigure(1, weight=3)
-        f.columnconfigure(2, weight=2)
-        f.rowconfigure(1, weight=1)
+        f.columnconfigure(0, weight=2, uniform="category-panels")
+        f.columnconfigure(1, weight=3, uniform="category-panels")
+        f.rowconfigure(2, weight=1)
 
-        # -- sökrad över hela fliken --
+        # -- vald kategori och åtgärder --
+        catbar = ttk.Frame(f, style="Card.TFrame")
+        catbar.grid(row=0, column=0, columnspan=2, sticky="ew",
+                    padx=T.PAD, pady=(T.PAD, 0))
+        catbar.columnconfigure(1, weight=1)
+        ttk.Label(catbar, text="Kategori", style="CardKey.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(T.INNER, 8), pady=T.INNER)
+        self.var_cat_select = tk.StringVar()
+        self.cat_combo = ttk.Combobox(
+            catbar, textvariable=self.var_cat_select, state="readonly")
+        self.cat_combo.grid(row=0, column=1, sticky="ew", padx=(0, 10),
+                            pady=T.INNER)
+        self.cat_combo.bind("<<ComboboxSelected>>",
+                            lambda e: self._on_cat_select())
+        ttk.Button(catbar, text="+ Ny", command=self._cat_new).grid(
+            row=0, column=2, padx=(0, 4))
+        ttk.Button(catbar, text="Byt namn", command=self._cat_rename).grid(
+            row=0, column=3, padx=4)
+        ttk.Button(catbar, text="Ta bort", style="Danger.TButton",
+                   command=self._cat_delete).grid(row=0, column=4, padx=4)
+        ttk.Button(catbar, text="Töm kategorier…", style="Danger.TButton",
+                   command=self._cat_clear_all).grid(row=0, column=5, padx=4)
+        self.btn_cat_restore = ttk.Button(
+            catbar, text="Ångra tömning", style="CardLink.TButton",
+            command=self._cat_restore_clear_backup,
+            state="normal" if self._category_clear_backup_path() else "disabled")
+        self.btn_cat_restore.grid(row=0, column=6, padx=(4, T.INNER))
+
+        # -- sök och regelimport/export --
         bar = ttk.Frame(f, style="Card.TFrame")
-        bar.grid(row=0, column=0, columnspan=2, sticky="ew",
-                 padx=T.PAD, pady=(T.PAD, 0))
+        bar.grid(row=1, column=0, columnspan=2, sticky="ew",
+                 padx=T.PAD, pady=(6, 0))
         bar.columnconfigure(1, weight=1)
         ttk.Label(bar, text="Sök stödord", style="CardKey.TLabel").grid(
             row=0, column=0, sticky="w", padx=(T.INNER, 0), pady=T.INNER)
@@ -10140,67 +10191,9 @@ class App:
         ttk.Button(bar, text="Importera…", style="CardLink.TButton",
                    command=self._import).grid(row=0, column=6, padx=(4, T.INNER))
 
-        # -- vänster: kategorier --
-        leftcard = T.card(f, "Kategorier")
-        leftcard.grid(row=1, column=0, sticky="nsew",
-                      padx=(T.PAD, T.GAP // 2), pady=T.GAP)
-        left = leftcard.body
-        left.rowconfigure(0, weight=1)
-        left.columnconfigure(0, weight=1)
-
-        cat_cols = ("name", "count", "regel")
-        self.cat_tree = ttk.Treeview(left, columns=cat_cols, show="headings",
-                                     selectmode="browse", height=14)
-        T.fit_columns(self.cat_tree, (
-            ("name", "KATEGORI", 16, "w", True),
-            ("count", "ORD", 3, "center", False),
-            # Visa kategorins undermappsinställning direkt i listan.
-            ("regel", "UNDERMAPP", 14, "w", False)))
-        self.cat_tree.grid(row=0, column=0, sticky="nsew", padx=(1, 0), pady=(1, 0))
-        self.cat_tree.bind("<<TreeviewSelect>>", lambda e: self._on_cat_select())
-        # Ta bort en kategori med Delete-tangenten, som en bekväm genväg
-        # vid sidan av knappen "Ta bort".
-        self.cat_tree.bind("<Delete>", lambda e: self._cat_delete())
-        self.theme.zebra(self.cat_tree)
-        csb = ttk.Scrollbar(left, orient="vertical", command=self.cat_tree.yview)
-        csb.grid(row=0, column=1, sticky="ns", pady=(1, 0), padx=(0, 1))
-        self.cat_tree.configure(yscrollcommand=csb.set)
-
-        # Högerklicksmeny på kategorilistan: samla alla kategorival på ett
-        # ställe, precis som för stödorden. Gör det tydligt att en hel
-        # kategori (med alla dess stödord) går att ta bort.
-        self.cat_menu = tk.Menu(self.cat_tree, tearoff=0)
-        self.cat_menu.add_command(label="+ Ny kategori…", command=self._cat_new)
-        self.cat_menu.add_command(label="Byt namn…", command=self._cat_rename)
-        self.cat_menu.add_separator()
-        self.cat_menu.add_command(label="Ta bort kategori",
-                                  command=self._cat_delete)
-        self.cat_tree.bind("<Button-3>", self._cat_context)
-        self.cat_tree.bind("<Button-2>", self._cat_context)   # macOS
-
-        cbtn = ttk.Frame(left, style="CardInner.TFrame")
-        cbtn.grid(row=1, column=0, columnspan=2, sticky="ew",
-                  padx=T.INNER, pady=T.INNER)
-        ttk.Button(cbtn, text="+ Ny", command=self._cat_new).pack(side="left")
-        ttk.Button(cbtn, text="Byt namn", command=self._cat_rename
-                   ).pack(side="left", padx=5)
-        ttk.Button(cbtn, text="Ta bort", style="Danger.TButton",
-                   command=self._cat_delete).pack(side="left")
-        ttk.Button(left, text="Ta bort alla kategorier…",
-                   style="Danger.TButton", command=self._cat_clear_all).grid(
-                       row=2, column=0, columnspan=2, sticky="ew",
-                       padx=T.INNER, pady=(0, 4))
-        self.btn_cat_restore = ttk.Button(
-            left, text="Ångra senaste tömning", style="CardLink.TButton",
-            command=self._cat_restore_clear_backup,
-            state="normal" if self._category_clear_backup_path() else "disabled")
-        self.btn_cat_restore.grid(
-            row=3, column=0, columnspan=2, sticky="ew",
-            padx=T.INNER, pady=(0, T.INNER))
-
         # -- höger: stödorden --
         rightcard = T.card(f, "Stödord")
-        rightcard.grid(row=1, column=1, sticky="nsew",
+        rightcard.grid(row=2, column=1, sticky="nsew",
                        padx=(T.GAP // 2, T.PAD), pady=T.GAP)
         right = rightcard.body
         right.columnconfigure(0, weight=1)
@@ -10277,6 +10270,21 @@ class App:
         self.spin_catkw.bind("<FocusOut>", lambda e: self._cat_save_kw())
         self.lbl_catkw = ttk.Label(krav, text="", style="CardMuted.TLabel")
         self.lbl_catkw.pack(side="left", padx=10)
+
+        ttk.Label(meta, text="Standardstödord:", style="Card.TLabel").grid(
+            row=5, column=0, sticky="w", pady=(8, 0))
+        self.var_default_keyword = tk.StringVar()
+        self.default_keyword_combo = ttk.Combobox(
+            meta, textvariable=self.var_default_keyword, state="readonly")
+        self.default_keyword_combo.grid(
+            row=5, column=1, columnspan=4, sticky="ew", padx=8, pady=(8, 0))
+        self.default_keyword_combo.bind(
+            "<<ComboboxSelected>>", self._cat_default_changed)
+        ttk.Label(
+            meta, text="Kopplas till vald kategori; samma ord får finnas i flera kategorier.",
+            style="CardMuted.TLabel").grid(
+                row=6, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
+
         cols = ("word", "kind", "weight", "whole", "hits")
         self.kw_tree = ttk.Treeview(right, columns=cols, show="headings",
                                     selectmode="extended")
@@ -10365,20 +10373,19 @@ class App:
                    command=self._import).pack(side="left", padx=5)
         self.empty_cat_panel.grid_remove()
 
-        # -- direkt synlig stödord → undermapp-koppling -----------------
-        # Kategorin väljs i vänsterkolumnen. I huvudfliken står nu både
-        # stödorden och deras undermappar bredvid varandra; koppling görs
-        # genom att dra ett ord från mitten till en mapp till höger.
-        mapcard = T.card(f, "Stödord och undermappar")
-        mapcard.grid(row=1, column=2, sticky="nsew",
-                     padx=(T.GAP // 2, T.PAD), pady=T.GAP)
+        # -- undermappar till vänster; stödorden visas i högra kortet --
+        # Välj kategori högst upp. Dra sedan stödord från högra listan till
+        # önskad undermapp i vänsterlistan.
+        mapcard = T.card(f, "Undermappar")
+        mapcard.grid(row=2, column=0, sticky="nsew",
+                     padx=(T.PAD, T.GAP // 2), pady=T.GAP)
         mapbody = mapcard.body
         mapbody.columnconfigure(0, weight=1)
         mapbody.rowconfigure(1, weight=1)
         ttk.Label(
             mapbody,
-            text="Välj en kategori till vänster. Dra sedan stödord hit till "
-                 "den undermapp där dokumenttypen ska sparas.",
+            text="Dra stödord från listan till höger till den undermapp där "
+                 "dokumenttypen ska sparas.",
             style="CardMuted.TLabel", wraplength=340, justify="left",
         ).grid(row=0, column=0, sticky="ew", padx=T.INNER,
                pady=(T.INNER, 8))
@@ -10428,38 +10435,19 @@ class App:
 
     # -- visning ----------------------------------------------------------
     def _refresh_categories(self, keep: Optional[str] = None) -> None:
-        keep = keep or self._selected_cat()
-        for row in self.cat_tree.get_children():
-            self.cat_tree.delete(row)
-        for i, cat in enumerate(self.rules.categories):
-            tags = ["odd" if i % 2 else "even"]
-            if not cat.get("enabled", True):
-                tags.append("off")
-            name = cat["name"] + ("   (av)" if not cat.get("enabled", True) else "")
-            märken = []
-            n_kw = int(cat.get("min_keywords", 0) or 0)
-            if n_kw:
-                märken.append(f"{n_kw} ord")
-            if cat.get("subfolder_path"):
-                märken.append("/" + cat["subfolder_path"])
-            if cat.get("subfolder"):
-                märken.append(cat["subfolder"])
-            self.cat_tree.insert("", "end", iid=cat["name"], tags=tags,
-                                 values=(name, len(cat["keywords"]),
-                                         " · ".join(märken)))
         names = self.rules.names()
-        target = keep if keep in names else (names[0] if names else None)
-        if target:
-            self.cat_tree.selection_set(target)
-            self.cat_tree.see(target)
+        current = keep or self._selected_cat()
+        target = current if current in names else (names[0] if names else "")
+        self.cat_combo.configure(values=names)
+        self.var_cat_select.set(target)
         total_words = sum(len(c["keywords"]) for c in self.rules.categories)
         self.lbl_kwcount.configure(
             text=f"{len(names)} kategorier · {total_words} stödord")
         self._on_cat_select()
 
     def _selected_cat(self) -> Optional[str]:
-        sel = self.cat_tree.selection()
-        return sel[0] if sel else None
+        name = self.var_cat_select.get().strip()
+        return name or None
 
     def _sort_keywords(self, col: str) -> None:
         current, desc = self._kw_sort
@@ -10478,7 +10466,9 @@ class App:
             self.lbl_cat_empty.configure(
                 text=("Skapa en kategori eller importera regler för att komma igång."
                       if no_categories else
-                      "Välj en kategori i listan till vänster för att visa dess stödord."))
+                      "Välj en kategori i menyn ovan för att visa dess stödord och undermappar."))
+            self.var_default_keyword.set("")
+            self.default_keyword_combo.configure(values=())
             self.cat_meta.grid_remove()
             self.kw_tree.grid_remove()
             self.kw_scrollbar.grid_remove()
@@ -10506,6 +10496,13 @@ class App:
         self._show_sub_example(cat)
         self.var_catkw.set(str(int(cat.get("min_keywords", 0) or 0)))
         self._show_kw_krav(cat)
+        default_words = sorted(
+            {normalize(kw.get("text", "")) for kw in cat["keywords"]
+             if normalize(kw.get("text", ""))}, key=str.casefold)
+        self.default_keyword_combo.configure(values=default_words)
+        default_word = normalize(cat.get("default_keyword", ""))
+        self.var_default_keyword.set(
+            default_word if default_word in default_words else "")
         self.lbl_cat_title.configure(text=cat["name"])
         used = sum(1 for k in cat["keywords"] if k.get("hits", 0))
         self.lbl_cat_stats.configure(
@@ -10525,7 +10522,7 @@ class App:
         cat = self.rules.get(name) if name else None
         if not cat:
             self.lbl_subfolder_map_status.configure(
-                text="Välj en kategori till vänster.")
+                text="Välj en kategori i menyn ovan.")
             return
         mapping = cat.setdefault("subfolder_keyword_map", {})
         if not isinstance(mapping, dict):
@@ -10539,9 +10536,9 @@ class App:
             tree.insert("", "end", iid=f"map-folder-{index}",
                         values=(folder, ", ".join(words)))
         default = normalize(cat.get("default_keyword", ""))
-        default_note = f"Standardord: {default or 'inte valt'}. "
+        default_note = f"Standardstödord: {default or 'inte valt'}. "
         self.lbl_subfolder_map_status.configure(
-            text=default_note + "Dra stödordet från mittenkolumnen till en mapp här.")
+            text=default_note + "Dra stödordet från listan till höger till en mapp här.")
 
     def _cat_map_drag_start(self, event) -> None:
         row = self.kw_tree.identify_row(event.y)
@@ -10559,7 +10556,7 @@ class App:
                 text=f"Släpp {word} på önskad undermapp.")
         else:
             self.lbl_subfolder_map_status.configure(
-                text=f"Dra {word} till undermappslistan till höger.")
+                text=f"Dra {word} till undermappslistan till vänster.")
 
     def _cat_map_drag_release(self, event) -> None:
         word = getattr(self, "_map_drag_word", "")
@@ -10586,30 +10583,45 @@ class App:
             text=f"Kopplade ‘{word}’ till ‘{folder}’. "
                  f"Standardord: {normalize(cat.get('default_keyword', '')) or 'inte valt'}.")
 
+    def _cat_default_changed(self, _event=None) -> None:
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            return
+        word = normalize(self.var_default_keyword.get())
+        valid_words = {normalize(kw.get("text", ""))
+                       for kw in cat.get("keywords", [])}
+        if word and word not in valid_words:
+            self.var_default_keyword.set("")
+            word = ""
+        cat["default_keyword"] = word
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self.lbl_subfolder_map_status.configure(
+            text=(f"{word} är standardstödord för {cat['name']}. "
+                  "Inställningen är separat för varje kategori."
+                  if word else f"Standardstödordet togs bort för {cat['name']}."))
+
     def _cat_map_set_default(self) -> None:
         selection = self.kw_tree.selection()
         name = self._selected_cat()
         cat = self.rules.get(name) if name else None
         if not cat or not selection:
             self.lbl_subfolder_map_status.configure(
-                text="Markera först ett stödord i mittenkolumnen.")
+                text="Markera först ett stödord i listan till höger.")
             return
         word = normalize(self.kw_tree.set(selection[0], "word"))
         if not word:
             return
-        cat["default_keyword"] = word
-        self.rules.save()
-        self._refresh_subfolder_map()
-        self._refresh_categories(name)
-        self.lbl_subfolder_map_status.configure(
-            text=f"{word} är nu standardordet för {cat['name']}.")
+        self.var_default_keyword.set(word)
+        self._cat_default_changed()
 
     def _cat_map_add_folder(self) -> None:
         name = self._selected_cat()
         cat = self.rules.get(name) if name else None
         if not cat:
             self.lbl_subfolder_map_status.configure(
-                text="Välj först en kategori.")
+                text="Välj först en kategori i menyn ovan.")
             return
         value = self.simpledialog.askstring(
             APP_NAME,
@@ -10634,7 +10646,7 @@ class App:
         selection = self.kw_tree.selection()
         if not cat or not selection:
             self.lbl_subfolder_map_status.configure(
-                text="Markera först ett stödord i mittenkolumnen.")
+                text="Markera först ett stödord i listan till höger.")
             return
         word = normalize(self.kw_tree.set(selection[0], "word"))
         mapping = cat.setdefault("subfolder_keyword_map", {})
@@ -10862,18 +10874,6 @@ class App:
         self._update_category_restore_button()
         self._refresh_categories()
         self._log("Återställde kategorier från säkerhetskopian", "info")
-
-    def _cat_context(self, event) -> None:
-        """Visa kategorins högerklicksmeny, med raden under pekaren markerad."""
-        rad = self.cat_tree.identify_row(event.y)
-        if rad and rad not in self.cat_tree.selection():
-            self.cat_tree.selection_set(rad)
-        if not self.cat_tree.selection():
-            return
-        try:
-            self.cat_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.cat_menu.grab_release()
 
     def _category_subfolder_base(self, cat: Dict[str, Any],
                                  when: Optional[date] = None) -> Path:

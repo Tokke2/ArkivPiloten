@@ -150,6 +150,27 @@ def test_confirming_current_archive_destination_does_not_create_rename_copy(
     assert list(source.parent.glob("*.pdf")) == [source]
 
 
+def test_shared_support_word_keeps_a_separate_default_per_category(tmp_path):
+    path = tmp_path / "shared-rules.json"
+    rules = Rules({"categories": [
+        {"name": "Bank A", "folder": "Bank A",
+         "keywords": ["Transaktioner", "Inbetalning"],
+         "default_keyword": "Transaktioner"},
+        {"name": "Bank B", "folder": "Bank B",
+         "keywords": ["Transaktioner", "Utbetalning"],
+         "default_keyword": "Utbetalning"},
+    ]}, path)
+    rules.save()
+
+    loaded = Rules.load(path)
+    first = loaded.get("Bank A")
+    second = loaded.get("Bank B")
+    assert "transaktioner" in {kw["text"] for kw in first["keywords"]}
+    assert "transaktioner" in {kw["text"] for kw in second["keywords"]}
+    assert first["default_keyword"] == "transaktioner"
+    assert second["default_keyword"] == "utbetalning"
+
+
 def test_default_and_folder_links_roundtrip_and_stale_links_are_removed(tmp_path):
     path = tmp_path / "rules.json"
     rules = _rules(path)
