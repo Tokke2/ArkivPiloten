@@ -53,11 +53,19 @@ class _MaximizableWindow(_Window):
         super().__init__(width, height)
         self.support_zoomed = support_zoomed
         self.state_request = None
+        self.current_state = "normal"
+        self.idle_callback = None
 
-    def state(self, value: str):
+    def state(self, value=None):
+        if value is None:
+            return self.current_state
         if not self.support_zoomed:
             raise RuntimeError("window manager does not support zoomed state")
         self.state_request = value
+        self.current_state = value
+
+    def after_idle(self, callback):
+        self.idle_callback = callback
 
     def attributes(self, *_args):
         raise RuntimeError("zoomed attribute unavailable")
@@ -76,3 +84,26 @@ def test_maximize_falls_back_to_screen_aligned_geometry():
 
     assert P._maximize_window(window)
     assert window.request == "1920x1080+0+0"
+
+
+def test_map_event_retries_maximize_after_window_manager_maps_window():
+    window = _MaximizableWindow(1920, 1080, support_zoomed=True)
+
+    P._maximize_after_map(window)
+
+    assert window.state_request is None
+    assert window.idle_callback is not None
+    window.idle_callback()
+    assert window.state_request == "zoomed"
+
+
+def test_map_event_leaves_minimized_window_and_child_events_alone():
+    window = _MaximizableWindow(1920, 1080, support_zoomed=True)
+    window.current_state = "iconic"
+    P._maximize_after_map(window)
+    assert window.idle_callback is None
+
+    window.current_state = "normal"
+    child_event = type("Event", (), {"widget": object()})()
+    P._maximize_after_map(window, child_event)
+    assert window.idle_callback is None

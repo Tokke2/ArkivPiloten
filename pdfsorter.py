@@ -4305,6 +4305,26 @@ def _maximize_window(win) -> bool:
         return False
 
 
+def _maximize_after_map(win, event=None) -> None:
+    """Be operativsystemet maximera när ett fönster faktiskt visas.
+
+    Vissa fönsterhanterare ignorerar ``state('zoomed')`` innan det första
+    visningseventet. Schemalägg därför maximering efter Map/återställning,
+    men låt avsiktlig minimering till aktivitetsfältet vara ifred.
+    """
+    if event is not None and getattr(event, "widget", win) is not win:
+        return
+    try:
+        if win.state() == "iconic":
+            return
+    except Exception:
+        pass
+    try:
+        win.after_idle(lambda: _maximize_window(win))
+    except Exception:
+        _maximize_window(win)
+
+
 # --------------------------------------------------------------------------
 # Granskningsdialogen - kärnan: stödord att själv välja och spara
 # --------------------------------------------------------------------------
@@ -7462,6 +7482,9 @@ class App:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Unmap>", self._on_unmap)
+        self.root.bind("<Map>",
+                       lambda event: _maximize_after_map(self.root, event),
+                       add="+")
         self.root.after(120, self._pump)
         self._refresh_input_list()
         self._refresh_categories()
