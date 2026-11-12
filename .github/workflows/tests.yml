@@ -35,4 +35,9 @@ jobs:
       - name: Install test tools
         run: python -m pip install -r requirements-dev.txt
       - name: Run tests
-        run: python -m pytest -q
+        run: >-
+          python -c "import pathlib,subprocess,sys; p=subprocess.run([sys.executable,'-m','pytest','-q','--tb=short'],capture_output=True,text=True); output=(p.stdout or '')+(p.stderr or ''); print(output,end=''); pathlib.Path('pytest-output.log').write_text(output,encoding='utf-8'); sys.exit(p.returncode)"
+      - name: Attach concise test failure details
+        if: failure()
+        run: >-
+          python -c "from pathlib import Path; s=Path('pytest-output.log').read_text(encoding='utf-8',errors='replace')[-12000:]; s=s.replace('%','%25').replace('\\r','%0D').replace('\\n','%0A').replace(':','%3A').replace(',','%2C'); print('::error::'+s)"
