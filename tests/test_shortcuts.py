@@ -31,6 +31,7 @@ def app(tmp_path, monkeypatch):
     return S, tmp_path, main
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable-bit behavior")
 def test_linux_writes_menu_and_desktop(app, monkeypatch):
     S, tmp, _main = app
     monkeypatch.setattr(S.sys, "platform", "linux")
