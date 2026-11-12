@@ -587,6 +587,9 @@ def avidentifiera(text: str, logs_dir: Optional[Path] = None) -> str:
         ut = ut.replace(f"\\Users\\{användare}", "\\Users\\<användare>")
         ut = ut.replace(f"/Users/{användare}", "/Users/<användare>")
         ut = ut.replace(f"/home/{användare}", "/home/<användare>")
+        # Pytest/tempdir names and other paths may repeat the account name
+        # outside the canonical home-path prefix (e.g. pytest-of-user).
+        ut = re.sub(re.escape(användare), "<användare>", ut, flags=re.IGNORECASE)
     if logs_dir:
         ut = ut.replace(str(logs_dir), "~" + os.sep + "logs")
     return ut

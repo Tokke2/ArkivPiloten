@@ -48,6 +48,8 @@ def _parse_desktop(path: pathlib.Path) -> configparser.RawConfigParser:
 
 
 # -- Linux -----------------------------------------------------------------
+@pytest.mark.skipif(sys.platform.startswith("win"),
+                       reason="POSIX path behavior is covered on Linux/macOS")
 def test_linux_roundtrip(app, monkeypatch):
     S, tmp, _main = app
     monkeypatch.setattr(S.sys, "platform", "linux")
@@ -76,6 +78,8 @@ def test_linux_roundtrip(app, monkeypatch):
     assert S.classify_autostart() == "missing"
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"),
+                       reason="POSIX path behavior is covered on Linux/macOS")
 def test_linux_escapes_percent_in_exec(app, monkeypatch):
     """En sökväg med % får inte bli en ogiltig Exec-fältkod."""
     S, tmp, _main = app
@@ -97,6 +101,8 @@ def test_linux_escapes_percent_in_exec(app, monkeypatch):
     assert S.classify_autostart() == "correct"
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"),
+                       reason="POSIX path behavior is covered on Linux/macOS")
 def test_linux_propagates_pdfporter_home(app, monkeypatch):
     S, tmp, _main = app
     monkeypatch.setattr(S.sys, "platform", "linux")
@@ -111,6 +117,8 @@ def test_linux_propagates_pdfporter_home(app, monkeypatch):
     assert S.classify_autostart() == "correct"
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"),
+                       reason="POSIX path behavior is covered on Linux/macOS")
 def test_linux_cleans_legacy_entry(app, monkeypatch):
     S, tmp, _main = app
     monkeypatch.setattr(S.sys, "platform", "linux")
@@ -324,6 +332,8 @@ def _fake_launchctl(monkeypatch):
     return calls, loaded
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"),
+                       reason="POSIX path behavior is covered on Linux/macOS")
 def test_macos_plist_is_escaped_and_loadable(app, monkeypatch):
     S, tmp, _main = app
     monkeypatch.setattr(S.sys, "platform", "darwin")
@@ -357,6 +367,8 @@ def test_macos_plist_is_escaped_and_loadable(app, monkeypatch):
     assert not loaded["value"]
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"),
+                       reason="POSIX path behavior is covered on Linux/macOS")
 def test_macos_invalid_old_plist_is_repaired(app, monkeypatch):
     S, tmp, _main = app
     monkeypatch.setattr(S.sys, "platform", "darwin")
