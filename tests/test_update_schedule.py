@@ -12,6 +12,7 @@ Tk - allt utom själva fönstret går att granska här.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pdfsorter as P
 import pdfsorter_data as D
@@ -581,7 +582,7 @@ def test_restart_releases_the_lock_then_starts_the_new_process(
     namn = [h[0] if isinstance(h, tuple) else h for h in händelser]
     assert namn == ["release", "popen"]
     cmd = händelser[1][1]
-    assert cmd[0] and cmd[1].endswith("pdfsorter.py")
+    assert cmd[0] and Path(cmd[1]).name == "pdfsorter.py"
     assert app.root.riven is True
 
 

@@ -2,6 +2,7 @@
 """Genvägar på skrivbordet/i appmenyn - utan att röra användarens filer."""
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 
@@ -47,6 +48,7 @@ def test_linux_writes_menu_and_desktop(app, monkeypatch):
     assert desk.stat().st_mode & 0o111, "skrivbordsgenvägen måste vara körbar"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable-bit behavior")
 def test_macos_command_file_quotes_special_paths(app, monkeypatch):
     S, tmp, _main = app
     monkeypatch.setattr(S.sys, "platform", "darwin")
