@@ -46,3 +46,33 @@ def test_geometry_keeps_requested_size_when_display_is_large():
 
     assert window.request == "1280x880+320+100"
     assert window.minimum == (1060, 720)
+
+
+class _MaximizableWindow(_Window):
+    def __init__(self, width: int, height: int, support_zoomed: bool):
+        super().__init__(width, height)
+        self.support_zoomed = support_zoomed
+        self.state_request = None
+
+    def state(self, value: str):
+        if not self.support_zoomed:
+            raise RuntimeError("window manager does not support zoomed state")
+        self.state_request = value
+
+    def attributes(self, *_args):
+        raise RuntimeError("zoomed attribute unavailable")
+
+
+def test_maximize_requests_zoomed_window_state():
+    window = _MaximizableWindow(1920, 1080, support_zoomed=True)
+
+    assert P._maximize_window(window)
+    assert window.state_request == "zoomed"
+    assert window.request is None
+
+
+def test_maximize_falls_back_to_screen_aligned_geometry():
+    window = _MaximizableWindow(1920, 1080, support_zoomed=False)
+
+    assert P._maximize_window(window)
+    assert window.request == "1920x1080+0+0"

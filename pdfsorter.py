@@ -4279,6 +4279,32 @@ def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None
                 f"(önskat {want_w}x{want_h}, min {min_w_fit}x{min_h_fit})")
 
 
+def _maximize_window(win) -> bool:
+    """Maximera ett fönster; falla tillbaka på skärmfyllande geometri.
+
+    Tk använder ``zoomed`` på Windows och flera Linux-fönsterhanterare.
+    Andra system kan erbjuda ``-zoomed`` eller sakna båda; sista reserven
+    placerar fönstret mot skärmens övre vänstra hörn och använder hela ytan.
+    """
+    try:
+        win.state("zoomed")
+        return True
+    except Exception:
+        pass
+    try:
+        win.attributes("-zoomed", True)
+        return True
+    except Exception:
+        pass
+    try:
+        width = max(320, int(win.winfo_screenwidth()))
+        height = max(320, int(win.winfo_screenheight()))
+        win.geometry(f"{width}x{height}+0+0")
+        return True
+    except Exception:
+        return False
+
+
 # --------------------------------------------------------------------------
 # Granskningsdialogen - kärnan: stödord att själv välja och spara
 # --------------------------------------------------------------------------
@@ -7351,10 +7377,11 @@ class App:
             # pythonw. Nu hamnar de i loggen och i AI-rapporten.
             diag.install_tk_hooks(self.root)
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        # Fönstret anpassas dynamiskt till skärmstorleken (användarorder
-        # 2026-08-26) - aldrig större än skärmen, centrerat, åtkomligt
-        # minsta mått även på små skärmar.
+        # Sätt först en säker reservgeometri och maximera sedan. Fönstret
+        # startar fortfarande minimerat enligt inställningen, men ska alltid
+        # fylla skärmen när det visas/återställs.
         _fit_geometry(self.root, 1280, 880, 1060, 720)
+        _maximize_window(self.root)
         self.theme = Theme(
             self.root, ttk,
             dark=str(self.settings.get("theme", "ljus")) == "mork",
@@ -10163,6 +10190,10 @@ class App:
         self.lbl_cat_title.grid(row=0, column=0, sticky="w")
         self.lbl_cat_stats = ttk.Label(head, text="", style="CardMuted.TLabel")
         self.lbl_cat_stats.grid(row=1, column=0, sticky="w", pady=(1, 0))
+        ttk.Button(
+            head, text="Stödord ↔ undermappar…",
+            command=self._open_subfolder_keyword_editor,
+        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
 
         meta = ttk.Frame(right, style="CardInner.TFrame")
         meta.grid(row=1, column=0, columnspan=2, sticky="ew",
@@ -10223,11 +10254,6 @@ class App:
         self.spin_catkw.bind("<FocusOut>", lambda e: self._cat_save_kw())
         self.lbl_catkw = ttk.Label(krav, text="", style="CardMuted.TLabel")
         self.lbl_catkw.pack(side="left", padx=10)
-        ttk.Button(
-            meta, text="Koppla stödord till undermappar…",
-            command=self._open_subfolder_keyword_editor
-        ).grid(row=5, column=0, columnspan=5, sticky="w", pady=(8, 0))
-
         cols = ("word", "kind", "weight", "whole", "hits")
         self.kw_tree = ttk.Treeview(right, columns=cols, show="headings",
                                     selectmode="extended")
@@ -13745,7 +13771,7 @@ class App:
                 f"Fönstret visas ({reason or 'anledning ej angiven'})")
         try:
             self.root.deiconify()
-            self.root.state("normal")
+            _maximize_window(self.root)
             self.root.lift()
             self.root.attributes("-topmost", True)
             self.root.after(300, lambda: self.root.attributes("-topmost", False))
@@ -13775,7 +13801,7 @@ class App:
             return
         try:
             self.root.deiconify()
-            self.root.state("normal")
+            _maximize_window(self.root)
             self.root.lift()
             self.root.focus_force()
             self.visible = True
