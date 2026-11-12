@@ -40,4 +40,4 @@ jobs:
       - name: Attach concise test failure details
         if: failure()
         run: >-
-          python -c "from pathlib import Path; lines=Path('pytest-output.log').read_text(encoding='utf-8',errors='replace').splitlines()[-40:]; [print('::error::'+line.replace('%','%25').replace(':','%3A').replace(',','%2C')) for line in lines]"
+          python -c "from pathlib import Path; lines=Path('pytest-output.log').read_text(encoding='utf-8',errors='replace').splitlines()[-120:]; [print('::error::'+line.replace('%','%25').replace(':','%3A').replace(',','%2C')) for line in lines]"

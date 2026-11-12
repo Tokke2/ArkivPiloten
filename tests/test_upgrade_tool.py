@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import os
 import re
 import shutil
 import subprocess
@@ -289,7 +290,7 @@ def test_launchers_are_portable():
         if m:
             assert m.group(1).isascii(), \
                 f"variabelnamn med icke-ASCII: {m.group(1)}"
-    if shutil.which("bash"):
+    if os.name != "nt" and shutil.which("bash"):
         r = subprocess.run(["bash", "-n", str(sh)],
                            capture_output=True, text=True,
                            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
