@@ -10089,7 +10089,8 @@ class App:
         tk, ttk = self.tk, self.ttk
         T = self.theme
         f = self.tab_cats
-        f.columnconfigure(1, weight=1)
+        f.columnconfigure(1, weight=3)
+        f.columnconfigure(2, weight=2)
         f.rowconfigure(1, weight=1)
 
         # -- sökrad över hela fliken --
@@ -10190,10 +10191,9 @@ class App:
         self.lbl_cat_title.grid(row=0, column=0, sticky="w")
         self.lbl_cat_stats = ttk.Label(head, text="", style="CardMuted.TLabel")
         self.lbl_cat_stats.grid(row=1, column=0, sticky="w", pady=(1, 0))
-        ttk.Button(
-            head, text="Stödord ↔ undermappar…",
-            command=self._open_subfolder_keyword_editor,
-        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
+        ttk.Label(head, text="Dra ett stödord till en undermapp →",
+                  style="CardMuted.TLabel").grid(
+                      row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
 
         meta = ttk.Frame(right, style="CardInner.TFrame")
         meta.grid(row=1, column=0, columnspan=2, sticky="ew",
@@ -10342,6 +10342,64 @@ class App:
                    command=self._import).pack(side="left", padx=5)
         self.empty_cat_panel.grid_remove()
 
+        # -- direkt synlig stödord → undermapp-koppling -----------------
+        # Kategorin väljs i vänsterkolumnen. I huvudfliken står nu både
+        # stödorden och deras undermappar bredvid varandra; koppling görs
+        # genom att dra ett ord från mitten till en mapp till höger.
+        mapcard = T.card(f, "Stödord och undermappar")
+        mapcard.grid(row=1, column=2, sticky="nsew",
+                     padx=(T.GAP // 2, T.PAD), pady=T.GAP)
+        mapbody = mapcard.body
+        mapbody.columnconfigure(0, weight=1)
+        mapbody.rowconfigure(1, weight=1)
+        ttk.Label(
+            mapbody,
+            text="Välj en kategori till vänster. Dra sedan stödord hit till "
+                 "den undermapp där dokumenttypen ska sparas.",
+            style="CardMuted.TLabel", wraplength=340, justify="left",
+        ).grid(row=0, column=0, sticky="ew", padx=T.INNER,
+               pady=(T.INNER, 8))
+        self.subfolder_map_tree = ttk.Treeview(
+            mapbody, columns=("folder", "words"), show="headings",
+            selectmode="browse", height=12)
+        self.subfolder_map_tree.heading("folder", text="UNDERMAPP")
+        self.subfolder_map_tree.heading("words", text="KOPPLADE STÖDORD")
+        self.subfolder_map_tree.column("folder", width=120, anchor="w", stretch=True)
+        self.subfolder_map_tree.column("words", width=140, anchor="w", stretch=True)
+        self.subfolder_map_tree.grid(row=1, column=0, sticky="nsew",
+                                     padx=(T.INNER, 0), pady=2)
+        self.theme.zebra(self.subfolder_map_tree)
+        map_scroll = ttk.Scrollbar(
+            mapbody, orient="vertical", command=self.subfolder_map_tree.yview)
+        map_scroll.grid(row=1, column=1, sticky="ns", padx=(0, T.INNER), pady=2)
+        self.subfolder_map_tree.configure(yscrollcommand=map_scroll.set)
+        self.lbl_subfolder_map_status = ttk.Label(
+            mapbody, text="Välj en kategori för att börja.",
+            style="CardMuted.TLabel", wraplength=340, justify="left")
+        self.lbl_subfolder_map_status.grid(
+            row=2, column=0, columnspan=2, sticky="ew",
+            padx=T.INNER, pady=(6, 4))
+        map_actions = ttk.Frame(mapbody, style="CardInner.TFrame")
+        map_actions.grid(row=3, column=0, columnspan=2, sticky="ew",
+                         padx=T.INNER, pady=(0, T.INNER))
+        map_actions.columnconfigure(0, weight=1)
+        map_actions.columnconfigure(1, weight=1)
+        ttk.Button(
+            map_actions, text="Använd valt stödord som standard",
+            command=self._cat_map_set_default,
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        ttk.Button(map_actions, text="+ Undermapp…",
+                   command=self._cat_map_add_folder).grid(
+                       row=1, column=0, sticky="ew", padx=(0, 3))
+        ttk.Button(map_actions, text="Koppla loss valt ord",
+                   command=self._cat_map_remove).grid(
+                       row=1, column=1, sticky="ew", padx=(3, 0))
+        self._map_extra_folders: Dict[str, set] = {}
+        self._map_drag_word = ""
+        self.kw_tree.bind("<ButtonPress-1>", self._cat_map_drag_start, add="+")
+        self.kw_tree.bind("<B1-Motion>", self._cat_map_drag_motion, add="+")
+        self.kw_tree.bind("<ButtonRelease-1>", self._cat_map_drag_release, add="+")
+
         self._kw_sort = ("hits", True)
         self._kw_rows: List[Dict[str, Any]] = []
 
@@ -10407,6 +10465,7 @@ class App:
             self.empty_cat_panel.grid()
             for row in self.kw_tree.get_children():
                 self.kw_tree.delete(row)
+            self._refresh_subfolder_map()
             return
         self.empty_cat_panel.grid_remove()
         self.cat_meta.grid()
@@ -10431,6 +10490,140 @@ class App:
                  f"{cat.get('files_sorted', 0)} filer sorterade  ·  "
                  f"mapp: {cat['folder']}")
         self._refresh_keyword_view()
+        self._refresh_subfolder_map()
+
+    def _refresh_subfolder_map(self) -> None:
+        tree = getattr(self, "subfolder_map_tree", None)
+        if tree is None:
+            return
+        for item in tree.get_children():
+            tree.delete(item)
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            self.lbl_subfolder_map_status.configure(
+                text="Välj en kategori till vänster.")
+            return
+        mapping = cat.setdefault("subfolder_keyword_map", {})
+        if not isinstance(mapping, dict):
+            mapping = {}
+            cat["subfolder_keyword_map"] = mapping
+        extra = self._map_extra_folders.setdefault(name, set())
+        folders = self._subfolder_mapping_options(cat, extra)
+        for index, folder in enumerate(folders):
+            words = sorted((normalize(word) for word, target in mapping.items()
+                            if target == folder), key=str.casefold)
+            tree.insert("", "end", iid=f"map-folder-{index}",
+                        values=(folder, ", ".join(words)))
+        default = normalize(cat.get("default_keyword", ""))
+        default_note = f"Standardord: {default or 'inte valt'}. "
+        self.lbl_subfolder_map_status.configure(
+            text=default_note + "Dra stödordet från mittenkolumnen till en mapp här.")
+
+    def _cat_map_drag_start(self, event) -> None:
+        row = self.kw_tree.identify_row(event.y)
+        self._map_drag_word = normalize(self.kw_tree.set(row, "word")) if row else ""
+        if row:
+            self.kw_tree.selection_set(row)
+
+    def _cat_map_drag_motion(self, event) -> None:
+        word = getattr(self, "_map_drag_word", "")
+        if not word:
+            return
+        target = self.root.winfo_containing(event.x_root, event.y_root)
+        if target is self.subfolder_map_tree:
+            self.lbl_subfolder_map_status.configure(
+                text=f"Släpp {word} på önskad undermapp.")
+        else:
+            self.lbl_subfolder_map_status.configure(
+                text=f"Dra {word} till undermappslistan till höger.")
+
+    def _cat_map_drag_release(self, event) -> None:
+        word = getattr(self, "_map_drag_word", "")
+        self._map_drag_word = ""
+        if not word or self.root.winfo_containing(event.x_root, event.y_root) \
+                is not self.subfolder_map_tree:
+            return
+        y = event.y_root - self.subfolder_map_tree.winfo_rooty()
+        row = self.subfolder_map_tree.identify_row(y)
+        if not row:
+            self.lbl_subfolder_map_status.configure(
+                text="Släpp stödordet på en undermapp i listan.")
+            return
+        values = self.subfolder_map_tree.item(row, "values")
+        folder = str(values[0]) if values else ""
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat or not folder:
+            return
+        cat.setdefault("subfolder_keyword_map", {})[word] = folder
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self.lbl_subfolder_map_status.configure(
+            text=f"Kopplade ‘{word}’ till ‘{folder}’. "
+                 f"Standardord: {normalize(cat.get('default_keyword', '')) or 'inte valt'}.")
+
+    def _cat_map_set_default(self) -> None:
+        selection = self.kw_tree.selection()
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat or not selection:
+            self.lbl_subfolder_map_status.configure(
+                text="Markera först ett stödord i mittenkolumnen.")
+            return
+        word = normalize(self.kw_tree.set(selection[0], "word"))
+        if not word:
+            return
+        cat["default_keyword"] = word
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self._refresh_categories(name)
+        self.lbl_subfolder_map_status.configure(
+            text=f"{word} är nu standardordet för {cat['name']}.")
+
+    def _cat_map_add_folder(self) -> None:
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            self.lbl_subfolder_map_status.configure(
+                text="Välj först en kategori.")
+            return
+        value = self.simpledialog.askstring(
+            APP_NAME,
+            "Undermapp relativt kategoriens år-/datumstruktur "
+            "(exempel: Faktura eller Transaktioner/Inbetalningar):",
+            parent=self.root)
+        if value is None:
+            return
+        folder, error = validate_subfolder_override(value)
+        if error or not folder:
+            if error:
+                self.messagebox.showwarning(APP_NAME, error, parent=self.root)
+            return
+        self._map_extra_folders.setdefault(name, set()).add(folder)
+        self._refresh_subfolder_map()
+        self.lbl_subfolder_map_status.configure(
+            text=f"Undermappen ‘{folder}’ är nu tillgänglig som kopplingsmål.")
+
+    def _cat_map_remove(self) -> None:
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        selection = self.kw_tree.selection()
+        if not cat or not selection:
+            self.lbl_subfolder_map_status.configure(
+                text="Markera först ett stödord i mittenkolumnen.")
+            return
+        word = normalize(self.kw_tree.set(selection[0], "word"))
+        mapping = cat.setdefault("subfolder_keyword_map", {})
+        if word not in mapping:
+            self.lbl_subfolder_map_status.configure(
+                text=f"{word} har ingen undermappskoppling.")
+            return
+        mapping.pop(word, None)
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self.lbl_subfolder_map_status.configure(
+            text=f"Kopplingen för {word} togs bort.")
 
     def _refresh_keyword_view(self) -> None:
         """Rita om stödordslistan med aktuell sortering och sökfilter."""
