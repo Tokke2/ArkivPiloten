@@ -1447,6 +1447,16 @@ _WORD = re.compile(r"[^\W\d_][\w\-åäöÅÄÖéèüÜøæ]{2,}", re.UNICODE)
 _PROPER = re.compile(
     r"(?<=[a-zåäö,;:]\s)([A-ZÅÄÖ][a-zåäöéèü]{2,}(?:[ \t][A-ZÅÄÖ][a-zåäöéèü]{2,}){0,2})")
 _DATEISH = re.compile(r"^\d[\d\s./:-]*$")
+# Vanliga dokumentrubriker som kan vara användbara stödord. Begränsas till
+# rader nära dokumentets början så en hänvisning i brödtexten inte blir titel.
+_DOCUMENT_TITLE = re.compile(
+    r"^(?:faktura|invoice|kvitto|receipt|kreditfaktura|credit note|"
+    r"orderbekräftelse|orderbekraftelse|purchase order|offert|quotation|"
+    r"avtal|agreement|kontrakt|contract|påminnelse|reminder|"
+    r"kontoutdrag|bank statement|transaktionsrapport|årsredovisning|"
+    r"annual report|kreditnota|credit note|följesedel|delivery note|"
+    r"order)(?:\s*(?:nr\.?|nummer|no\.?|#)?\s*[a-zåäö0-9-]*)?$", re.I)
+_TITLE_LABEL = re.compile(r"^(?:titel|title|ämne|subject)\s*[:\-]\s*(.{3,100})$", re.I)
 
 #: Delar text i ord (bokstäver/siffror hör ihop) - för tokenräknaren i
 #: suggest_keywords (snabbhet, rond 4).
@@ -1454,6 +1464,7 @@ _TOKEN_RE = re.compile(r"[^\W_]+")
 
 # typ -> (vikt, etikett)
 KIND_INFO = {
+    "title":   (3.2, "dokumenttitel"),
     "orgnr":   (3.0, "organisationsnummer"),
     "vat":     (3.0, "VAT-nummer"),
     "giro":    (2.2, "bankgiro/plusgiro"),
@@ -1863,6 +1874,11 @@ def suggest_keywords(text: str, filename: str = "", limit: int = 25,
         raw = re.sub(r"\s+", " ", (raw or "").strip(" .,:;()[]{}\"'-"))
         if len(raw) < 3:
             return
+        # Etiketter för identifierare kan råka uppfattas som företagsnamn
+        # (t.ex. "VAT SE…" av versal-/namnheuristiken). Spara i så fall bara
+        # den strukturerade identifierarkandidaten som extraherats separat.
+        if kind in ("company", "sender") and _ID_HINT.match(normalize(raw)):
+            return
         key = normalize(raw)
         if not key or len(key) < 3:
             return
@@ -1883,6 +1899,19 @@ def suggest_keywords(text: str, filename: str = "", limit: int = 25,
             # behåll den starkaste typen
             if KIND_INFO.get(kind, (0,))[0] > KIND_INFO.get(prev.kind, (0,))[0]:
                 prev.kind, prev.display = kind, raw
+
+    # -- dokumenttitel --------------------------------------------------
+    # Rubrikerna hämtas ur sidtexten/OCR-texten, inte från ett antagande om
+    # filnamnet. Bara dokumentets inledning får bestämma titeln.
+    for line in text.splitlines()[:12]:
+        title = re.sub(r"\s+", " ", line.strip(" \t.:_-"))
+        labeled_title = _TITLE_LABEL.fullmatch(title)
+        if labeled_title:
+            add(labeled_title.group(1), "title")
+            break
+        if title and _DOCUMENT_TITLE.fullmatch(title):
+            add(title, "title")
+            break
 
     # -- starka identifierare ------------------------------------------
     for m in _ORGNR.finditer(hay):
@@ -2024,11 +2053,21 @@ def suggest_keywords(text: str, filename: str = "", limit: int = 25,
         cand.score = score
 
     # -- rensa bort delsträngar av starkare kandidater --------------------
-    ranked = sorted(found.values(), key=lambda c: (-c.score, c.text))
+    # Identitetsuppgifter och dokumenttitel är de mest användbara
+    # stödordsförslagen vid granskning. Rangordna dem före generiska ord,
+    # oavsett frekvenspoäng; inom gruppen behålls den vanliga relevansordningen.
+    priority = {"title": 0, "company": 1, "sender": 1,
+                "orgnr": 2, "vat": 3, "giro": 4}
+    ranked = sorted(found.values(),
+                    key=lambda c: (priority.get(c.kind, 5), -c.score, c.text))
     kept: List[Candidate] = []
     for cand in ranked:
-        if any(cand.text != k.text and cand.text in k.text and cand.score < k.score * 1.3
-               for k in kept):
+        # Behåll alltid strukturerade identiteter även om deras text råkar
+        # ingå i en längre fras/företagskandidat (t.ex. VAT efter "VAT ").
+        identity = cand.kind in {"orgnr", "vat", "giro"}
+        if not identity and any(
+                cand.text != k.text and cand.text in k.text
+                and cand.score < k.score * 1.3 for k in kept):
             continue
         kept.append(cand)
         if len(kept) >= limit:

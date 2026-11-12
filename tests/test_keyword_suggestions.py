@@ -1,4 +1,5 @@
 from __future__ import annotations
+from collections import Counter
 
 from pdfsorter_data import (
     DEFAULT_SETTINGS,
@@ -45,3 +46,63 @@ def test_review_suggestion_note_explains_type_and_exact_match_count():
     assert ReviewDialog._candidate_count_note(once) == "ord · 1 träff"
     assert ReviewDialog._candidate_count_note(several) == (
         "företagsnamn · 4 träffar")
+
+
+def test_document_title_company_and_identifiers_rank_before_generic_words():
+    text = """FAKTURA 2025-004
+Exempelföretag AB
+Org.nr 556016-0680
+VAT SE556016068001
+Bankgiro 123-4567
+leveransvillkor information betalning"""
+
+    candidates = suggest_keywords(text)
+    kinds = [candidate.kind for candidate in candidates]
+    important = ["title", "company", "orgnr", "vat", "giro"]
+
+    assert [kind for kind in important if kind in kinds] == important
+    assert kinds[0] == "title"
+    assert kinds.index("company") < kinds.index("orgnr")
+    assert [kinds.index(kind) for kind in important] == sorted(
+        kinds.index(kind) for kind in important)
+    prioritized = {"title", "company", "sender", "orgnr", "vat", "giro"}
+    other_positions = [i for i, kind in enumerate(kinds)
+                       if kind not in prioritized]
+    assert not other_positions or max(kinds.index(kind) for kind in important) < min(
+        other_positions)
+
+
+def test_explicit_document_title_is_extracted_from_ocr_text():
+    candidates = suggest_keywords(
+        "Titel: Underhållsrapport för fastighet\nOrg.nr 556016-0680")
+
+    assert candidates[0].kind == "title"
+    assert candidates[0].text == "underhållsrapport för fastighet"
+
+
+def test_priority_is_independent_of_frequency_or_existing_keyword_score():
+    text = """Faktura
+Nordisk Exempel AB
+Org.nr 556016-0680
+VAT SE556016068001
+Bankgiro 123-4567
+""" + " ofta förekommande ord" * 12
+
+    candidates = suggest_keywords(text, existing=Counter({
+        "faktura": 3,
+        "nordisk exempel ab": 3,
+        "556016-0680": 3,
+        "se556016068001": 3,
+        "123-4567": 3,
+    }))
+    kinds = [candidate.kind for candidate in candidates]
+
+    important = ["title", "company", "orgnr", "vat", "giro"]
+    assert kinds[0] == "title"
+    assert [kinds.index(kind) for kind in important] == sorted(
+        kinds.index(kind) for kind in important)
+    prioritized = {"title", "company", "sender", "orgnr", "vat", "giro"}
+    other_positions = [i for i, kind in enumerate(kinds)
+                       if kind not in prioritized]
+    assert not other_positions or max(kinds.index(kind) for kind in important) < min(
+        other_positions)
