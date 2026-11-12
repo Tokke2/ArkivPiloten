@@ -20,6 +20,8 @@ import shutil
 import subprocess
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import pytest
 
@@ -74,6 +76,11 @@ def _release(tmp_path, version="1.4.7", extra=None, prefix=""):
     (zip_path.parent / U.SUMS).write_text(
         f"{sha}  {U.ASSET}\n", encoding="utf-8")
     return zip_path.parent.as_uri()
+
+
+def _release_path(url):
+    """Convert a local file URL back to a path on POSIX and Windows."""
+    return Path(url2pathname(urlparse(url).path))
 
 
 def _install(tmp_path, version="1.1.0"):
@@ -177,7 +184,7 @@ def test_same_version_is_a_no_op_when_all_package_files_match(tmp_path):
     app = _install(tmp_path, "1.4.7")
     url = _release(tmp_path, "1.4.7")
     staging = tmp_path / "release-files"
-    package = (Path(url[7:]) / U.ASSET).read_bytes()
+    package = (_release_path(url) / U.ASSET).read_bytes()
     U.extract(package, staging)
     for source in staging.iterdir():
         shutil.copy2(source, app / source.name)
@@ -202,7 +209,7 @@ def test_same_version_installs_when_release_file_hashes_changed(tmp_path, capsys
 def test_broken_checksum_changes_nothing(tmp_path):
     app = _install(tmp_path)
     url = _release(tmp_path, "1.4.7")
-    sums = Path(url[7:]) / U.SUMS
+    sums = _release_path(url) / U.SUMS
     sums.write_text("0" * 64 + f"  {U.ASSET}\n", encoding="utf-8")
     assert U.run(app, url_base=url, tag="v1.4.7") == 1
     assert U.version_in(app) == "1.1.0"          # orörd
