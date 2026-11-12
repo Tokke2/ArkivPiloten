@@ -3213,6 +3213,7 @@ UPDATE_FILES = (
     "pdfsorter_read.py", "pdfsorter_system.py", "pdfsorter_theme.py",
     "pdfsorter_diag.py",
     "requirements.txt", "install.sh", "ArkivPiloten.png", "ArkivPiloten.ico",
+    "brand/arkivpiloten-logo.svg", "brand/arkivpiloten-icon.svg",
     # Engångsuppgraderingen från 1.0.0/1.1.0. Ligger kvar i mappen så att
     # den som behöver den slipper leta.
     "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
@@ -3614,6 +3615,7 @@ def _restore_files(backup: Path, root: Path, installerade: List[str],
         kalla = backup / namn
         try:
             if namn in fanns_innan and kalla.is_file():
+                mal.parent.mkdir(parents=True, exist_ok=True)
                 _sh.copy2(kalla, mal)
             elif namn not in fanns_innan and mal.is_file():
                 mal.unlink()
@@ -3692,8 +3694,11 @@ def _install_from_folder(staged: Path, root: Path,
                 continue
             mal = root / namn
             if mal.is_file():
-                _sh.copy2(mal, backup / namn)
+                backup_path = backup / namn
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                _sh.copy2(mal, backup_path)
                 fanns_innan.add(namn)
+            mal.parent.mkdir(parents=True, exist_ok=True)
             tmp = root / (namn + ".update-tmp")
             with open(kalla, "rb") as fi, open(tmp, "wb") as fo:
                 _sh.copyfileobj(fi, fo)

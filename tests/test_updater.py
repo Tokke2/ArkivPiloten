@@ -61,6 +61,7 @@ def _same_version_manifest(tmp_path, monkeypatch, commit="a" * 40):
     hashes = {}
     for name in S.UPDATE_CONTENT_FILES:
         path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         if name == "pdfsorter.py":
             data = f'APP_VERSION = "{S.APP_VERSION}"\nOLD = True\n'.encode()
         elif name.endswith(".py"):

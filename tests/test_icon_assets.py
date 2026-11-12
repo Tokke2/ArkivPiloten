@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
 from PIL import Image
@@ -23,6 +24,20 @@ def test_shared_master_icon_has_transparency_and_expected_sizes():
         assert image.format == "ICO"
         assert {(16, 16), (24, 24), (32, 32), (48, 48), (64, 64),
                 (128, 128), (256, 256)} <= set(image.ico.sizes())
+
+
+def test_brand_sources_are_scalable_vector_svg_without_embedded_rasters():
+    logo = ROOT / "brand" / "arkivpiloten-logo.svg"
+    icon = ROOT / "brand" / "arkivpiloten-icon.svg"
+
+    for path in (logo, icon):
+        root = ET.parse(path).getroot()
+        assert root.tag.endswith("svg")
+        assert root.attrib.get("viewBox")
+        assert not root.findall(".//{http://www.w3.org/2000/svg}image")
+        assert not root.findall(".//{http://www.w3.org/2000/svg}text")
+        assert root.findall(".//{http://www.w3.org/2000/svg}path")
+    assert "ArkivPiloten" in logo.read_text(encoding="utf-8")
 
 
 def test_active_tray_icon_has_a_high_contrast_status_badge():

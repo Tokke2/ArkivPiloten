@@ -127,18 +127,27 @@ def test_safe_members_only_returns_known_files():
         "mapp/pdfking.py": "x",
         "ArkivPiloten-1.4.7/pdfsorter.py": "x",
         "ArkivPiloten-1.4.7/README.md": "x",
+        "brand/arkivpiloten-logo.svg": "vector logo",
+        "ArkivPiloten-1.4.7/brand/arkivpiloten-icon.svg": "vector icon",
     })
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         namn = set(U.safe_members(zf))
-    assert namn == {"pdfsorter.py", "README.md"}
+    assert namn == {
+        "pdfsorter.py", "README.md",
+        "brand/arkivpiloten-logo.svg", "brand/arkivpiloten-icon.svg",
+    }
 
 
 # -- hela flödet ----------------------------------------------------------
 def test_upgrade_replaces_program_files_and_keeps_user_data(tmp_path):
     app = _install(tmp_path)
-    url = _release(tmp_path, "1.4.7")
+    url = _release(tmp_path, "1.4.7", extra={
+        "brand/arkivpiloten-logo.svg": "<svg>logo</svg>",
+        "brand/arkivpiloten-icon.svg": "<svg>icon</svg>",
+    })
     assert U.run(app, url_base=url, tag="v1.4.7") == 0
     assert U.version_in(app) == "1.4.7"
+    assert (app / "brand" / "arkivpiloten-logo.svg").read_text() == "<svg>logo</svg>"
     # Användardata och egna filer är orörda.
     assert (app / "json" / "rules.json").read_text() == '{"categories": []}'
     assert (app / "logs" / "senaste.log").read_text() == "rad\n"

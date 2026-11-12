@@ -59,6 +59,7 @@ FILES = (
     "requirements.txt", "install.sh",
     "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
     "ArkivPiloten.png", "ArkivPiloten.ico",
+    "brand/arkivpiloten-logo.svg", "brand/arkivpiloten-icon.svg",
     "ArkivPiloten - Installera senaste Python och starta.bat",
     "arkivpiloten_python.ps1", "arkivpiloten_schedule_python_updates.ps1",
     "README.md", "PDFSORTER_SPEC.md", "Stöd ArkivPiloten.html",
@@ -223,10 +224,15 @@ def safe_members(zf: zipfile.ZipFile) -> Dict[str, zipfile.ZipInfo]:
     for info in zf.infolist():
         if info.is_dir():
             continue
-        namn = info.filename.replace("\\", "/")
-        bas = namn.rsplit("/", 1)[-1]
-        if bas in FILES and bas not in out:
-            out[bas] = info
+        name = info.filename.replace("\\", "/").lstrip("/")
+        # Preserve whitelisted subpaths (currently brand/*.svg) while
+        # accepting a single GitHub archive root folder as before. The
+        # extraction target is always the whitelisted path, never the zip
+        # member's untrusted path.
+        target = name if name in FILES else next(
+            (entry for entry in FILES if name.endswith("/" + entry)), "")
+        if target and target not in out:
+            out[target] = info
     return out
 
 
@@ -239,10 +245,13 @@ def extract(zip_bytes: bytes, dest: Path) -> List[str]:
             data = zf.read(info)
             if not data:
                 continue
-            mal = dest / namn
-            # Sista skyddsnätet: målet MÅSTE ligga i dest.
-            if Path(os.path.abspath(mal)).parent != Path(os.path.abspath(dest)):
+            mal = (dest / namn).resolve()
+            # Sista skyddsnätet: även tillåtna undermappar måste ligga i dest.
+            try:
+                mal.relative_to(dest.resolve())
+            except ValueError:
                 continue
+            mal.parent.mkdir(parents=True, exist_ok=True)
             mal.write_bytes(data)
             skrivna.append(namn)
     return skrivna
@@ -290,7 +299,9 @@ def backup(root: Path, stamp: Optional[str] = None) -> Path:
     for f in FILES:
         källa = Path(root) / f
         if källa.is_file():
-            shutil.copy2(källa, mal / f)
+            target = mal / f
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(källa, target)
     return mal
 
 
@@ -302,6 +313,7 @@ def install(staging: Path, root: Path) -> List[str]:
         if not källa.is_file():
             continue
         mal = Path(root) / namn
+        mal.parent.mkdir(parents=True, exist_ok=True)
         tmp = mal.with_name(f".{mal.name}.upgrade-tmp")
         shutil.copy2(källa, tmp)
         os.replace(tmp, mal)

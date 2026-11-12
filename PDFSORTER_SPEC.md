@@ -2236,15 +2236,19 @@ regelstödd och får inte försvaga sorteringens säkerhetsgränser.)
 ska den inte använda en `.pyw`-fil som kan visa Pythons ikon.)
 **AC-18:**
 - AC-18.1 `ArkivPiloten.png` är 512×512 RGBA med transparenta hörn och är
-  den gemensamma mastern för fönster, dialoger, aktivitetsfält, tray,
-  genvägar, macOS-app och dokumentationsbilder. `ArkivPiloten.ico` byggs
-  från samma master med lager från 16 till 256 px.
+  appikonen för fönster, dialoger, aktivitetsfält, tray, genvägar och
+  macOS-app. `ArkivPiloten.ico` har lager från 16 till 256 px. Den nya
+  mapp-/kompassymbolen och ordmärket finns dessutom som tryckfärdiga,
+  rasterfria SVG-filer under `brand/`; ordmärket är konverterat till banor
+  så att ingen installerad font krävs vid utskrift.
 - AC-18.2 Windows autostart startar `pythonw.exe pdfsorter.py --tray`
   direkt, aldrig `pdfsorter.pyw` via filassociation. AppUserModelID och
   den gemensamma `.ico`-filen används för att undvika Python-standardikon;
   `pythonw.exe` väljs för att undvika konsolfönster.
 - AC-18.3 Autostartens plattformsstöd och UI-val för Windows/macOS/Linux
   bevaras. Test täcker att Windows autostart inte pekar på `.pyw`.
+- AC-18.4 Windows, macOS och Linux har separata installations-/startflöden;
+  CI kör testsviten på samtliga tre plattformar och på Python 3.10/3.12.
 
 ### REQ-N19 (B) — Autouppdatering jämför releasebyggen även vid samma versionsnummer
 (ANVÄNDARORDER 2026-10-30: jämför releasefiler och commit, och erbjud
