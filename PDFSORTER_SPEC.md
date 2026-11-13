@@ -1331,7 +1331,7 @@ som träffar bokstavligt och inte finns i andra kategorier; övriga fall kräver
   i bakgrunden. Samma 100 bekräftelser och två kategoriexklusiva exakta träffar krävs; övriga läggs i kön.
 - AC-2.5 Manuellt valda undermappar per fil sparas som användarvalda dokumenttyper. Efter minst 100 manuella bekräftelser i huvudkategorin får en typundermapp väljas automatiskt först när minst två typer har fem manuella exempel vardera, två särskiljande typord träffar och modellen är säker; annars skickas filen till granskning.
 - AC-2.6 Granskningsrutans PDF-förhandsvisning kan valfritt rita en ruta runt markerbar text och spara text, sidnummer, relativ sidposition och vald undermapp som mall. Aktiva mallar kräver samma normaliserade text i samma sidområde; mallar är av/på-valbara per kategori. Ingen eller motstridig mallträff lämnar filen för granskning. Mallar kringgår aldrig 100 manuella bekräftelser eller de två kategoriexklusiva stödorden.
-- AC-2.7 I kategoriredigeraren kan användaren dra sparade stödord från en lista till befintliga eller uttryckligen angivna undermappar, se aktuella kopplingar och välja exakt ett standardord för kategorin. Ett kopplat ord avgör endast undermapp efter att den separata kategorisäkerheten är uppfylld; utebliven eller motstridig undermappsträff lämnar filen för granskning.
+- AC-2.7 I kategoriredigeraren visas sparade stödord till vänster och endast skapade undermappar för vald kategori till höger. Årsmappskomponenter visas inte och identiska undermappsökvägar från flera år visas en gång. Användaren kan skapa en mapp både i kategorivyn och i kopplingsdialogen, dra ett stödord till en mapp och välja exakt ett standardord per kategori. Ett kopplat ord avgör endast undermapp efter att den separata kategorisäkerheten är uppfylld; utebliven eller motstridig undermappsträff lämnar filen för granskning.
 - AC-2.8 När Arkivbevakning är aktiverad kontrollerar appen regelbundet PDF:er under den konfigurerade arkivroten. Den ignorerar mappar som inte motsvarar en aktiv kategori, flyttar endast vid samma säkra kategorikrav som vanlig autosortering och en entydig undermapp, och lägger möjliga men osäkra felplaceringar i granskningskön. Originalet skrivs aldrig över.
 
 ### REQ-F3 (M) — Flikar
@@ -1342,8 +1342,8 @@ som träffar bokstavligt och inte finns i andra kategorier; övriga fall kräver
 
 ### REQ-F4 (M) — Kategorier: sök, sortera och visa
 **AC-F4:**
-- AC-4.1 Kategori väljs i en rullgardinsmeny överst. Två huvudkolumner visas: tre separata mapplistor till vänster och alla stödord för vald kategori till höger.
-- AC-4.1a Stödord dras från högersidan till en undermapp i någon av de tre mapplistorna; aktuell koppling visas direkt. Ett stödord får finnas i flera kategorier.
+- AC-4.1 Kategori väljs i en rullgardinsmeny överst. Vänsterfältet listar endast sparade stödord för vald kategori; högerfältet listar endast skapade mappar i kategorin. Årsmappskomponenter utelämnas och mappar med samma relativa sökväg under olika år visas en gång.
+- AC-4.1a Sparade stödord dras från vänsterfältet till en skapad mapp i högerfältet. Ett stödord får finnas i flera kategorier; mappfältet visar inte stödord eller andra kopplingsdata.
 - AC-4.1b Ett standardstödord väljs per kategori. Standardvalet är kategorispecifikt även när samma ord finns i flera kategorier. Vid automatflytt måste standardordet också finnas; ett delat standardord är bara en ankarkontroll och räknas inte bland de två kategoriexklusiva stödorden eller ersätter kraven på 100 manuella bekräftelser.
 - AC-4.1c Användaren kan markera ett eller flera stödord och en undermapp och koppla dem med knappen eller `Ctrl+M`; dra-och-släpp finns kvar som alternativ. Funktionen ändrar bara kopplingen, aldrig PDF-filer.
 - AC-4.2 Stödordslistan visar alla stödord för vald kategori utan ett separat sök-/filterfält.
