@@ -10663,55 +10663,45 @@ class App:
         self.empty_cat_panel.grid_remove()
 
         # -- undermappar till vänster; stödorden visas i högra kortet --
-        # Välj kategori högst upp. Dra sedan stödord från högra listan till
-        # önskad undermapp i vänsterlistan.
+        # Välj kategori högst upp. Dra stödord från högra listan till mappen.
         mapcard = T.card(f, "Undermappar")
         mapcard.grid(row=2, column=0, sticky="nsew",
                      padx=(T.PAD, T.GAP // 2), pady=T.GAP)
         mapbody = mapcard.body
-        for map_col in range(3):
-            mapbody.columnconfigure(map_col, weight=1, uniform="folder-mapping-views")
+        mapbody.columnconfigure(0, weight=1)
         mapbody.rowconfigure(1, weight=1)
         ttk.Label(
             mapbody,
             text=("Dra stödord hit eller markera ord och undermapp och "
                   "tryck Ctrl+M för att koppla utan att dra."),
             style="CardMuted.TLabel", wraplength=440, justify="left",
-        ).grid(row=0, column=0, columnspan=3, sticky="ew", padx=T.INNER,
+        ).grid(row=0, column=0, sticky="ew", padx=T.INNER,
                pady=(T.INNER, 8))
-        self.subfolder_map_trees = []
-        for map_index in range(3):
-            map_view = ttk.Frame(mapbody, style="CardInner.TFrame")
-            map_view.grid(row=1, column=map_index, sticky="nsew",
-                          padx=(T.INNER if map_index == 0 else 3, 3), pady=2)
-            map_view.columnconfigure(0, weight=1)
-            map_view.rowconfigure(1, weight=1)
-            ttk.Label(map_view, text=f"MAPPVY {map_index + 1}",
-                      style="CardKey.TLabel").grid(
-                          row=0, column=0, columnspan=2, sticky="w", pady=(2, 4))
-            map_tree = ttk.Treeview(
-                map_view, columns=("folder", "words"), show="headings",
-                selectmode="browse", height=12)
-            map_tree.heading("folder", text="UNDERMAPP")
-            map_tree.heading("words", text="KOPPLADE ORD")
-            map_tree.column("folder", width=95, anchor="w", stretch=True)
-            map_tree.column("words", width=95, anchor="w", stretch=True)
-            map_tree.grid(row=1, column=0, sticky="nsew")
-            self.theme.zebra(map_tree)
-            map_scroll = ttk.Scrollbar(
-                map_view, orient="vertical", command=map_tree.yview)
-            map_scroll.grid(row=1, column=1, sticky="ns")
-            map_tree.configure(yscrollcommand=map_scroll.set)
-            self.subfolder_map_trees.append(map_tree)
-        self.subfolder_map_tree = self.subfolder_map_trees[0]
+        map_view = ttk.Frame(mapbody, style="CardInner.TFrame")
+        map_view.grid(row=1, column=0, sticky="nsew", padx=T.INNER, pady=2)
+        map_view.columnconfigure(0, weight=1)
+        map_view.rowconfigure(0, weight=1)
+        self.subfolder_map_tree = ttk.Treeview(
+            map_view, columns=("folder", "words"), show="headings",
+            selectmode="browse", height=12)
+        self.subfolder_map_tree.heading("folder", text="UNDERMAPP")
+        self.subfolder_map_tree.heading("words", text="KOPPLADE ORD")
+        self.subfolder_map_tree.column("folder", width=120, anchor="w", stretch=True)
+        self.subfolder_map_tree.column("words", width=120, anchor="w", stretch=True)
+        self.subfolder_map_tree.grid(row=0, column=0, sticky="nsew")
+        self.theme.zebra(self.subfolder_map_tree)
+        map_scroll = ttk.Scrollbar(
+            map_view, orient="vertical", command=self.subfolder_map_tree.yview)
+        map_scroll.grid(row=0, column=1, sticky="ns")
+        self.subfolder_map_tree.configure(yscrollcommand=map_scroll.set)
+        self.subfolder_map_trees = [self.subfolder_map_tree]
         self.lbl_subfolder_map_status = ttk.Label(
             mapbody, text="Välj en kategori för att börja.",
             style="CardMuted.TLabel", wraplength=440, justify="left")
         self.lbl_subfolder_map_status.grid(
-            row=2, column=0, columnspan=3, sticky="ew",
-            padx=T.INNER, pady=(6, 4))
+            row=2, column=0, sticky="ew", padx=T.INNER, pady=(6, 4))
         map_actions = ttk.Frame(mapbody, style="CardInner.TFrame")
-        map_actions.grid(row=3, column=0, columnspan=3, sticky="ew",
+        map_actions.grid(row=3, column=0, sticky="ew",
                          padx=T.INNER, pady=(0, T.INNER))
         map_actions.columnconfigure(0, weight=1)
         map_actions.columnconfigure(1, weight=1)
@@ -10824,12 +10814,11 @@ class App:
         self._refresh_subfolder_map()
 
     def _refresh_subfolder_map(self) -> None:
-        trees = getattr(self, "subfolder_map_trees", None)
-        if not trees:
+        tree = getattr(self, "subfolder_map_tree", None)
+        if tree is None:
             return
-        for tree in trees:
-            for item in tree.get_children():
-                tree.delete(item)
+        for item in tree.get_children():
+            tree.delete(item)
         name = self._selected_cat()
         cat = self.rules.get(name) if name else None
         if not cat:
@@ -10845,7 +10834,6 @@ class App:
         for index, folder in enumerate(folders):
             words = sorted((normalize(word) for word, target in mapping.items()
                             if target == folder), key=str.casefold)
-            tree = trees[index % len(trees)]
             tree.insert("", "end", iid=f"map-folder-{index}",
                         values=(folder, ", ".join(words)))
         default = normalize(cat.get("default_keyword", ""))
@@ -10870,7 +10858,7 @@ class App:
                 text=f"Släpp {word} på önskad undermapp.")
         else:
             self.lbl_subfolder_map_status.configure(
-                text=f"Dra {word} till någon av de tre mapplistorna till vänster.")
+                text=f"Dra {word} till undermappslistan till vänster.")
 
     def _cat_map_drag_release(self, event) -> None:
         word = getattr(self, "_map_drag_word", "")
@@ -10931,7 +10919,7 @@ class App:
             return "break"
         if len(selected_folders) != 1 or not selected_folders[0]:
             self.lbl_subfolder_map_status.configure(
-                text="Markera en undermapp i någon av de tre listorna.")
+                text="Markera en undermapp i listan till vänster.")
             return "break"
         folder = str(selected_folders[0][0])
         mapping = cat.setdefault("subfolder_keyword_map", {})
@@ -11371,47 +11359,57 @@ class App:
 
     def _subfolder_mapping_options(self, cat: Dict[str, Any],
                                    extra: Iterable[str] = ()) -> List[str]:
-        """Existing document-type folders under a category, plus saved targets."""
-        folders = set()
+        """List unique document-type paths, omitting year-folder components."""
+        folders: Dict[str, str] = {}
+
+        def add_folder(raw: str) -> None:
+            value, error = validate_subfolder_override(str(raw or ""))
+            if error or not value:
+                return
+            # Year directories vary by archive year, but name the same document
+            # type. Remove them from the display/target path before de-duplicating.
+            parts = [part for part in value.split("/")
+                     if not (len(part) == 4 and part.isdigit())]
+            value = "/".join(parts)
+            if value:
+                folders.setdefault(value.casefold(), value)
+
         output = str(self.settings.get("output_dir", "") or "").strip()
         if output:
-            base = self._category_subfolder_base(cat)
-            category_sub, error = validate_subfolder_override(
-                str(cat.get("subfolder_path", "") or ""))
-            if not error:
-                for part in category_sub.split("/"):
-                    if part:
-                        base /= safe_folder_name(part)
-            if base.is_dir():
+            category_root = Path(output) / safe_folder_name(cat["folder"])
+            if category_root.is_dir():
                 try:
-                    for path in base.rglob("*"):
+                    dated_base = self._category_subfolder_base(cat)
+                    base_parts = list(dated_base.relative_to(category_root).parts)
+                    base_parts = [part for part in base_parts
+                                  if not (len(part) == 4 and part.isdigit())]
+                except (ValueError, OSError):
+                    base_parts = []
+                try:
+                    for path in category_root.rglob("*"):
                         if not path.is_dir():
                             continue
                         try:
-                            relative = path.relative_to(base)
+                            relative_parts = list(path.relative_to(category_root).parts)
                         except ValueError:
                             continue
-                        if relative.parts:
-                            folders.add(relative.as_posix())
+                        relative_parts = [part for part in relative_parts
+                                          if not (len(part) == 4 and part.isdigit())]
+                        if (base_parts and relative_parts[:len(base_parts)] == base_parts):
+                            relative_parts = relative_parts[len(base_parts):]
+                        add_folder("/".join(relative_parts))
                 except OSError:
                     pass
-        for mapping in (cat.get("subfolder_keyword_map", {}),):
-            if isinstance(mapping, dict):
-                for raw in mapping.values():
-                    value, error = validate_subfolder_override(str(raw or ""))
-                    if value and not error:
-                        folders.add(value)
+        mapping = cat.get("subfolder_keyword_map", {})
+        if isinstance(mapping, dict):
+            for raw in mapping.values():
+                add_folder(str(raw or ""))
         for template in cat.get("subfolder_templates", []):
             if isinstance(template, dict):
-                value, error = validate_subfolder_override(
-                    str(template.get("folder", "")))
-                if value and not error:
-                    folders.add(value)
+                add_folder(str(template.get("folder", "")))
         for raw in extra:
-            value, error = validate_subfolder_override(str(raw or ""))
-            if value and not error:
-                folders.add(value)
-        return sorted(folders, key=str.casefold)
+            add_folder(str(raw or ""))
+        return sorted(folders.values(), key=str.casefold)
 
     def _open_subfolder_keyword_editor(self) -> None:
         """Let the user drag category support words onto document-type folders."""
@@ -11446,8 +11444,8 @@ class App:
 
         ttk.Label(
             dialog,
-            text=(f"{cat['name']}  ·  dra ett stödord från vänster till en "
-                  "undermapp till höger"),
+            text=(f"{cat['name']}  ·  dra ett stödord från höger till en "
+                  "undermapp till vänster"),
             style="CardTitle.TLabel", wraplength=dialog_w - 40, justify="left"
         ).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 4))
         ttk.Label(
@@ -11463,13 +11461,13 @@ class App:
         body.columnconfigure(0, weight=1)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(1, weight=1)
-        ttk.Label(body, text="STÖDORD", style="CardKey.TLabel").grid(
-            row=0, column=0, sticky="w", padx=10, pady=(10, 4))
         ttk.Label(body, text="UNDERMAPPAR", style="CardKey.TLabel").grid(
+            row=0, column=0, sticky="w", padx=10, pady=(10, 4))
+        ttk.Label(body, text="STÖDORD", style="CardKey.TLabel").grid(
             row=0, column=1, sticky="w", padx=10, pady=(10, 4))
 
         left_frame = ttk.Frame(body, style="CardInner.TFrame")
-        left_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=(0, 10))
+        left_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=(0, 10))
         left_frame.columnconfigure(0, weight=1)
         left_frame.rowconfigure(0, weight=1)
         left_tree = ttk.Treeview(
@@ -11486,7 +11484,7 @@ class App:
         left_tree.configure(yscrollcommand=left_scroll.set)
 
         right_frame = ttk.Frame(body, style="CardInner.TFrame")
-        right_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=(0, 10))
+        right_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=(0, 10))
         right_frame.columnconfigure(0, weight=1)
         right_frame.rowconfigure(0, weight=1)
         right_tree = ttk.Treeview(
@@ -11550,7 +11548,7 @@ class App:
         def set_default(_event=None) -> None:
             selection = left_tree.selection()
             if not selection:
-                status.configure(text="Välj först ett stödord till vänster.")
+                status.configure(text="Välj först ett stödord till höger.")
                 return
             row = left_tree.item(selection[0], "values")
             word = normalize(row[0]) if row else ""
@@ -11581,7 +11579,7 @@ class App:
         def remove_mapping(_event=None) -> None:
             selection = left_tree.selection()
             if not selection:
-                status.configure(text="Välj först ett stödord till vänster.")
+                status.configure(text="Välj först ett stödord till höger.")
                 return
             row = left_tree.item(selection[0], "values")
             word = normalize(row[0]) if row else ""
@@ -11617,7 +11615,7 @@ class App:
                 return
             target = dialog.winfo_containing(event.x_root, event.y_root)
             if target is not right_tree:
-                status.configure(text="Dra stödordet till en undermapp i högra kolumnen.")
+                status.configure(text="Dra stödordet till en undermapp i vänstra kolumnen.")
                 return
             row_y = event.y_root - right_tree.winfo_rooty()
             row_id = right_tree.identify_row(row_y)
