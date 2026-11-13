@@ -216,7 +216,8 @@ _JSON_FLYTTAD = False
 
 DATA_FILER = ("settings.json", "rules.json", "history.json",
               "history.journal", "ignored_files.json",
-              "learned_model.json", "arkivpiloten.lock", "visa-fonstret")
+              "learned_model.json", "invoice_index.json",
+              "arkivpiloten.lock", "visa-fonstret")
 
 
 def json_dir() -> Path:
@@ -257,7 +258,7 @@ def migrate_to_portable() -> List[str]:
     if ny == gammal or not gammal.is_dir():
         return []
     kopierade = []
-    for namn in DATA_FILER[:6]:
+    for namn in DATA_FILER[:7]:
         src_f = gammal / namn
         # gamla OS-layouten hade json i roten; nya layouten i json/
         dst_f = json_dir() / namn

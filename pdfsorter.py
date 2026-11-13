@@ -509,6 +509,8 @@ class Decision:
     #: N14: lärd klassificerares förslag (kategori, antal liknande filer);
     #: visas i granskningsrutan när reglerna inte räcker till.
     learned_hint: Optional[Tuple[str, int]] = None
+    #: Möjlig dubblettfaktura; endast en granskningsvarning, aldrig en åtgärd.
+    invoice_duplicate: Optional[Dict[str, Any]] = None
 
     @property
     def best(self) -> Optional[CategoryScore]:
@@ -543,6 +545,118 @@ def category_explanation(score: Optional[CategoryScore],
     elif learned_hint and learned_hint[0] == score.name:
         text += f" Historiken känner igen {learned_hint[1]} liknande filer."
     return text
+
+
+_INVOICE_NUMBER_RE = re.compile(
+    r"\b(?:faktura(?:n)?\s*(?:nr\.?|nummer|no\.?)|"
+    r"invoice\s*(?:no\.?|number|#))\s*[:#]?\s*"
+    r"([A-Z0-9][A-Z0-9./_-]{1,30}(?:\s+[A-Z0-9./_-]*\d[A-Z0-9./_-]*)?)\b",
+    re.I)
+_INVOICE_AMOUNT_LABEL_RE = re.compile(
+    r"\b(?:summa\s+att\s+betala|belopp\s+att\s+betala|"
+    r"totalt?\s+att\s+betala|att\s+betala|amount\s+due|"
+    r"total\s+amount\s+due|total\s+due|balance\s+due|"
+    r"grand\s+total|invoice\s+total)\b", re.I)
+_INVOICE_AMOUNT_RE = re.compile(
+    r"(?<!\d)[+-]?(?:\d{1,3}(?:[ \u00a0.,]\d{3})+|\d+)"
+    r"(?:[,.]\d{1,2})?(?!\d)")
+_INVOICE_CURRENCY_RE = re.compile(
+    r"\b(SEK|NOK|DKK|EUR|USD|GBP)\b|\bkr\b|€|\$|£", re.I)
+
+
+def _invoice_amount_minor(raw: str) -> Optional[int]:
+    """Parse a common Swedish/European/English amount into integer cents."""
+    value = re.sub(r"[\s\u00a0]", "", str(raw or ""))
+    if not value:
+        return None
+    sign = -1 if value.startswith("-") else 1
+    value = value.lstrip("+-")
+    comma, dot = value.rfind(","), value.rfind(".")
+    decimal_sep = ""
+    if comma >= 0 and dot >= 0:
+        decimal_sep = "," if comma > dot else "."
+    elif comma >= 0:
+        tail = value[comma + 1:]
+        decimal_sep = "," if len(tail) in (1, 2) else ""
+    elif dot >= 0:
+        tail = value[dot + 1:]
+        decimal_sep = "." if len(tail) in (1, 2) else ""
+    if decimal_sep:
+        whole, fraction = value.rsplit(decimal_sep, 1)
+    else:
+        whole, fraction = value, ""
+    whole = re.sub(r"[.,]", "", whole)
+    if not whole.isdigit() or (fraction and not fraction.isdigit()):
+        return None
+    cents = int((fraction + "00")[:2]) if fraction else 0
+    return sign * (int(whole) * 100 + cents)
+
+
+def extract_invoice_identity(text: str, supplier: str) -> Optional[Dict[str, Any]]:
+    """Extract a conservative supplier + labelled invoice number + payable total.
+
+    It intentionally requires an explicit invoice-number label and an
+    explicitly labelled amount due. Missing or ambiguous fields mean no match.
+    """
+    body = str(text or "")
+    supplier_key = normalize(supplier)
+    if not supplier_key:
+        return None
+    number_match = _INVOICE_NUMBER_RE.search(body)
+    if not number_match:
+        return None
+    invoice_number = re.sub(r"[^a-z0-9]", "", number_match.group(1).casefold())
+    if len(invoice_number) < 3 or not any(ch.isdigit() for ch in invoice_number):
+        return None
+
+    amount_minor = None
+    currency = ""
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        label = _INVOICE_AMOUNT_LABEL_RE.search(line)
+        if not label:
+            continue
+        amount_match = _INVOICE_AMOUNT_RE.search(line, label.end())
+        amount_line = line
+        if not amount_match and index + 1 < len(lines):
+            amount_line = lines[index + 1]
+            amount_match = _INVOICE_AMOUNT_RE.search(amount_line)
+        if not amount_match:
+            continue
+        amount_minor = _invoice_amount_minor(amount_match.group(0))
+        currency_match = _INVOICE_CURRENCY_RE.search(line + " " + amount_line)
+        if currency_match:
+            token = currency_match.group(1)
+            currency = (token.upper() if token else
+                        "EUR" if currency_match.group(0) == "€" else
+                        "GBP" if currency_match.group(0) == "£" else
+                        "USD" if currency_match.group(0) == "$" else "SEK")
+        if amount_minor is not None:
+            break
+    if amount_minor is None:
+        return None
+    return {"supplier": supplier_key, "invoice_number": invoice_number,
+            "amount_minor": amount_minor, "currency": currency}
+
+
+def invoice_identity_matches(first: Dict[str, Any],
+                             second: Dict[str, Any]) -> bool:
+    """Require all three business identifiers; this is only a review signal."""
+    if (not first or not second
+            or normalize(str(first.get("supplier", "")))
+            != normalize(str(second.get("supplier", "")))
+            or not first.get("invoice_number")
+            or str(first.get("invoice_number"))
+            != str(second.get("invoice_number", ""))):
+        return False
+    try:
+        same_amount = int(first["amount_minor"]) == int(second["amount_minor"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    first_currency = str(first.get("currency", "") or "")
+    second_currency = str(second.get("currency", "") or "")
+    return same_amount and (not first_currency or not second_currency
+                            or first_currency == second_currency)
 
 
 def _kw_pattern(kw: Dict[str, Any]) -> re.Pattern:
@@ -2807,6 +2921,134 @@ class SortEngine:
         self._content_fingerprint_path: Optional[Path] = None
         self._persisted_content_fingerprints: Optional[Dict[str, Dict[str, Any]]] = None
         self._content_index_at = 0.0
+        self._invoice_index_lock = threading.RLock()
+        self._invoice_index: Optional[Dict[str, Dict[str, Any]]] = None
+        self._invoice_index_dirty = False
+
+    def _load_invoice_index(self) -> Dict[str, Dict[str, Any]]:
+        if self._invoice_index is not None:
+            return self._invoice_index
+        raw = _read_json(json_dir() / "invoice_index.json", {})
+        entries = raw.get("entries", {}) if isinstance(raw, dict) else {}
+        self._invoice_index = {
+            str(path): item for path, item in entries.items()
+            if isinstance(path, str) and isinstance(item, dict)
+        } if isinstance(entries, dict) else {}
+        return self._invoice_index
+
+    def _save_invoice_index(self) -> None:
+        with self._invoice_index_lock:
+            if not self._invoice_index_dirty:
+                return
+            try:
+                _write_json(json_dir() / "invoice_index.json", {
+                    "schema": 1, "entries": self._load_invoice_index()})
+                self._invoice_index_dirty = False
+            except Exception as exc:
+                self.log(f"Kunde inte spara fakturadubblettindex: {exc}", "warn")
+
+    def _remember_invoice_identity(self, path: Path,
+                                   identity: Optional[Dict[str, Any]]) -> None:
+        if not identity:
+            return
+        try:
+            resolved = str(Path(path).resolve())
+            stat = Path(path).stat()
+        except OSError:
+            return
+        with self._invoice_index_lock:
+            self._load_invoice_index()[resolved] = {
+                "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                "supplier": normalize(str(identity.get("supplier", ""))),
+                "identity": dict(identity),
+            }
+            self._invoice_index_dirty = True
+            self._save_invoice_index()
+
+    def _invoice_identity_for_path(self, path: Path,
+                                   supplier: str) -> Optional[Dict[str, Any]]:
+        try:
+            resolved = str(path.resolve())
+            stat = path.stat()
+        except OSError:
+            return None
+        with self._invoice_index_lock:
+            entries = self._load_invoice_index()
+            cached = entries.get(resolved)
+            if (cached and cached.get("size") == stat.st_size
+                    and cached.get("mtime_ns") == stat.st_mtime_ns
+                    and normalize(str(cached.get("supplier", "")))
+                    == normalize(supplier)
+                    and isinstance(cached.get("identity"), dict)):
+                return cached["identity"] or None
+
+            # Read old archive items without starting new OCR work. Existing
+            # memory/disk cache entries may already contain OCR; text-native
+            # PDFs remain fast to index. New incoming files use their normal
+            # OCR settings before reaching this check.
+            read_settings = dict(self.settings)
+            read_settings["ocr_enabled"] = False
+            read_settings["max_pages_text"] = min(
+                8, max(1, int(read_settings.get("max_pages_text", 8) or 8)))
+            extraction = read_pdf(path, read_settings)
+            identity = extract_invoice_identity(extraction.text, supplier)
+            entries[resolved] = {
+                "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                "supplier": normalize(supplier),
+                "identity": identity or {},
+            }
+            self._invoice_index_dirty = True
+            return identity
+
+    def _find_invoice_duplicate(self, decision: Decision
+                                ) -> Optional[Dict[str, Any]]:
+        best = decision.best
+        if best is None:
+            return None
+        identity = extract_invoice_identity(decision.extraction.text, best.name)
+        if not identity:
+            return None
+        cat = self.rules.get(best.name)
+        if not cat:
+            return None
+        output_value = str(self.settings.get("output_dir", "") or "").strip()
+        if not output_value:
+            return None
+        output = Path(output_value)
+        base = output / safe_folder_name(cat["folder"])
+        if not base.is_dir():
+            return None
+        try:
+            source = decision.path.resolve()
+        except OSError:
+            source = decision.path
+        candidates = []
+        try:
+            for path in base.rglob("*"):
+                if not path.is_file() or path.suffix.casefold() != ".pdf":
+                    continue
+                try:
+                    if path.resolve() == source:
+                        continue
+                    candidates.append((path.stat().st_mtime_ns, path))
+                except OSError:
+                    continue
+        except OSError:
+            return None
+        # Check recent files first; the local index makes subsequent checks
+        # cheap and includes app-sorted invoices from earlier sessions.
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for _mtime, path in candidates[:200]:
+            previous = self._invoice_identity_for_path(path, best.name)
+            if previous and invoice_identity_matches(identity, previous):
+                self._save_invoice_index()
+                return {"identity": identity, "path": str(path),
+                        "amount_minor": identity["amount_minor"],
+                        "currency": identity["currency"],
+                        "invoice_number": identity["invoice_number"],
+                        "supplier": best.name}
+        self._save_invoice_index()
+        return None
 
     def _rules_save(self) -> None:
         now = time.time()
@@ -2882,6 +3124,17 @@ class SortEngine:
                 decision.status = "ask"
                 decision.reason = (f"{decision.reason} · {varning}"
                                    if decision.reason else varning)
+            if decision.status not in ("error", "ignored"):
+                duplicate = self._find_invoice_duplicate(decision)
+                if duplicate:
+                    decision.invoice_duplicate = duplicate
+                    decision.status = "ask"
+                    duplicate_reason = (
+                        "Möjlig dubblettfaktura: samma leverantör/kategori, fakturanummer "
+                        "och belopp finns redan i arkivet. Kontrollera innan du "
+                        "sparar; appen tar inte bort någon fil.")
+                    decision.reason = (f"{decision.reason} · {duplicate_reason}"
+                                       if decision.reason else duplicate_reason)
             return decision
 
     # -- verkställ ---------------------------------------------------------
@@ -3293,8 +3546,12 @@ class SortEngine:
                     tag_pdf_metadata(Path(target), category)
                 except Exception:
                     pass
+            invoice_key = (extract_invoice_identity(
+                decision.extraction.text, category)
+                if not s.get("dry_run", False) else None)
             if not s.get("dry_run", False):
                 self._remember_content_file(Path(target), source_hash)
+                self._remember_invoice_identity(Path(target), invoice_key)
             # Filen ligger inte kvar på sin gamla plats - släpp den ur cachen
             # så att minnet inte fylls av poster som aldrig kan träffa igen.
             TEXT_CACHE.forget(decision.path)
@@ -3358,6 +3615,7 @@ class SortEngine:
                     "date_source": källa,
                     "subfolder": sub,
                     "subfolder_choice": manual_sub if decided_by == "user" else "",
+                    "invoice_identity": invoice_key,
                     "conflict": conflict or None,
                 })
             self.stats["sorted"] += 1
@@ -4483,7 +4741,8 @@ class ReviewDialog:
                  candidates: List[Candidate], index: int = 1, total: int = 1,
                  theme=None, preview: bool = False,
                  suggested_sender: str = "",
-                 subfolder_base_resolver: Optional[Callable[[str], Path]] = None):
+                 subfolder_base_resolver: Optional[Callable[[str], Path]] = None,
+                 ui_language: str = "sv"):
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk, self.ttk, self.messagebox = tk, ttk, messagebox
         self.filedialog, self.simpledialog = filedialog, simpledialog
@@ -4493,6 +4752,7 @@ class ReviewDialog:
         self.rules = rules
         self.candidates = candidates
         self.subfolder_base_resolver = subfolder_base_resolver
+        self.ui_language = ui_language
         self.result: Optional[Dict[str, Any]] = None
 
         self.win = tk.Toplevel(parent)
@@ -4664,6 +4924,37 @@ class ReviewDialog:
                               padx=16, pady=(2, 10))
 
         next_row = 6
+        duplicate = getattr(decision, "invoice_duplicate", None)
+        if duplicate:
+            wrapped_label(
+                head,
+                text=("Möjlig dubblettfaktura. Kontrollera innan du sparar; "
+                      "ingen fil tas bort automatiskt."),
+                style="PillWarn.TLabel", justify="left").grid(
+                    row=next_row, column=0, columnspan=2, sticky="w",
+                    padx=16, pady=(6, 2))
+            next_row += 1
+            amount_minor = int(duplicate.get("amount_minor", 0) or 0)
+            decimal = "." if self.ui_language == "en" else ","
+            amount = f"{amount_minor // 100}{decimal}{amount_minor % 100:02d}"
+            currency = str(duplicate.get("currency", ""))
+            if self.ui_language == "en":
+                details = (
+                    f"Supplier/category: {duplicate.get('supplier', '')}  ·  "
+                    f"Invoice number: {duplicate.get('invoice_number', '')}  ·  "
+                    f"Amount: {amount} {currency}  ·  "
+                    f"Earlier file: {duplicate.get('path', '')}")
+            else:
+                details = (
+                    f"Leverantör/kategori: {duplicate.get('supplier', '')}  ·  "
+                    f"Fakturanummer: {duplicate.get('invoice_number', '')}  ·  "
+                    f"Belopp: {amount} {currency}  ·  "
+                    f"Tidigare fil: {duplicate.get('path', '')}")
+            wrapped_label(head, text=details, style="CardMuted.TLabel",
+                          justify="left").grid(
+                              row=next_row, column=0, columnspan=2,
+                              sticky="w", padx=16, pady=(0, 8))
+            next_row += 1
         split_pages = getattr(ext, "document_breaks", [])
         if split_pages:
             page_list = ", ".join(str(page) for page in split_pages)
@@ -6896,6 +7187,11 @@ _UI_EN = {
         "Leave empty to use the category default; an extra path is nested below it.",
     "MAPPVY 1": "FOLDER VIEW 1", "MAPPVY 2": "FOLDER VIEW 2",
     "MAPPVY 3": "FOLDER VIEW 3",
+    "Koppla stödord till mapp (Ctrl+M)": "Assign support word to folder (Ctrl+M)",
+    "Dra stödord hit eller markera ord och undermapp och tryck Ctrl+M för att koppla utan att dra.":
+        "Drag a support word here, or select words and a subfolder and press Ctrl+M to assign without dragging.",
+    "Möjlig dubblettfaktura. Kontrollera innan du sparar; ingen fil tas bort automatiskt.":
+        "Possible duplicate invoice. Check before saving; no file is deleted automatically.",
     "Kontrollera": "Check", "Kontrollera igen": "Check again",
     "Spara hjälpen som textfil…": "Save help as text file…",
     "Stöd projektet 💖": "Support the project 💖",
@@ -7107,6 +7403,7 @@ def shortcuts_help_text(plattform: str = "") -> str:
         f"{modifier}+Tab / {modifier}+Shift+Tab  Nästa/föregående flik",
         f"{modifier}+1…7               Välj flik med nummer",
         "F6 / Shift+F6          Flytta fokus mellan områden",
+        "Ctrl+M                  Koppla markerat stödord till markerad undermapp",
         "Escape                 Stäng dialogen eller vänta med PDF:en",
         "Enter                  Bekräfta markerat val när det är säkert",
     ))
@@ -10377,7 +10674,8 @@ class App:
         mapbody.rowconfigure(1, weight=1)
         ttk.Label(
             mapbody,
-            text="Dra stödord från listan till höger till en undermapp.",
+            text=("Dra stödord hit eller markera ord och undermapp och "
+                  "tryck Ctrl+M för att koppla utan att dra."),
             style="CardMuted.TLabel", wraplength=440, justify="left",
         ).grid(row=0, column=0, columnspan=3, sticky="ew", padx=T.INNER,
                pady=(T.INNER, 8))
@@ -10421,17 +10719,27 @@ class App:
             map_actions, text="Använd valt stödord som standard",
             command=self._cat_map_set_default,
         ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        ttk.Button(
+            map_actions, text="Koppla stödord till mapp (Ctrl+M)",
+            command=self._cat_map_assign_selected,
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 5))
         ttk.Button(map_actions, text="+ Undermapp…",
                    command=self._cat_map_add_folder).grid(
-                       row=1, column=0, sticky="ew", padx=(0, 3))
+                       row=2, column=0, sticky="ew", padx=(0, 3))
         ttk.Button(map_actions, text="Koppla loss valt ord",
                    command=self._cat_map_remove).grid(
-                       row=1, column=1, sticky="ew", padx=(3, 0))
+                       row=2, column=1, sticky="ew", padx=(3, 0))
         self._map_extra_folders: Dict[str, set] = {}
         self._map_drag_word = ""
         self.kw_tree.bind("<ButtonPress-1>", self._cat_map_drag_start, add="+")
         self.kw_tree.bind("<B1-Motion>", self._cat_map_drag_motion, add="+")
         self.kw_tree.bind("<ButtonRelease-1>", self._cat_map_drag_release, add="+")
+        for map_tree in self.subfolder_map_trees:
+            map_tree.bind(
+                "<<TreeviewSelect>>",
+                lambda event, tree=map_tree: self._cat_map_folder_selected(tree),
+                add="+")
+        self.root.bind("<Control-m>", self._cat_map_assign_selected, add="+")
 
         self._kw_sort = ("hits", True)
         self._kw_rows: List[Dict[str, Any]] = []
@@ -10543,7 +10851,8 @@ class App:
         default = normalize(cat.get("default_keyword", ""))
         default_note = f"Standardstödord: {default or 'inte valt'}. "
         self.lbl_subfolder_map_status.configure(
-            text=default_note + "Dra stödordet från listan till höger till en mapp här.")
+            text=(default_note + "Dra ett ord hit eller markera ord och mapp "
+                  "och tryck Ctrl+M."))
 
     def _cat_map_drag_start(self, event) -> None:
         row = self.kw_tree.identify_row(event.y)
@@ -10587,6 +10896,54 @@ class App:
         self.lbl_subfolder_map_status.configure(
             text=f"Kopplade ‘{word}’ till ‘{folder}’. "
                  f"Standardord: {normalize(cat.get('default_keyword', '')) or 'inte valt'}.")
+
+    def _cat_map_folder_selected(self, selected_tree, _event=None) -> None:
+        for tree in getattr(self, "subfolder_map_trees", ()):
+            if tree is not selected_tree:
+                selection = tree.selection()
+                if selection:
+                    tree.selection_remove(*selection)
+
+    def _cat_map_assign_selected(self, _event=None):
+        """Assign selected support word(s) to the selected folder; Ctrl+M."""
+        try:
+            if self.nb.select() != str(self.tab_cats):
+                return
+        except Exception:
+            pass
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        words = [normalize(self.kw_tree.set(row, "word"))
+                 for row in self.kw_tree.selection()]
+        words = [word for word in words if word]
+        selected_folders = [
+            tree.item(row, "values")
+            for tree in getattr(self, "subfolder_map_trees", ())
+            for row in tree.selection()
+        ]
+        if not cat:
+            self.lbl_subfolder_map_status.configure(
+                text="Välj först en kategori i menyn ovan.")
+            return "break"
+        if not words:
+            self.lbl_subfolder_map_status.configure(
+                text="Markera ett eller flera stödord till höger.")
+            return "break"
+        if len(selected_folders) != 1 or not selected_folders[0]:
+            self.lbl_subfolder_map_status.configure(
+                text="Markera en undermapp i någon av de tre listorna.")
+            return "break"
+        folder = str(selected_folders[0][0])
+        mapping = cat.setdefault("subfolder_keyword_map", {})
+        for word in words:
+            mapping[word] = folder
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self.lbl_subfolder_map_status.configure(
+            text=(f"Kopplade {len(words)} stödord till ‘{folder}’. "
+                  "Inget flyttas förrän en PDF sorteras.")
+        )
+        return "break"
 
     def _cat_default_changed(self, _event=None) -> None:
         name = self._selected_cat()
@@ -11867,7 +12224,8 @@ class App:
                                    suggested_sender=_hint,
                                    subfolder_base_resolver=(
                                        lambda category, d=decision:
-                                       self._review_subfolder_base(d, category)))
+                                       self._review_subfolder_base(d, category)),
+                                   ui_language=self.settings.get("ui_language", "sv"))
                 self._review_dialog = dlg
                 res = dlg.show()
             except self.tk.TclError as exc:

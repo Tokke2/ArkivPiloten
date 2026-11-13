@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pdfsorter as P
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -23,6 +25,58 @@ def test_category_mapping_shows_all_words_and_three_folder_drop_views():
     assert 'words = list(cat["keywords"])' in source
     assert 'self.var_kwsearch' not in source
     assert 'text="Sök stödord"' not in source
+    assert 'self.root.bind("<Control-m>", self._cat_map_assign_selected' in source
+
+
+def test_keyboard_action_assigns_multiple_selected_words_to_selected_folder():
+    class Tree:
+        def __init__(self, selected=(), values=None):
+            self.selected = selected
+            self.values = values or {}
+
+        def selection(self):
+            return self.selected
+
+        def item(self, row, _option):
+            return self.values[row]
+
+    class KeywordTree(Tree):
+        def set(self, row, _column):
+            return self.values[row]
+
+    class Rules:
+        def __init__(self):
+            self.category = {"subfolder_keyword_map": {}}
+
+        def get(self, _name):
+            return self.category
+
+        def save(self):
+            pass
+
+    class Label:
+        def configure(self, **kwargs):
+            self.text = kwargs["text"]
+
+    class Notebook:
+        def select(self):
+            return "categories"
+
+    app = object.__new__(P.App)
+    app.nb = Notebook()
+    app.tab_cats = "categories"
+    app._selected_cat = lambda: "Supplier"
+    app.rules = Rules()
+    app.kw_tree = KeywordTree(
+        selected=("one", "two"), values={"one": "Invoice", "two": "Amount"})
+    app.subfolder_map_trees = [Tree(selected=("folder",), values={
+        "folder": ("Invoices", "")}), Tree(), Tree()]
+    app.lbl_subfolder_map_status = Label()
+    app._refresh_subfolder_map = lambda: None
+
+    assert P.App._cat_map_assign_selected(app) == "break"
+    assert app.rules.category["subfolder_keyword_map"] == {
+        "invoice": "Invoices", "amount": "Invoices"}
 
 
 def test_default_support_word_selector_is_scoped_to_selected_category():

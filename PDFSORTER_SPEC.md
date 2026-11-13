@@ -1345,6 +1345,7 @@ som träffar bokstavligt och inte finns i andra kategorier; övriga fall kräver
 - AC-4.1 Kategori väljs i en rullgardinsmeny överst. Två huvudkolumner visas: tre separata mapplistor till vänster och alla stödord för vald kategori till höger.
 - AC-4.1a Stödord dras från högersidan till en undermapp i någon av de tre mapplistorna; aktuell koppling visas direkt. Ett stödord får finnas i flera kategorier.
 - AC-4.1b Ett standardstödord väljs per kategori. Standardvalet är kategorispecifikt även när samma ord finns i flera kategorier. Vid automatflytt måste standardordet också finnas; ett delat standardord är bara en ankarkontroll och räknas inte bland de två kategoriexklusiva stödorden eller ersätter kraven på 100 manuella bekräftelser.
+- AC-4.1c Användaren kan markera ett eller flera stödord och en undermapp och koppla dem med knappen eller `Ctrl+M`; dra-och-släpp finns kvar som alternativ. Funktionen ändrar bara kopplingen, aldrig PDF-filer.
 - AC-4.2 Stödordslistan visar alla stödord för vald kategori utan ett separat sök-/filterfält.
 - AC-4.3 Klick på rubrik sorterar; TYP, VIKT, HELT ORD, TRÄFFAR visas.
 - AC-4.4 Varannan rad tonad + statusfärger (stark/weak/off).
@@ -2050,6 +2051,17 @@ får "(2)" i namnet). Ingen tyst överskrivning, någonsin.
   med sina namn; "(2)" används vid namnkrock.
 - AC-4.4 Flytt mellan diskar verifieras med hashen efter kopiering, före
   radering av källan.
+- AC-4.5 Möjlig fakturadubblett flaggas endast när leverantörskategori,
+  uttryckligt märkt fakturanummer, belopp att betala och känd valuta (om
+  båda finns) stämmer. Saknas någon nyckel flaggas ingen dubblett.
+- AC-4.6 Granskningen kontrollerar högst 200 senast ändrade PDF:er under
+  samma kategorimapp. Äldre text-PDF:er indexeras lokalt utan att starta
+  ny OCR; appens egna framtida sorteringar sparar identifieraren i
+  `invoice_index.json` och historiken. Indexet flyttas med övriga appdata.
+- AC-4.7 Träff tvingar aktuell fil till användargranskning och visar
+  tidigare sökväg samt matchade uppgifter. Funktionen varnar bara: den
+  hoppar inte över, skriver inte över, flyttar inte och raderar aldrig en
+  fil automatiskt.
 
 ### REQ-N5 (B) — Effektmål: 5000 % bättre avläsning av skannade PDF:er
 Avläsningen (OCR-röret) av inskannade och svåra PDF:er ska förbättras
