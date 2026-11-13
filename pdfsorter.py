@@ -10582,6 +10582,19 @@ class App:
         self.subfolder_map_tree.column("folder", width=240, anchor="w", stretch=True)
         self.subfolder_map_tree.grid(row=0, column=0, sticky="nsew")
         self.theme.zebra(self.subfolder_map_tree)
+        try:
+            self.subfolder_map_tree.tag_configure(
+                "_map_drop_target",
+                background=self.theme.c["accent_light"],
+                foreground=self.theme.c["accent_dark"],
+                font=("TkDefaultFont", 10, "bold"))
+            self.kw_tree.tag_configure(
+                "_map_drag_source",
+                background=self.theme.c["accent_light"],
+                foreground=self.theme.c["accent_dark"],
+                font=("TkDefaultFont", 10, "bold"))
+        except Exception:
+            pass
         map_scroll = ttk.Scrollbar(
             map_view, orient="vertical", command=self.subfolder_map_tree.yview)
         map_scroll.grid(row=0, column=1, sticky="ns")
@@ -10621,6 +10634,7 @@ class App:
             lambda event: self._cat_map_folder_selected(self.subfolder_map_tree),
             add="+")
         self.root.bind("<Control-m>", self._cat_map_assign_selected, add="+")
+        self.root.bind("<Escape>", self._cat_map_drag_cancel, add="+")
         self._kw_sort = ("hits", True)
         self._kw_rows: List[Dict[str, Any]] = []
 
@@ -10823,11 +10837,59 @@ class App:
             text=(f"{len(folders)} skapade mappar. Dra ett sparat stödord "
                   "från vänster eller markera ord och mapp och tryck Ctrl+M."))
 
+    def _cat_map_set_row_highlight(self, state_attr: str, tree, row: str,
+                                   tag: str) -> None:
+        """Apply a temporary drag highlight while preserving the row's tags."""
+        current = getattr(self, state_attr, None)
+        if current and current["tree"] is tree and current["row"] == row:
+            return
+        self._cat_map_clear_row_highlight(state_attr)
+        if not row:
+            return
+        try:
+            original = tuple(tree.item(row, "tags") or ())
+            tree.item(row, tags=original + (tag,))
+            setattr(self, state_attr, {"tree": tree, "row": row,
+                                       "tags": original})
+        except Exception:
+            pass
+
+    def _cat_map_clear_row_highlight(self, state_attr: str) -> None:
+        current = getattr(self, state_attr, None)
+        if not current:
+            return
+        try:
+            current["tree"].item(current["row"], tags=current["tags"])
+        except Exception:
+            pass
+        setattr(self, state_attr, None)
+
+    def _cat_map_drag_restore(self) -> None:
+        self._cat_map_clear_row_highlight("_map_drag_source_highlight")
+        self._cat_map_clear_row_highlight("_map_drag_target_highlight")
+        self._map_drag_word = ""
+        try:
+            self.root.configure(cursor="")
+        except Exception:
+            pass
+
     def _cat_map_drag_start(self, event) -> None:
+        self._cat_map_drag_restore()
         row = self.kw_tree.identify_row(event.y)
-        self._map_drag_word = normalize(self.kw_tree.set(row, "word")) if row else ""
-        if row:
-            self.kw_tree.selection_set(row)
+        word = normalize(self.kw_tree.set(row, "word")) if row else ""
+        if not word:
+            return
+        self._map_drag_word = word
+        self.kw_tree.selection_set(row)
+        self._cat_map_set_row_highlight(
+            "_map_drag_source_highlight", self.kw_tree, row,
+            "_map_drag_source")
+        try:
+            self.root.configure(cursor="hand2")
+        except Exception:
+            pass
+        self.lbl_subfolder_map_status.configure(
+            text=f"↗ Dra koppling: ‘{word}’ → släpp på en mapp. Esc avbryter.")
 
     def _cat_map_drag_motion(self, event) -> None:
         word = getattr(self, "_map_drag_word", "")
@@ -10835,35 +10897,69 @@ class App:
             return
         target = self.root.winfo_containing(event.x_root, event.y_root)
         if target in getattr(self, "subfolder_map_trees", ()):
-            self.lbl_subfolder_map_status.configure(
-                text=f"Släpp {word} på en skapad mapp.")
+            row_y = event.y_root - target.winfo_rooty()
+            row = target.identify_row(row_y)
+            values = target.item(row, "values") if row else ()
+            folder = str(values[0]) if values else ""
+            if folder:
+                self._cat_map_set_row_highlight(
+                    "_map_drag_target_highlight", target, row,
+                    "_map_drop_target")
+                self.lbl_subfolder_map_status.configure(
+                    text=f"↗ Koppla ‘{word}’ till ‘{folder}’ — släpp för att spara.")
+                cursor = "hand2"
+            else:
+                self._cat_map_clear_row_highlight("_map_drag_target_highlight")
+                self.lbl_subfolder_map_status.configure(
+                    text=f"⛔ Släpp ‘{word}’ på en skapad mapp — annars sparas inget.")
+                cursor = "no"
         else:
+            self._cat_map_clear_row_highlight("_map_drag_target_highlight")
             self.lbl_subfolder_map_status.configure(
-                text=f"Dra {word} till mapplistan till höger.")
+                text=f"Dra ‘{word}’ till en mapp till höger. Släpp här för att avbryta.")
+            cursor = "no"
+        try:
+            self.root.configure(cursor=cursor)
+        except Exception:
+            pass
+
+    def _cat_map_drag_cancel(self, _event=None):
+        if not getattr(self, "_map_drag_word", ""):
+            return None
+        self._cat_map_drag_restore()
+        self.lbl_subfolder_map_status.configure(
+            text="Dragningen avbröts. Ingen koppling ändrades.")
+        return "break"
 
     def _cat_map_drag_release(self, event) -> None:
         word = getattr(self, "_map_drag_word", "")
-        self._map_drag_word = ""
         target = self.root.winfo_containing(event.x_root, event.y_root)
-        if not word or target not in getattr(self, "subfolder_map_trees", ()):
+        row = ""
+        folder = ""
+        if word and target in getattr(self, "subfolder_map_trees", ()):
+            row_y = event.y_root - target.winfo_rooty()
+            row = target.identify_row(row_y)
+            values = target.item(row, "values") if row else ()
+            folder = str(values[0]) if values else ""
+        if not word or not folder:
+            self._cat_map_drag_restore()
+            if word:
+                self.lbl_subfolder_map_status.configure(
+                    text="Kopplingen avbröts. Släpp på en skapad mapp för att spara.")
             return
-        y = event.y_root - target.winfo_rooty()
-        row = target.identify_row(y)
-        if not row:
-            self.lbl_subfolder_map_status.configure(
-                text="Släpp stödordet på en skapad mapp i listan.")
-            return
-        values = target.item(row, "values")
-        folder = str(values[0]) if values else ""
         name = self._selected_cat()
         cat = self.rules.get(name) if name else None
-        if not cat or not folder:
+        if not cat:
+            self._cat_map_drag_restore()
+            self.lbl_subfolder_map_status.configure(
+                text="Kopplingen kunde inte sparas. Välj en kategori först.")
             return
         cat.setdefault("subfolder_keyword_map", {})[word] = folder
         self.rules.save()
         self._refresh_subfolder_map()
+        self._cat_map_drag_restore()
         self.lbl_subfolder_map_status.configure(
-            text=f"Kopplade ‘{word}’ till ‘{folder}’. "
+            text=f"✓ Koppling sparad: ‘{word}’ → ‘{folder}’. "
                  f"Standardord: {normalize(cat.get('default_keyword', '')) or 'inte valt'}.")
 
     def _cat_map_folder_selected(self, selected_tree, _event=None) -> None:

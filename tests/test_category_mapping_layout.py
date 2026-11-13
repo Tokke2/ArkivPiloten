@@ -100,7 +100,7 @@ def test_dragging_support_word_to_folder_saves_mapping():
     class Tree:
         def __init__(self, values=None):
             self.values = values or {}
-            self.saved = None
+            self.tags = {}
 
         def identify_row(self, _y):
             return "word"
@@ -114,8 +114,15 @@ def test_dragging_support_word_to_folder_saves_mapping():
         def winfo_rooty(self):
             return 100
 
-        def item(self, row, _option):
-            return self.values.get(row, ())
+        def item(self, row, option=None, **kwargs):
+            if "tags" in kwargs:
+                self.tags[row] = tuple(kwargs["tags"])
+            if option == "tags":
+                return self.tags.get(row, ())
+            if option == "values":
+                return self.values.get(row, ())
+            return {"values": self.values.get(row, ()),
+                    "tags": self.tags.get(row, ())}
 
     class Rules:
         def __init__(self):
@@ -135,9 +142,13 @@ def test_dragging_support_word_to_folder_saves_mapping():
     class Root:
         def __init__(self, target):
             self.target = target
+            self.options = {}
 
         def winfo_containing(self, *_coords):
             return self.target
+
+        def configure(self, **kwargs):
+            self.options = kwargs
 
     class Event:
         y = 4
@@ -157,11 +168,18 @@ def test_dragging_support_word_to_folder_saves_mapping():
     app._refresh_subfolder_map = lambda: None
 
     P.App._cat_map_drag_start(app, Event())
+    P.App._cat_map_drag_motion(app, Event())
+    assert "_map_drop_target" in folder_tree.tags["folder"]
+    assert "Invoice" in app.lbl_subfolder_map_status.text
+    assert app.root.options == {"cursor": "hand2"}
+
     P.App._cat_map_drag_release(app, Event())
 
     assert app.rules.category["subfolder_keyword_map"] == {"invoice": "Invoices"}
     assert app.rules.saved == 1
-    assert "Kopplade" in app.lbl_subfolder_map_status.text
+    assert folder_tree.tags["folder"] == ()
+    assert app.root.options == {"cursor": ""}
+    assert "Koppling sparad" in app.lbl_subfolder_map_status.text
 
 
 def test_folder_options_deduplicate_created_folders_across_years(tmp_path):
