@@ -13,6 +13,18 @@ def test_category_mapping_has_top_selector_and_requested_two_column_layout():
     assert "self.kw_tree.bind(\"<ButtonRelease-1>\", self._cat_map_drag_release" in source
 
 
+def test_category_mapping_shows_all_words_and_three_folder_drop_views():
+    source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
+
+    assert 'self.subfolder_map_trees = []' in source
+    assert 'for map_index in range(3):' in source
+    assert 'tree = trees[index % len(trees)]' in source
+    assert 'target not in getattr(self, "subfolder_map_trees", ())' in source
+    assert 'words = list(cat["keywords"])' in source
+    assert 'self.var_kwsearch' not in source
+    assert 'text="Sök stödord"' not in source
+
+
 def test_default_support_word_selector_is_scoped_to_selected_category():
     source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
 
