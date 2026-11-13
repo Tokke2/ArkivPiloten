@@ -96,6 +96,74 @@ def test_keyboard_action_assigns_multiple_selected_words_to_selected_folder():
         "invoice": "Invoices", "amount": "Invoices"}
 
 
+def test_dragging_support_word_to_folder_saves_mapping():
+    class Tree:
+        def __init__(self, values=None):
+            self.values = values or {}
+            self.saved = None
+
+        def identify_row(self, _y):
+            return "word"
+
+        def set(self, row, _column):
+            return self.values.get(row, "")
+
+        def selection_set(self, row):
+            self.selected = row
+
+        def winfo_rooty(self):
+            return 100
+
+        def item(self, row, _option):
+            return self.values.get(row, ())
+
+    class Rules:
+        def __init__(self):
+            self.category = {"subfolder_keyword_map": {}}
+            self.saved = 0
+
+        def get(self, _name):
+            return self.category
+
+        def save(self):
+            self.saved += 1
+
+    class Label:
+        def configure(self, **kwargs):
+            self.text = kwargs["text"]
+
+    class Root:
+        def __init__(self, target):
+            self.target = target
+
+        def winfo_containing(self, *_coords):
+            return self.target
+
+    class Event:
+        y = 4
+        x_root = 100
+        y_root = 115
+
+    app = object.__new__(P.App)
+    app.kw_tree = Tree({"word": "Invoice"})
+    folder_tree = Tree({"folder": ("Invoices",)})
+    folder_tree.identify_row = lambda _y: "folder"
+    app.subfolder_map_tree = folder_tree
+    app.subfolder_map_trees = [folder_tree]
+    app.root = Root(folder_tree)
+    app._selected_cat = lambda: "Supplier"
+    app.rules = Rules()
+    app.lbl_subfolder_map_status = Label()
+    app._refresh_subfolder_map = lambda: None
+
+    P.App._cat_map_drag_start(app, Event())
+    P.App._cat_map_drag_release(app, Event())
+
+    assert app.rules.category["subfolder_keyword_map"] == {"invoice": "Invoices"}
+    assert app.rules.saved == 1
+    assert "Kopplade" in app.lbl_subfolder_map_status.text
+
+
 def test_folder_options_deduplicate_created_folders_across_years(tmp_path):
     output = tmp_path / "Archive"
     for year in ("2024", "2025"):

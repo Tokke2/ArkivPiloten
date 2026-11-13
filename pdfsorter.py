@@ -5313,11 +5313,10 @@ class ReviewDialog:
         wrap_widgets.append(self.lbl_subfolder_hint)
         self.lbl_subfolder_hint.grid(
             row=9, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 4))
-        self.save_rule = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            catbox, variable=self.save_rule,
-            text="Spara valda stödord för framtida exakta matchningar",
-            style="Card.TCheckbutton").grid(
+        ttk.Label(
+            catbox,
+            text="Alla stödord du väljer sparas för framtida exakta matchningar.",
+            style="CardMuted.TLabel").grid(
                 row=10, column=0, columnspan=2, sticky="w",
                 padx=14, pady=(4, 12))
         self._update_subfolder_hint()
@@ -5897,8 +5896,6 @@ class ReviewDialog:
         for var, candidate_text in self.vars:
             if candidate_text in selected_before or candidate_text == text:
                 var.set(True)
-        if hasattr(self, "save_rule"):
-            self.save_rule.set(True)
 
     def _subfolder_base(self) -> Optional[Path]:
         category = self._category()
@@ -6699,17 +6696,10 @@ class ReviewDialog:
             self.messagebox.showwarning(APP_NAME, subfolder_error, parent=self.win)
             return
         words = self._chosen()
-        if self.save_rule.get() and not words:
-            if not self.messagebox.askyesno(
-                    APP_NAME,
-                    "Du har inte bockat i något stödord.\n\n"
-                    "Filen flyttas då bara den här gången, ingen regel sparas.\n"
-                    "Fortsätta?", parent=self.win):
-                return
         self.result = {
             "category": cat,
-            "words": words if self.save_rule.get() else [],
-            "save_rule": bool(self.save_rule.get() and words),
+            "words": words,
+            "save_rule": bool(words),
             "folder": cat,
             "subfolder": subfolder,
             "unmatched": False,

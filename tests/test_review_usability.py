@@ -31,11 +31,28 @@ def test_transfer_directories_are_created_under_config_dir(monkeypatch, tmp_path
         P.rules_transfer_dir("other")
 
 
-def test_review_dialog_saves_selected_support_words_by_default():
-    import inspect
+def test_review_dialog_always_saves_selected_support_words():
+    class _Value:
+        def get(self):
+            return ""
 
-    source = inspect.getsource(P.ReviewDialog.__init__)
-    assert "self.save_rule = tk.BooleanVar(value=True)" in source
+    class _Messagebox:
+        def showwarning(self, *args, **kwargs):
+            raise AssertionError("A valid category should not show a warning")
+
+    dialog = type("DialogStub", (), {})()
+    dialog._category = lambda: "Supplier"
+    dialog._chosen = lambda: ["invoice", "bankgiro"]
+    dialog.var_subfolder = _Value()
+    dialog.win = object()
+    dialog.messagebox = _Messagebox()
+    dialog._close = lambda: setattr(dialog, "closed", True)
+
+    P.ReviewDialog._ok(dialog)
+
+    assert dialog.result["words"] == ["invoice", "bankgiro"]
+    assert dialog.result["save_rule"] is True
+    assert dialog.closed is True
 
 
 def test_review_preview_shrinks_to_fit_short_displays():
