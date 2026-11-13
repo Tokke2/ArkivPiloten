@@ -336,6 +336,58 @@ class _FakeRoot:
         self.riven = True
 
 
+class _QueuedRoot(_FakeRoot):
+    def __init__(self):
+        super().__init__()
+        self.callbacks = []
+
+    def after(self, ms, fn=None, *a):
+        self.efter.append(ms)
+        if callable(fn):
+            self.callbacks.append((fn, a))
+        return f"id{len(self.efter)}"
+
+    def run_next(self):
+        fn, args = self.callbacks.pop(0)
+        fn(*args)
+
+
+class _FakeWidget:
+    def __init__(self, *args, **kwargs):
+        self.options = kwargs
+        self.text = kwargs.get("text", "")
+        self.riven = False
+
+    def grid(self, **kwargs):
+        pass
+
+    def configure(self, **kwargs):
+        self.options.update(kwargs)
+        if "text" in kwargs:
+            self.text = kwargs["text"]
+
+    def columnconfigure(self, *args, **kwargs):
+        pass
+
+    def title(self, *args):
+        pass
+
+    def transient(self, *args):
+        pass
+
+    def resizable(self, *args):
+        pass
+
+    def geometry(self, *args):
+        pass
+
+    def protocol(self, *args):
+        pass
+
+    def destroy(self):
+        self.riven = True
+
+
 class _FakeUpdateButton:
     def __init__(self):
         self.states = []
@@ -424,18 +476,22 @@ def _tyst_uppdatering(monkeypatch, app, resultat=(True, "Installerat")):
         lambda *a, **k: package_updates.append(True) or (True, ""))
     monkeypatch.setattr(P, "session_log", lambda *a, **k: None)
     app.package_updates = package_updates
+    app.countdown_calls = 0
+    app._visa_omstart_nedrakning = lambda: setattr(
+        app, "countdown_calls", app.countdown_calls + 1)
     app._planera_omstart = lambda tyst=True: app.omstarter.append(tyst)
     return app
 
 
-def test_silent_update_installs_and_restarts_without_any_dialog(
+def test_silent_update_installs_and_shows_restart_countdown(
         tmp_path, monkeypatch):
     monkeypatch.setenv("PDFSORTER_HOME", str(tmp_path / "data"))
     app = _tyst_uppdatering(monkeypatch, _Sken())
     app._update_prompt(_info_med_ny_version(), manual=False)
     assert app.messagebox.fragor == []          # ingen fråga
     assert app.messagebox.varningar == []
-    assert app.omstarter == [True]              # tyst omstart
+    assert app.countdown_calls == 1              # synlig dialog efter installation
+    assert app.omstarter == []                   # inte före nedräkningen
     assert app.package_updates == []             # paketuppdatering sker veckovis
     assert app.settings["last_update_check"]    # tiden sparad
     assert any("Tyst uppdatering" in t for _n, t in app.handelser)
@@ -458,7 +514,8 @@ def test_manual_install_asks_and_then_restarts(tmp_path, monkeypatch):
     app._update_prompt(_info_med_ny_version(), manual=True)
     assert len(app.messagebox.fragor) == 2      # 1) installera? 2) starta om?
     assert "Starta om" in app.messagebox.fragor[1]
-    assert app.omstarter == [False]
+    assert app.countdown_calls == 1
+    assert app.omstarter == []                   # omstart efter nedräkningen
 
 
 def test_silent_check_without_new_version_only_logs(tmp_path, monkeypatch):
@@ -540,6 +597,60 @@ def test_watchdog_searches_and_records_the_time(tmp_path, monkeypatch):
     # Nästa väckning gör inget - det är inte dags än.
     app._uppdateringsvakt_tick()
     assert anrop == [1]
+
+
+def test_countdown_shows_ten_seconds_and_waits_if_app_is_busy(monkeypatch):
+    class _TTK:
+        TFrame = _FakeWidget
+        TLabel = _FakeWidget
+        TButton = _FakeWidget
+
+        @staticmethod
+        def Frame(*args, **kwargs):
+            return _FakeWidget(*args, **kwargs)
+
+        @staticmethod
+        def Label(*args, **kwargs):
+            return _FakeWidget(*args, **kwargs)
+
+        @staticmethod
+        def Button(*args, **kwargs):
+            return _FakeWidget(*args, **kwargs)
+
+    class _TK:
+        @staticmethod
+        def Toplevel(*args, **kwargs):
+            win = _FakeWidget(*args, **kwargs)
+            created.append(win)
+            return win
+
+    created = []
+    monkeypatch.setattr(P, "brand_window", lambda *_a, **_k: None)
+    app = _Sken()
+    app.root = _QueuedRoot()
+    app.tk = _TK
+    app.ttk = _TTK
+    app._planera_omstart = lambda tyst=True: app.omstarter.append(tyst)
+
+    P.App._visa_omstart_nedrakning(app)
+    assert P.UPDATE_RESTART_COUNTDOWN_SECONDS == 10
+    state = app._update_restart_state
+    assert state["remaining"] == 10
+    assert state["status"].text.endswith("10 sekunder…")
+
+    app._busy = True
+    for _ in range(10):
+        app.root.run_next()
+    assert state["remaining"] == 0
+    assert "väntar" in state["status"].text
+    assert app.omstarter == []
+    assert app._update_restart_state is state
+
+    app._busy = False
+    app.root.run_next()
+    assert app.omstarter == [True]
+    assert app._update_restart_state is None
+    assert created[0].riven is True
 
 
 def test_a_busy_app_restarts_when_it_becomes_idle(tmp_path, monkeypatch):

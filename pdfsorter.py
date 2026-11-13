@@ -7461,6 +7461,8 @@ def meny_snabb_tangent(snabb: str, plattform: str = "") -> str:
 # ========================================================================
 #: Hur många gånger per dygn appen letar efter en ny version (tyst).
 UPPDATERING_PER_DYGN = 2
+#: Countdown shown after an update is installed, before the app restarts.
+UPDATE_RESTART_COUNTDOWN_SECONDS = 10
 #: Kortaste tid mellan två sökningar - taket är "var 15:e minut".
 _UPPDATERING_TAK_PER_DYGN = 96
 #: Misslyckades sökningen (nätet svek) försöker appen igen så här snabbt
@@ -13574,18 +13576,113 @@ class App:
                 self._log(msg, "ok")
                 if plan["omstart"] == "tyst":
                     self._h("uppdatering",
-                            "Tyst omstart: den nya versionen börjar gälla nu",
-                            "ok")
-                    self._planera_omstart(tyst=True)
+                            "Uppdateringen är klar; appen startar om efter "
+                            "en nedräkning på 10 sekunder.", "ok")
+                    self._visa_omstart_nedrakning()
                 elif self.messagebox.askyesno(
-                        APP_NAME, msg + "\n\nStarta om appen nu "
-                        "för att köra den nya versionen?", parent=self.root):
-                    self._planera_omstart(tyst=False)
+                        APP_NAME, msg + "\n\nStarta om appen nu för att köra "
+                        "den nya versionen? Om du väljer ja visas en "
+                        "nedräkning på 10 sekunder.", parent=self.root):
+                    self._visa_omstart_nedrakning()
             self.root.after(0, done)
         threading.Thread(target=install, daemon=True,
                          name="uppdatering").start()
 
     # -- omstart ----------------------------------------------------------
+    def _visa_omstart_nedrakning(self) -> None:
+        """Show a visible 10-second countdown before restarting after update."""
+        current = getattr(self, "_update_restart_state", None)
+        if current is not None:
+            return
+        tk, ttk = self.tk, self.ttk
+        dialog = tk.Toplevel(self.root)
+        dialog._icon_ref = brand_window(dialog)
+        dialog.title("Uppdateringen är klar")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.geometry("500x205")
+        dialog.columnconfigure(0, weight=1)
+        english = self.settings.get("ui_language", "sv") == "en"
+        title = ("Update installed" if english else "Uppdateringen är installerad")
+        ttk.Label(dialog, text=title, style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", padx=18, pady=(18, 6))
+        intro = ("The app will restart to finish the update." if english else
+                 "Appen startar om för att slutföra uppdateringen.")
+        ttk.Label(dialog, text=intro, style="CardMuted.TLabel",
+                  wraplength=460, justify="left").grid(
+                      row=1, column=0, sticky="w", padx=18, pady=(0, 8))
+        status = ttk.Label(dialog, style="CardTitle.TLabel", justify="left")
+        status.grid(row=2, column=0, sticky="w", padx=18, pady=(0, 12))
+        actions = ttk.Frame(dialog, style="CardInner.TFrame")
+        actions.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 16))
+        actions.columnconfigure(0, weight=1)
+        state = {"dialog": dialog, "remaining": UPDATE_RESTART_COUNTDOWN_SECONDS,
+                 "status": status, "english": english}
+        self._update_restart_state = state
+
+        def close_dialog() -> None:
+            if getattr(self, "_update_restart_state", None) is not state:
+                return
+            self._update_restart_state = None
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        def cancel() -> None:
+            close_dialog()
+            self._h("uppdatering", "Automatisk omstart avbröts; "
+                    "den nya versionen används nästa gång appen startas.", "warn")
+
+        def restart_now() -> None:
+            close_dialog()
+            self._planera_omstart(tyst=True)
+
+        ttk.Button(actions,
+                   text="Restart now" if english else "Starta om nu",
+                   style="Accent.TButton", command=restart_now).grid(
+                       row=0, column=0, sticky="e", padx=(0, 8))
+        ttk.Button(actions, text="Cancel restart" if english else "Avbryt omstart",
+                   command=cancel).grid(row=0, column=1, sticky="e")
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+
+        def tick() -> None:
+            if getattr(self, "_update_restart_state", None) is not state:
+                return
+            if state["remaining"] > 0:
+                state["remaining"] -= 1
+            if state["remaining"] <= 0:
+                ready, reason = self._kan_starta_om()
+                if ready:
+                    close_dialog()
+                    self._planera_omstart(tyst=True)
+                    return
+                waiting = ("The countdown is complete; waiting until the app is idle."
+                           if english else
+                           f"Nedräkningen är klar; väntar tills appen är ledig ({reason}).")
+                status.configure(text=waiting)
+                try:
+                    self.root.after(1000, tick)
+                except Exception:
+                    cancel()
+                return
+            remaining = state["remaining"]
+            countdown = (f"Restarting in {remaining} seconds…" if english else
+                         f"Appen startar om om {remaining} sekunder…")
+            status.configure(text=countdown)
+            try:
+                self.root.after(1000, tick)
+            except Exception:
+                cancel()
+
+        countdown = (f"Restarting in {state['remaining']} seconds…" if english else
+                     f"Appen startar om om {state['remaining']} sekunder…")
+        status.configure(text=countdown)
+        try:
+            self.root.after(1000, tick)
+        except Exception:
+            cancel()
+
     def _kan_starta_om(self) -> Tuple[bool, str]:
         """Får appen startas om nu utan att tappa något?"""
         if self._quitting:
