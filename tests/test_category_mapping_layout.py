@@ -9,8 +9,11 @@ def test_category_mapping_has_top_selector_and_two_role_specific_fields():
     source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
 
     assert "self.cat_combo = ttk.Combobox(" in source
-    assert "mapcard.grid(row=2, column=1" in source
-    assert "rightcard.grid(row=2, column=0" in source
+    assert "support_card.grid(row=2, column=0" in source
+    assert "folder_card.grid(row=2, column=1" in source
+    tab_source = source[source.index("    def _build_cats_tab("):source.index("    def _build_category_settings_window(")]
+    assert "Mappnamn:" not in tab_source
+    assert "Kategoriinställningar…" in tab_source
     assert 'self.var_cat_select.trace_add(' in source
     assert '"write", lambda *_args: self._on_cat_select()' in source
     assert "self.default_keyword_combo = ttk.Combobox(" in source

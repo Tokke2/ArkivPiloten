@@ -7154,8 +7154,12 @@ _UI_EN = {
     "Ångra senaste tömning": "Undo the latest category clear",
     "Kategori": "Category", "Undermappar": "Subfolders",
     "Stödord": "Support words", "Kategori och stödord": "Category and support words",
-    "Skapade mappar": "Created folders", "SPARDA STÖDORD": "SAVED SUPPORT WORDS",
-    "SKAPADE MAPPAR": "CREATED FOLDERS",
+    "Sparade stödord": "Saved support words", "Skapade mappar": "Created folders",
+    "Kategoriinställningar": "Category settings",
+    "Kategoriinställningar…": "Category settings…",
+    "De här inställningarna påverkar inte listorna med stödord och skapade mappar.":
+        "These settings do not affect the support-word and created-folder lists.",
+    "SPARDA STÖDORD": "SAVED SUPPORT WORDS", "SKAPADE MAPPAR": "CREATED FOLDERS",
     "Dra stödord till en skapad mapp →": "Drag a support word to a created folder →",
     "+ Skapa mapp…": "+ Create folder…", "Öppna kopplingsdialog…": "Open mapping dialog…",
     "Välj en kategori i menyn ovan för att visa dess stödord och undermappar.":
@@ -10430,19 +10434,14 @@ class App:
     # Flik 3 - Kategorier
     # ======================================================================
     def _build_cats_tab(self) -> None:
-        """Kategoriväljare överst, stödord till vänster och mappar till höger.
-
-        Stödord dras till skapade mappar; standardordet sparas separat per kategori.
-        Allt går att göra härifrån utan att öppna någon JSON-fil.
-        """
+        """Show the selected category's saved support words and created folders."""
         tk, ttk = self.tk, self.ttk
         T = self.theme
         f = self.tab_cats
-        f.columnconfigure(0, weight=4, uniform="category-panels")
-        f.columnconfigure(1, weight=3, uniform="category-panels")
+        f.columnconfigure(0, weight=1, uniform="category-mapping-panels")
+        f.columnconfigure(1, weight=1, uniform="category-mapping-panels")
         f.rowconfigure(2, weight=1)
 
-        # -- vald kategori och åtgärder --
         catbar = ttk.Frame(f, style="Card.TFrame")
         catbar.grid(row=0, column=0, columnspan=2, sticky="ew",
                     padx=T.PAD, pady=(T.PAD, 0))
@@ -10452,25 +10451,27 @@ class App:
         self.var_cat_select = tk.StringVar()
         self.cat_combo = ttk.Combobox(
             catbar, textvariable=self.var_cat_select, state="readonly")
-        self.cat_combo.grid(row=0, column=1, sticky="ew", padx=(0, 10),
+        self.cat_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8),
                             pady=T.INNER)
         self._cat_select_trace = self.var_cat_select.trace_add(
             "write", lambda *_args: self._on_cat_select())
+        ttk.Button(catbar, text="Kategoriinställningar…",
+                   command=self._open_category_settings).grid(
+                       row=0, column=2, padx=(0, 4))
         ttk.Button(catbar, text="+ Ny", command=self._cat_new).grid(
-            row=0, column=2, padx=(0, 4))
+            row=0, column=3, padx=(0, 4))
         ttk.Button(catbar, text="Byt namn", command=self._cat_rename).grid(
-            row=0, column=3, padx=4)
+            row=0, column=4, padx=4)
         ttk.Button(catbar, text="Ta bort", style="Danger.TButton",
-                   command=self._cat_delete).grid(row=0, column=4, padx=4)
+                   command=self._cat_delete).grid(row=0, column=5, padx=4)
         ttk.Button(catbar, text="Töm kategorier…", style="Danger.TButton",
-                   command=self._cat_clear_all).grid(row=0, column=5, padx=4)
+                   command=self._cat_clear_all).grid(row=0, column=6, padx=4)
         self.btn_cat_restore = ttk.Button(
             catbar, text="Ångra tömning", style="CardLink.TButton",
             command=self._cat_restore_clear_backup,
             state="normal" if self._category_clear_backup_path() else "disabled")
-        self.btn_cat_restore.grid(row=0, column=6, padx=(4, T.INNER))
+        self.btn_cat_restore.grid(row=0, column=7, padx=(4, T.INNER))
 
-        # -- antal kategorier/stödord och regelimport/export --
         bar = ttk.Frame(f, style="Card.TFrame")
         bar.grid(row=1, column=0, columnspan=2, sticky="ew",
                  padx=T.PAD, pady=(6, 0))
@@ -10484,117 +10485,28 @@ class App:
         ttk.Button(bar, text="Importera…", style="CardLink.TButton",
                    command=self._import).grid(row=0, column=3, padx=(4, T.INNER))
 
-        # -- höger: stödorden --
-        rightcard = T.card(f, "Kategori och stödord")
-        rightcard.grid(row=2, column=0, sticky="nsew",
-                       padx=(T.PAD, T.GAP // 2), pady=T.GAP)
-        right = rightcard.body
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(2, weight=1)
-
-        head = ttk.Frame(right, style="CardInner.TFrame")
-        head.grid(row=0, column=0, columnspan=2, sticky="ew",
-                  padx=T.INNER, pady=(T.INNER, 2))
-        head.columnconfigure(0, weight=1)
-        self.lbl_cat_title = ttk.Label(head, text="—", style="CardTitle.TLabel")
-        self.lbl_cat_title.grid(row=0, column=0, sticky="w")
-        self.lbl_cat_stats = ttk.Label(head, text="", style="CardMuted.TLabel")
-        self.lbl_cat_stats.grid(row=1, column=0, sticky="w", pady=(1, 0))
-        ttk.Label(head, text="Dra stödord till en skapad mapp →",
-                  style="CardMuted.TLabel").grid(
-                      row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
-
-        meta = ttk.Frame(right, style="CardInner.TFrame")
-        meta.grid(row=1, column=0, columnspan=2, sticky="ew",
-                  padx=T.INNER, pady=(10, 8))
-        meta.columnconfigure(1, weight=1)
-        ttk.Label(meta, text="Mappnamn:", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w")
-        self.var_folder = tk.StringVar()
-        ttk.Entry(meta, textvariable=self.var_folder).grid(
-            row=0, column=1, sticky="ew", padx=8)
-        self.var_cat_enabled = tk.BooleanVar(value=True)
-        ttk.Checkbutton(meta, text="Aktiv", variable=self.var_cat_enabled,
-                        style="Card.TCheckbutton",
-                        command=self._cat_save_meta).grid(row=0, column=2, padx=6)
-        ttk.Button(meta, text="Spara", command=self._cat_save_meta
-                   ).grid(row=0, column=3)
-
-        # -- standardundermapp per kategori --
-        ttk.Label(meta, text="Standardundermapp:", style="Card.TLabel").grid(
-            row=1, column=0, sticky="w", pady=(8, 0))
-        self.var_cat_subpath = tk.StringVar()
-        ttk.Entry(meta, textvariable=self.var_cat_subpath).grid(
-            row=1, column=1, sticky="ew", padx=8, pady=(8, 0))
-        ttk.Button(meta, text="Välj…", command=self._cat_browse_subpath
-                   ).grid(row=1, column=2, padx=(0, 4), pady=(8, 0))
-        ttk.Button(meta, text="Skapa…", command=self._cat_create_subpath
-                   ).grid(row=1, column=3, padx=(0, 4), pady=(8, 0))
-        ttk.Button(meta, text="Spara", command=self._cat_save_subpath
-                   ).grid(row=1, column=4, pady=(8, 0))
-        ttk.Label(
-            meta, text="Relativt till kategoriens datum-/årsmapp; skapas vid första sorteringen.",
-            style="CardMuted.TLabel").grid(
-                row=2, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
-
-        # -- datummall för undermapp --
-        ttk.Label(meta, text="Datum:", style="Card.TLabel").grid(
-            row=3, column=0, sticky="w", pady=(8, 0))
-        self.sub_combo = ttk.Combobox(
-            meta, state="readonly", width=34,
-            values=[etikett for _, etikett in SUBFOLDER_TEMPLATES])
-        self.sub_combo.grid(row=3, column=1, sticky="w", padx=8, pady=(8, 0))
-        self.sub_combo.bind("<<ComboboxSelected>>", lambda e: self._cat_save_sub())
-        self.lbl_sub_ex = ttk.Label(meta, text="", style="CardMuted.TLabel")
-        self.lbl_sub_ex.grid(row=3, column=2, columnspan=3, sticky="w",
-                             pady=(8, 0))
-
-        # -- eget krav på antal stödord --
-        ttk.Label(meta, text="Kräver:", style="Card.TLabel").grid(
-            row=4, column=0, sticky="w", pady=(8, 0))
-        krav = ttk.Frame(meta, style="CardInner.TFrame")
-        krav.grid(row=4, column=1, columnspan=4, sticky="w",
-                  padx=8, pady=(8, 0))
-        self.var_catkw = tk.StringVar(value="0")
-        self.spin_catkw = ttk.Spinbox(krav, from_=0, to=9, width=4,
-                                      textvariable=self.var_catkw,
-                                      command=self._cat_save_kw)
-        self.spin_catkw.pack(side="left")
-        self.spin_catkw.bind("<FocusOut>", lambda e: self._cat_save_kw())
-        self.lbl_catkw = ttk.Label(krav, text="", style="CardMuted.TLabel")
-        self.lbl_catkw.pack(side="left", padx=10)
-
-        ttk.Label(meta, text="Standardstödord:", style="Card.TLabel").grid(
-            row=5, column=0, sticky="w", pady=(8, 0))
-        self.var_default_keyword = tk.StringVar()
-        self.default_keyword_combo = ttk.Combobox(
-            meta, textvariable=self.var_default_keyword, state="readonly")
-        self.default_keyword_combo.grid(
-            row=5, column=1, columnspan=4, sticky="ew", padx=8, pady=(8, 0))
-        self.default_keyword_combo.bind(
-            "<<ComboboxSelected>>", self._cat_default_changed)
-        ttk.Label(
-            meta, text="Kopplas till vald kategori; samma ord får finnas i flera kategorier.",
-            style="CardMuted.TLabel").grid(
-                row=6, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
-
+        support_card = T.card(f, "Sparade stödord")
+        support_card.grid(row=2, column=0, sticky="nsew",
+                          padx=(T.PAD, T.GAP // 2), pady=T.GAP)
+        support = support_card.body
+        support.columnconfigure(0, weight=1)
+        support.rowconfigure(0, weight=1)
         cols = ("word", "kind", "weight", "whole", "hits")
-        self.kw_tree = ttk.Treeview(right, columns=cols, show="headings",
+        self.kw_tree = ttk.Treeview(support, columns=cols, show="headings",
                                     selectmode="extended")
         T.fit_columns(self.kw_tree, (
             ("word", "STÖDORD", 20, "w", True),
-            ("kind", "TYP", 20, "w", False),
+            ("kind", "TYP", 18, "w", False),
             ("weight", "VIKT", 4, "center", False),
             ("whole", "HELT ORD", 4, "center", False),
             ("hits", "TRÄFFAR", 5, "center", False)))
-        for col in ("word", "kind", "weight", "whole", "hits"):
+        for col in cols:
             self.kw_tree.heading(col, command=lambda c=col: self._sort_keywords(c))
-        self.kw_tree.grid(row=2, column=0, sticky="nsew", padx=(1, 0), pady=4)
+        self.kw_tree.grid(row=0, column=0, sticky="nsew", padx=(T.INNER, 0),
+                          pady=(T.INNER, 4))
         self.theme.zebra(self.kw_tree)
         self.kw_tree.bind("<Delete>", lambda e: self._kw_remove())
         self.kw_tree.bind("<Double-1>", lambda e: self._kw_edit())
-
-        # Högerklick: allt man kan göra med ett stödord, på ett ställe.
         self.kw_menu = tk.Menu(self.kw_tree, tearoff=0)
         self.kw_menu.add_command(label="Ändra ord…", command=self._kw_edit)
         self.kw_menu.add_command(label="Ändra vikt…", command=self._kw_weight)
@@ -10605,58 +10517,46 @@ class App:
         self.kw_menu.add_command(label="Rensa oanvända ord i kategorin…",
                                  command=self._kw_prune)
         self.kw_tree.bind("<Button-3>", self._kw_context)
-        self.kw_tree.bind("<Button-2>", self._kw_context)   # macOS
-        ksb = ttk.Scrollbar(right, orient="vertical", command=self.kw_tree.yview)
-        ksb.grid(row=2, column=1, sticky="ns", pady=4, padx=(0, 1))
+        self.kw_tree.bind("<Button-2>", self._kw_context)
+        ksb = ttk.Scrollbar(support, orient="vertical", command=self.kw_tree.yview)
+        ksb.grid(row=0, column=1, sticky="ns", pady=(T.INNER, 4),
+                 padx=(0, T.INNER))
         self.kw_tree.configure(yscrollcommand=ksb.set)
-
-        # Sammanfattning av kategorins styrka - syns direkt utan att man
-        # behöver räkna raderna i tabellen.
-        self.lbl_kw_sum = ttk.Label(right, style="CardMuted.TLabel",
-                                    justify="left")
-        self.lbl_kw_sum.grid(row=3, column=0, columnspan=2, sticky="w",
-                             padx=T.INNER, pady=(6, 0))
-
-        hint = ttk.Label(right, style="CardMuted.TLabel", justify="left",
-                         text="Dubbelklicka ändrar ordet  ·  högerklick ger "
-                              "fler val  ·  Delete tar bort  ·  klicka på "
-                              "rubriken för att sortera alfabetiskt")
-        hint.grid(row=4, column=0, columnspan=2, sticky="w",
+        self.kw_scrollbar = ksb
+        self.lbl_kw_sum = ttk.Label(support, style="CardMuted.TLabel", justify="left")
+        self.lbl_kw_sum.grid(row=1, column=0, columnspan=2, sticky="w",
+                             padx=T.INNER, pady=(4, 0))
+        hint = ttk.Label(
+            support, style="CardMuted.TLabel", justify="left",
+            text="Dubbelklicka ändrar ordet  ·  högerklick ger fler val  ·  "
+                 "Delete tar bort  ·  klicka på en rubrik för att sortera")
+        hint.grid(row=2, column=0, columnspan=2, sticky="w",
                   padx=T.INNER, pady=(2, 0))
-
-        kbtn = ttk.Frame(right, style="CardInner.TFrame")
-        kbtn.grid(row=5, column=0, columnspan=2, sticky="ew",
+        self.kw_hint = hint
+        kbtn = ttk.Frame(support, style="CardInner.TFrame")
+        kbtn.grid(row=3, column=0, columnspan=2, sticky="ew",
                   padx=T.INNER, pady=(8, T.INNER))
-        # grid i stället för pack: med pack konkurrerar vänster- och
-        # högerpackade knappar om samma utrymme, och den sista klipps tyst
-        # till "Ta bor". Här får varje knapp sin egen kolumn, och kolumn 4
-        # sväller så att grupperna skjuts isär.
-        for _i, (_txt, _cmd, _stil) in enumerate((
+        for index, (label, command, style) in enumerate((
                 ("+ Lägg till ord", self._kw_add, "Accent.TButton"),
                 ("Ändra ord", self._kw_edit, "TButton"),
                 ("Vikt", self._kw_weight, "TButton"),
                 ("Flytta…", self._kw_move, "TButton"))):
-            ttk.Button(kbtn, text=_txt, command=_cmd, style=_stil).grid(
-                row=0, column=_i, padx=(0, 6), sticky="w")
+            ttk.Button(kbtn, text=label, command=command, style=style).grid(
+                row=0, column=index, padx=(0, 6), sticky="w")
         kbtn.columnconfigure(4, weight=1)
-        # "Rensa oanvända" bor i högerklicksmenyn: den används sällan, och
-        # en sjätte knapp gör att raden inte får plats i kortet.
         ttk.Button(kbtn, text="Ta bort", style="Danger.TButton",
                    command=self._kw_remove).grid(row=0, column=5)
         ttk.Button(kbtn, text="Rensa alla stödord (behåll kategorier)…",
                    style="Danger.TButton", command=self._kw_clear_all).grid(
                        row=1, column=0, columnspan=6, sticky="ew", pady=(6, 0))
-        self.kw_hint = hint
         self.kw_buttons = kbtn
-        self.cat_meta = meta
-        self.kw_scrollbar = ksb
-        self.empty_cat_panel = ttk.Frame(right, style="CardInner.TFrame")
-        self.empty_cat_panel.grid(row=2, column=0, columnspan=2, sticky="nsew",
-                                  padx=12, pady=10)
+        self.empty_cat_panel = ttk.Frame(support, style="CardInner.TFrame")
+        self.empty_cat_panel.grid(row=0, column=0, columnspan=2, sticky="nsew",
+                                  padx=T.INNER, pady=T.INNER)
         self.empty_cat_panel.columnconfigure(0, weight=1)
         self.lbl_cat_empty = ttk.Label(
             self.empty_cat_panel, text="", style="CardMuted.TLabel",
-            justify="center", anchor="center", wraplength=440)
+            justify="center", anchor="center", wraplength=580)
         self.lbl_cat_empty.grid(row=0, column=0, sticky="ew", padx=12, pady=(24, 14))
         empty_actions = ttk.Frame(self.empty_cat_panel, style="CardInner.TFrame")
         empty_actions.grid(row=1, column=0, pady=(0, 24))
@@ -10666,19 +10566,17 @@ class App:
                    command=self._import).pack(side="left", padx=5)
         self.empty_cat_panel.grid_remove()
 
-        # -- stödord till vänster; skapade mappar till höger --
-        # Välj kategori högst upp. Dra ett sparat stödord till en skapad mapp.
-        mapcard = T.card(f, "Skapade mappar")
-        mapcard.grid(row=2, column=1, sticky="nsew",
-                     padx=(T.GAP // 2, T.PAD), pady=T.GAP)
-        mapbody = mapcard.body
+        folder_card = T.card(f, "Skapade mappar")
+        folder_card.grid(row=2, column=1, sticky="nsew",
+                         padx=(T.GAP // 2, T.PAD), pady=T.GAP)
+        mapbody = folder_card.body
         mapbody.columnconfigure(0, weight=1)
         mapbody.rowconfigure(1, weight=1)
         ttk.Label(
             mapbody,
-            text=("Skapade mappar för vald kategori visas här. Dra ett "
-                  "sparat stödord från vänster hit, eller använd Ctrl+M."),
-            style="CardMuted.TLabel", wraplength=440, justify="left",
+            text="Endast redan skapade mappar i vald kategori visas här. "
+                 "Årsmappen visas inte; mappar som återkommer under olika år visas en gång.",
+            style="CardMuted.TLabel", wraplength=580, justify="left",
         ).grid(row=0, column=0, sticky="ew", padx=T.INNER,
                pady=(T.INNER, 8))
         map_view = ttk.Frame(mapbody, style="CardInner.TFrame")
@@ -10699,7 +10597,7 @@ class App:
         self.subfolder_map_trees = [self.subfolder_map_tree]
         self.lbl_subfolder_map_status = ttk.Label(
             mapbody, text="Välj en kategori för att börja.",
-            style="CardMuted.TLabel", wraplength=440, justify="left")
+            style="CardMuted.TLabel", wraplength=580, justify="left")
         self.lbl_subfolder_map_status.grid(
             row=2, column=0, sticky="ew", padx=T.INNER, pady=(6, 4))
         map_actions = ttk.Frame(mapbody, style="CardInner.TFrame")
@@ -10707,14 +10605,12 @@ class App:
                          padx=T.INNER, pady=(0, T.INNER))
         map_actions.columnconfigure(0, weight=1)
         map_actions.columnconfigure(1, weight=1)
-        ttk.Button(
-            map_actions, text="Använd valt stödord som standard",
-            command=self._cat_map_set_default,
-        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 5))
-        ttk.Button(
-            map_actions, text="Koppla stödord till mapp (Ctrl+M)",
-            command=self._cat_map_assign_selected,
-        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        ttk.Button(map_actions, text="Använd valt stödord som standard",
+                   command=self._cat_map_set_default).grid(
+                       row=0, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        ttk.Button(map_actions, text="Koppla stödord till mapp (Ctrl+M)",
+                   command=self._cat_map_assign_selected).grid(
+                       row=1, column=0, columnspan=2, sticky="ew", pady=(0, 5))
         ttk.Button(map_actions, text="+ Skapa mapp…",
                    command=self._cat_map_add_folder).grid(
                        row=2, column=0, sticky="ew", padx=(0, 3))
@@ -10728,15 +10624,113 @@ class App:
         self.kw_tree.bind("<ButtonPress-1>", self._cat_map_drag_start, add="+")
         self.kw_tree.bind("<B1-Motion>", self._cat_map_drag_motion, add="+")
         self.kw_tree.bind("<ButtonRelease-1>", self._cat_map_drag_release, add="+")
-        for map_tree in self.subfolder_map_trees:
-            map_tree.bind(
-                "<<TreeviewSelect>>",
-                lambda event, tree=map_tree: self._cat_map_folder_selected(tree),
-                add="+")
+        self.subfolder_map_tree.bind(
+            "<<TreeviewSelect>>",
+            lambda event: self._cat_map_folder_selected(self.subfolder_map_tree),
+            add="+")
         self.root.bind("<Control-m>", self._cat_map_assign_selected, add="+")
-
         self._kw_sort = ("hits", True)
         self._kw_rows: List[Dict[str, Any]] = []
+
+        self._build_category_settings_window()
+
+    def _build_category_settings_window(self) -> None:
+        """Keep detailed category-routing controls in a separate settings dialog."""
+        tk, ttk = self.tk, self.ttk
+        dialog = tk.Toplevel(self.root)
+        self.category_settings_window = dialog
+        dialog._icon_ref = brand_window(dialog)
+        dialog.withdraw()
+        dialog.transient(self.root)
+        dialog.title("Kategoriinställningar")
+        dialog.geometry("780x510")
+        dialog.minsize(620, 420)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.withdraw)
+        ttk.Label(dialog, text="Kategoriinställningar", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", padx=16, pady=(14, 8))
+        meta = ttk.Frame(dialog, style="Card.TFrame")
+        self.cat_meta = meta
+        meta.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 8))
+        meta.columnconfigure(1, weight=1)
+        ttk.Label(meta, text="Mappnamn:", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w", padx=12, pady=(12, 0))
+        self.var_folder = tk.StringVar()
+        ttk.Entry(meta, textvariable=self.var_folder).grid(
+            row=0, column=1, sticky="ew", padx=8, pady=(12, 0))
+        self.var_cat_enabled = tk.BooleanVar(value=True)
+        ttk.Checkbutton(meta, text="Aktiv", variable=self.var_cat_enabled,
+                        style="Card.TCheckbutton",
+                        command=self._cat_save_meta).grid(row=0, column=2, padx=6, pady=(12, 0))
+        ttk.Button(meta, text="Spara", command=self._cat_save_meta).grid(
+            row=0, column=3, padx=(0, 12), pady=(12, 0))
+        ttk.Label(meta, text="Standardundermapp:", style="Card.TLabel").grid(
+            row=1, column=0, sticky="w", padx=12, pady=(10, 0))
+        self.var_cat_subpath = tk.StringVar()
+        ttk.Entry(meta, textvariable=self.var_cat_subpath).grid(
+            row=1, column=1, sticky="ew", padx=8, pady=(10, 0))
+        ttk.Button(meta, text="Välj…", command=self._cat_browse_subpath).grid(
+            row=1, column=2, padx=(0, 4), pady=(10, 0))
+        ttk.Button(meta, text="Skapa…", command=self._cat_create_subpath).grid(
+            row=1, column=3, padx=(0, 4), pady=(10, 0))
+        ttk.Button(meta, text="Spara", command=self._cat_save_subpath).grid(
+            row=1, column=4, padx=(0, 12), pady=(10, 0))
+        ttk.Label(meta,
+                  text="Relativt till kategoriens datum-/årsmapp; skapas vid första sorteringen.",
+                  style="CardMuted.TLabel").grid(
+                      row=2, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
+        ttk.Label(meta, text="Datum:", style="Card.TLabel").grid(
+            row=3, column=0, sticky="w", padx=12, pady=(10, 0))
+        self.sub_combo = ttk.Combobox(
+            meta, state="readonly", width=34,
+            values=[label for _, label in SUBFOLDER_TEMPLATES])
+        self.sub_combo.grid(row=3, column=1, sticky="w", padx=8, pady=(10, 0))
+        self.sub_combo.bind("<<ComboboxSelected>>", lambda e: self._cat_save_sub())
+        self.lbl_sub_ex = ttk.Label(meta, text="", style="CardMuted.TLabel")
+        self.lbl_sub_ex.grid(row=3, column=2, columnspan=3, sticky="w",
+                             padx=8, pady=(10, 0))
+        ttk.Label(meta, text="Kräver:", style="Card.TLabel").grid(
+            row=4, column=0, sticky="w", padx=12, pady=(10, 0))
+        krav = ttk.Frame(meta, style="CardInner.TFrame")
+        krav.grid(row=4, column=1, columnspan=4, sticky="w", padx=8, pady=(10, 0))
+        self.var_catkw = tk.StringVar(value="0")
+        self.spin_catkw = ttk.Spinbox(krav, from_=0, to=9, width=4,
+                                      textvariable=self.var_catkw,
+                                      command=self._cat_save_kw)
+        self.spin_catkw.pack(side="left")
+        self.spin_catkw.bind("<FocusOut>", lambda e: self._cat_save_kw())
+        self.lbl_catkw = ttk.Label(krav, text="", style="CardMuted.TLabel")
+        self.lbl_catkw.pack(side="left", padx=10)
+        ttk.Label(meta, text="Standardstödord:", style="Card.TLabel").grid(
+            row=5, column=0, sticky="w", padx=12, pady=(10, 0))
+        self.var_default_keyword = tk.StringVar()
+        self.default_keyword_combo = ttk.Combobox(
+            meta, textvariable=self.var_default_keyword, state="readonly")
+        self.default_keyword_combo.grid(
+            row=5, column=1, columnspan=4, sticky="ew", padx=8, pady=(10, 0))
+        self.default_keyword_combo.bind(
+            "<<ComboboxSelected>>", self._cat_default_changed)
+        ttk.Label(meta,
+                  text="Kopplas till vald kategori; samma ord får finnas i flera kategorier.",
+                  style="CardMuted.TLabel").grid(
+                      row=6, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
+        ttk.Label(
+            dialog,
+            text="De här inställningarna påverkar inte listorna med stödord och skapade mappar.",
+            style="CardMuted.TLabel").grid(row=2, column=0, sticky="w", padx=16, pady=(0, 8))
+        ttk.Button(dialog, text="Klart", command=dialog.withdraw).grid(
+            row=3, column=0, sticky="e", padx=16, pady=(0, 14))
+
+    def _open_category_settings(self) -> None:
+        """Open settings for the currently selected category."""
+        if not self._selected_cat():
+            self.messagebox.showinfo(APP_NAME, "Välj först en kategori.", parent=self.root)
+            return
+        dialog = self.category_settings_window
+        dialog.title(f"Kategoriinställningar · {self._selected_cat()}")
+        dialog.deiconify()
+        dialog.lift()
 
     # -- visning ----------------------------------------------------------
     def _refresh_categories(self, keep: Optional[str] = None) -> None:
@@ -10765,17 +10759,16 @@ class App:
         cat = self.rules.get(name) if name else None
         if not cat:
             self.var_folder.set("")
+            self.var_cat_enabled.set(True)
+            self.var_cat_subpath.set("")
+            self.var_catkw.set("0")
+            self.var_default_keyword.set("")
+            self.default_keyword_combo.configure(values=())
             no_categories = not self.rules.categories
-            self.lbl_cat_title.configure(
-                text="Inga kategorier ännu" if no_categories else "Ingen kategori vald")
-            self.lbl_cat_stats.configure(text="")
             self.lbl_cat_empty.configure(
                 text=("Skapa en kategori eller importera regler för att komma igång."
                       if no_categories else
-                      "Välj en kategori i menyn ovan för att visa dess stödord och undermappar."))
-            self.var_default_keyword.set("")
-            self.default_keyword_combo.configure(values=())
-            self.cat_meta.grid_remove()
+                      "Välj en kategori i menyn ovan för att visa dess stödord och mappar."))
             self.kw_tree.grid_remove()
             self.kw_scrollbar.grid_remove()
             self.lbl_kw_sum.grid_remove()
@@ -10786,8 +10779,8 @@ class App:
                 self.kw_tree.delete(row)
             self._refresh_subfolder_map()
             return
+
         self.empty_cat_panel.grid_remove()
-        self.cat_meta.grid()
         self.kw_tree.grid()
         self.kw_scrollbar.grid()
         self.lbl_kw_sum.grid()
@@ -10797,7 +10790,7 @@ class App:
         self.var_cat_enabled.set(cat.get("enabled", True))
         self.var_cat_subpath.set(cat.get("subfolder_path", ""))
         mall = cat.get("subfolder", "")
-        nycklar = [t for t, _ in SUBFOLDER_TEMPLATES]
+        nycklar = [template for template, _label in SUBFOLDER_TEMPLATES]
         self.sub_combo.current(nycklar.index(mall) if mall in nycklar else 0)
         self._show_sub_example(cat)
         self.var_catkw.set(str(int(cat.get("min_keywords", 0) or 0)))
@@ -10809,12 +10802,9 @@ class App:
         default_word = normalize(cat.get("default_keyword", ""))
         self.var_default_keyword.set(
             default_word if default_word in default_words else "")
-        self.lbl_cat_title.configure(text=cat["name"])
-        used = sum(1 for k in cat["keywords"] if k.get("hits", 0))
-        self.lbl_cat_stats.configure(
-            text=f"{len(cat['keywords'])} stödord, varav {used} har använts  ·  "
-                 f"{cat.get('files_sorted', 0)} filer sorterade  ·  "
-                 f"mapp: {cat['folder']}")
+        if hasattr(self, "category_settings_window"):
+            self.category_settings_window.title(
+                f"Kategoriinställningar · {cat['name']}")
         self._refresh_keyword_view()
         self._refresh_subfolder_map()
 
