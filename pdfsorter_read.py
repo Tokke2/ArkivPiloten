@@ -46,6 +46,7 @@ from __future__ import annotations
 import concurrent.futures
 import io
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -658,12 +659,15 @@ def _render_pages(path: Path, max_pages: int, dpi: int = 200) -> List[Any]:
     images: List[Any] = []
     if has_pymupdf():
         pymupdf = _open_pymupdf()
-        zoom = dpi / 72.0
+        requested_zoom = dpi / 72.0
         with pymupdf.open(str(path)) as doc:
             if doc.needs_pass:
                 doc.authenticate("")
             for i in range(min(len(doc), max_pages)):
-                pix = doc[i].get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+                page = doc[i]
+                zoom = _bounded_render_zoom(page.rect, requested_zoom)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
+                                      alpha=False)
                 images.append(Image.open(io.BytesIO(pix.tobytes("png"))))
         return images
     exe = shutil.which("pdftoppm")
@@ -698,6 +702,30 @@ _OCR_TARGET_WIDTH = {"standard": 2000, "high": 2600}
 #: (t.ex. A0-ritningar i 300 dpi) skulle annars sluka minne och få
 #: tesseract att sega ner sig utan att läsbarheten blir bättre.
 _OCR_MAX_WIDTH = 5200
+#: Pixel-area cap for rendering pages before PIL/Tesseract. This keeps even
+#: unusually large schematics below Pillow's decompression-bomb threshold.
+_OCR_MAX_RENDER_PIXELS = 24_000_000
+
+
+def _bounded_render_zoom(rect: Any, requested_zoom: float) -> float:
+    """Bound a PDF page/clip rasterization by maximum side and pixel area."""
+    try:
+        width, height = abs(float(rect.width)), abs(float(rect.height))
+        zoom = max(0.01, float(requested_zoom))
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        try:
+            return max(0.01, float(requested_zoom))
+        except (TypeError, ValueError, OverflowError):
+            return 1.0
+    if (not math.isfinite(width) or not math.isfinite(height)
+            or width <= 0 or height <= 0):
+        return zoom
+    max_dimension_zoom = _OCR_MAX_WIDTH / max(width, height)
+    # Leave room for the renderer rounding each raster dimension up by one.
+    pixel_budget = max(1, _OCR_MAX_RENDER_PIXELS - 2 * _OCR_MAX_WIDTH - 1)
+    max_area_zoom = math.sqrt(pixel_budget / (width * height))
+    return min(zoom, max_dimension_zoom, max_area_zoom)
+
 
 #: Statistik från senaste OCR-körningen, för reading_health()/--status.
 _OCR_LAST = {"sekunder": 0.0, "konfidens": -1.0}
@@ -1119,7 +1147,9 @@ def header_images(path: Path) -> List[Any]:
                 pad = 4
                 clip = pymupdf.Rect(rect.x0 - pad, rect.y0 - pad,
                                     rect.x1 + pad, rect.y1 + pad) & page.rect
-                pix = page.get_pixmap(matrix=pymupdf.Matrix(4.0, 4.0), clip=clip)
+                zoom = _bounded_render_zoom(clip, 4.0)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
+                                      clip=clip, alpha=False)
                 crops.append(Image.open(io.BytesIO(pix.tobytes("png"))))
     except Exception:
         return []
@@ -1163,7 +1193,9 @@ def embedded_images(path: Path, max_images: int = 6,
                 pad = 4
                 clip = pymupdf.Rect(rect.x0 - pad, rect.y0 - pad,
                                     rect.x1 + pad, rect.y1 + pad) & page.rect
-                pix = page.get_pixmap(matrix=pymupdf.Matrix(3.0, 3.0), clip=clip)
+                zoom = _bounded_render_zoom(clip, 3.0)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
+                                      clip=clip, alpha=False)
                 crops.append(Image.open(io.BytesIO(pix.tobytes("png"))))
         return crops
     except Exception:

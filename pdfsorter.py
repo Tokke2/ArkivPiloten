@@ -215,6 +215,22 @@ except ImportError:
         """Gammal läsmodul: OCR-brustoleransen är avstängd."""
         return text
 
+try:
+    from pdfsorter_read import _bounded_render_zoom
+except ImportError:
+    def _bounded_render_zoom(rect: Any, requested_zoom: float) -> float:
+        """Fallback for an older companion reader module."""
+        try:
+            width = abs(float(rect.width))
+            height = abs(float(rect.height))
+            zoom = max(0.01, float(requested_zoom))
+            if width <= 0 or height <= 0:
+                return zoom
+            return min(zoom, 5200 / max(width, height),
+                       math.sqrt(24_000_000 / (width * height)))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return 1.0
+
 
 # ==========================================================================
 # DEL 2 - LAGRING OCH FILFLYTT
@@ -4358,7 +4374,9 @@ def deskew_pdf_copy(source: Path, destination: Path,
             output = fitz.open()
             try:
                 for page in original:
-                    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                    page_scale = _bounded_render_zoom(page.rect, scale)
+                    pix = page.get_pixmap(
+                        matrix=fitz.Matrix(page_scale, page_scale), alpha=False)
                     with Image.open(io.BytesIO(pix.tobytes("png"))) as opened:
                         image = opened.convert("RGB")
                     correction = (angle if angle is not None else
@@ -4369,8 +4387,8 @@ def deskew_pdf_copy(source: Path, destination: Path,
                     payload = io.BytesIO()
                     corrected.save(payload, format="PNG", optimize=True)
                     new_page = output.new_page(
-                        width=corrected.width / scale,
-                        height=corrected.height / scale)
+                        width=corrected.width / page_scale,
+                        height=corrected.height / page_scale)
                     new_page.insert_image(new_page.rect, stream=payload.getvalue())
                 try:
                     metadata = {k: v for k, v in original.metadata.items()
@@ -5594,7 +5612,11 @@ class ReviewDialog:
                 pymupdf = _open_pymupdf()
                 with pymupdf.open(str(path)) as doc:
                     for i in range(min(3, len(doc))):
-                        pix = doc[i].get_pixmap(matrix=pymupdf.Matrix(1.4, 1.4))
+                        page = doc[i]
+                        preview_zoom = _bounded_render_zoom(page.rect, 1.4)
+                        pix = page.get_pixmap(
+                            matrix=pymupdf.Matrix(preview_zoom, preview_zoom),
+                            alpha=False)
                         bilder.append(_PILImage.open(
                             _io.BytesIO(pix.tobytes("png"))))
             except Exception:

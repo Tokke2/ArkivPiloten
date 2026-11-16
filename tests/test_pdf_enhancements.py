@@ -19,6 +19,37 @@ def test_possible_document_breaks_need_a_new_document_number():
     assert R._possible_document_breaks(starts[:2]) == []
 
 
+def test_large_pdf_render_scale_is_capped_without_downscaling_normal_pages():
+    normal = SimpleNamespace(width=595.0, height=842.0)
+    huge = SimpleNamespace(width=30_000.0, height=30_000.0)
+
+    assert R._bounded_render_zoom(normal, 300 / 72) == 300 / 72
+    zoom = R._bounded_render_zoom(huge, 300 / 72)
+    assert zoom < 300 / 72
+    assert max(huge.width, huge.height) * zoom <= R._OCR_MAX_WIDTH
+    assert huge.width * huge.height * zoom ** 2 <= R._OCR_MAX_RENDER_PIXELS + 1
+
+
+def test_render_pages_limits_huge_schematic_before_pillow_load(tmp_path):
+    import pytest
+    fitz = pytest.importorskip("fitz")
+    path = tmp_path / "oversized-page.pdf"
+    doc = fitz.open()
+    doc.new_page(width=12_000, height=12_000)
+    doc.save(path)
+    doc.close()
+
+    images = R._render_pages(path, 1, dpi=300)
+    try:
+        assert len(images) == 1
+        width, height = images[0].size
+        assert max(width, height) <= R._OCR_MAX_WIDTH + 1
+        assert width * height <= R._OCR_MAX_RENDER_PIXELS + 1
+    finally:
+        for image in images:
+            image.close()
+
+
 def test_extraction_cache_round_trips_page_details(tmp_path):
     ext = R.Extraction(
         path=tmp_path / "scan.pdf",
