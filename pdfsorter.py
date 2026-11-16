@@ -14060,52 +14060,36 @@ class App:
             "title": "Stöd ArkivPiloten 💚",
             "intro": "ArkivPiloten är gratis och utan reklam. Frivilliga bidrag "
                      "hjälper till att hålla utveckling och underhåll igång.",
-            "subhead": "Välj en summa eller ange ett eget belopp",
-            "amount_note": "Beloppet är helt frivilligt. Appen förblir gratis; "
-                           "ingen funktion låses upp av en donation.",
-            "custom": "Eget belopp:", "apply": "Använd belopp",
+            "swish": "Swish · skanna QR-koden",
             "paypal": "💙 PayPal", "kofi": "☕ Ko-fi",
-            "swish": "💚 Swish · skanna QR-koden",
-            "privacy": "Betalningen hanteras av betalningstjänsten. "
-                       "Mottagare och länkar är inbyggda i appen och kan inte "
-                       "ändras här.",
+            "privacy": "Swish-mottagaren är fast inbyggd. Betalningen hanteras "
+                       "av respektive betaltjänst.",
             "thanks": "Tack för att du hjälper till att hålla ArkivPiloten "
                       "öppen och gratis!",
-            "bad_amount": "Ange ett helt belopp mellan 1 och 99 999 kr.",
-            "amount": "Valt belopp: {amount} kr",
             "language": "Språk / Language:",
-            "qr_error": "QR-koden kunde inte skapas: {error}",
         },
         "en": {
             "title": "Support ArkivPiloten 💚",
             "intro": "ArkivPiloten is free and ad-free. Voluntary donations "
                      "help keep development and maintenance going.",
-            "subhead": "Choose an amount or enter your own",
-            "amount_note": "Donations are entirely optional. The app stays "
-                           "free; no feature is unlocked by donating.",
-            "custom": "Custom amount:", "apply": "Use amount",
+            "swish": "Swish · scan the QR code",
             "paypal": "💙 PayPal", "kofi": "☕ Ko-fi",
-            "swish": "💚 Swish · scan the QR code",
-            "privacy": "Payments are handled by the payment provider. "
-                       "The recipient and links are built into the app and "
-                       "cannot be changed here.",
+            "privacy": "The Swish recipient is fixed in the app. Payments "
+                       "are handled by the respective payment provider.",
             "thanks": "Thank you for helping keep ArkivPiloten open and free!",
-            "bad_amount": "Enter a whole amount between 1 and 99,999 SEK.",
-            "amount": "Selected amount: {amount} SEK",
             "language": "Språk / Language:",
-            "qr_error": "Could not create the QR code: {error}",
         },
     }
 
     def _visa_stod(self) -> None:
-        """Show the fixed, built-in donation information and payment links."""
+        """Show the fixed Swish QR and payment buttons inside the app."""
         tk, ttk = self.tk, self.ttk
         win = tk.Toplevel(self.root)
         brand_window(win)
         win.title("ArkivPiloten — stöd")
         win.transient(self.root)
         win.resizable(True, True)
-        _fit_geometry(win, 720, 780, 460, 440)
+        _fit_geometry(win, 660, 700, 440, 420)
         try:
             win.configure(background=self.C["bg"])
             win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
@@ -14130,11 +14114,7 @@ class App:
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(
             content_id, width=e.width))
         lang = tk.StringVar(value="sv")
-        selected = {"amount": 50}
         image_ref = {"photo": None}
-
-        def tr(key: str) -> str:
-            return self.STOD_TEXT[lang.get()][key]
 
         title = ttk.Label(content, text="", style="CardTitle.TLabel",
                           wraplength=600, justify="left")
@@ -14151,91 +14131,41 @@ class App:
         ttk.Radiobutton(langrow, text="EN", value="en", variable=lang
                         ).pack(side="left")
 
-        body = ttk.Frame(content, style="Card.TFrame")
-        body.pack(fill="x", padx=16, pady=12)
-        heading = ttk.Label(body, text="", style="CardHead.TLabel",
-                            wraplength=580, justify="left")
-        heading.pack(anchor="w", padx=10, pady=(10, 4))
-        amount_note = ttk.Label(body, text="", style="CardMuted.TLabel",
-                                wraplength=580, justify="left")
-        amount_note.pack(anchor="w", padx=10, pady=(0, 8))
-        preset_row = ttk.Frame(body, style="Card.TFrame")
-        preset_row.pack(fill="x", padx=8, pady=4)
-        amount_status = ttk.Label(body, text="", style="CardKey.TLabel")
-        amount_status.pack(anchor="w", padx=10, pady=6)
-
-        def set_amount(amount: int) -> None:
-            selected["amount"] = amount
-            amount_status.configure(text=tr("amount").format(amount=amount))
-            redraw_qr()
-
-        preset_buttons = []
-        for amount in (25, 50, 100, 200):
-            button = ttk.Button(
-                preset_row, text=f"{amount} kr",
-                command=lambda value=amount: set_amount(value))
-            button.pack(side="left", expand=True, fill="x", padx=3)
-            preset_buttons.append((amount, button))
-
-        custom_row = ttk.Frame(body, style="Card.TFrame")
-        custom_row.pack(fill="x", padx=10, pady=(6, 10))
-        custom_label = ttk.Label(custom_row, text="", style="Card.TLabel")
-        custom_label.pack(side="left")
-        custom_amount = tk.StringVar()
-        entry = ttk.Entry(custom_row, textvariable=custom_amount, width=12)
-        entry.pack(side="left", padx=8)
-        amount_error = ttk.Label(body, text="", style="CardMuted.TLabel",
-                                 wraplength=580)
-        amount_error.pack(anchor="w", padx=10)
-
-        def apply_custom_amount() -> None:
-            raw = custom_amount.get().strip()
-            if not raw.isdigit() or not 1 <= int(raw) <= 99999:
-                amount_error.configure(text=tr("bad_amount"))
-                return
-            amount_error.configure(text="")
-            set_amount(int(raw))
-
-        apply_button = ttk.Button(custom_row, text="", command=apply_custom_amount)
-        apply_button.pack(side="left")
-
-        payrow = ttk.Frame(body, style="Card.TFrame")
-        payrow.pack(fill="x", padx=10, pady=(4, 12))
-        paypal = ttk.Button(payrow, text="", style="Accent.TButton",
-                            command=lambda: open_externally(
-                                self.DONATION_PAYPAL_URL + "/"
-                                + str(selected["amount"]) + "SEK"))
-        paypal.pack(side="left", padx=(0, 6))
-        kofi = ttk.Button(payrow, text="",
-                          command=lambda: open_externally(
-                              self.DONATION_KOFI_URL))
+        payment_row = ttk.Frame(content, style="Card.TFrame")
+        payment_row.pack(fill="x", padx=20, pady=12)
+        paypal = ttk.Button(
+            payment_row, text="", style="Accent.TButton",
+            command=lambda: open_externally(self.DONATION_PAYPAL_URL))
+        paypal.pack(side="left", padx=(0, 8))
+        kofi = ttk.Button(
+            payment_row, text="",
+            command=lambda: open_externally(self.DONATION_KOFI_URL))
         kofi.pack(side="left")
 
         swish_card = ttk.Frame(content, style="Card.TFrame")
         swish_card.pack(fill="x", padx=16, pady=(0, 10))
         swish_label = ttk.Label(swish_card, text="", style="CardHead.TLabel",
-                                wraplength=580, justify="left")
-        swish_label.pack(anchor="w", padx=12, pady=(12, 0))
+                                wraplength=580, justify="center")
+        swish_label.pack(anchor="center", padx=12, pady=(14, 6))
         qr_label = ttk.Label(swish_card, background=self.C["surface"])
         qr_label.pack(padx=12, pady=10)
         privacy = ttk.Label(swish_card, text="", style="CardMuted.TLabel",
-                            wraplength=580, justify="left")
-        privacy.pack(anchor="w", padx=12, pady=(0, 12))
+                            wraplength=580, justify="center")
+        privacy.pack(anchor="center", padx=12, pady=(0, 12))
         thanks = ttk.Label(content, text="", style="CardTitle.TLabel",
                            wraplength=600, justify="left")
         thanks.pack(anchor="w", padx=20, pady=(0, 18))
 
         def redraw_qr() -> None:
             try:
-                png = qr_png_bytes(swish_payload(
-                    self.DONATION_SWISH_NUMBER, selected["amount"]))
+                png = qr_png_bytes(swish_payload(self.DONATION_SWISH_NUMBER))
                 import base64
                 photo = tk.PhotoImage(data=base64.b64encode(png).decode("ascii"))
                 image_ref["photo"] = photo
                 qr_label.configure(image=photo, text="")
             except Exception as exc:
                 image_ref["photo"] = None
-                qr_label.configure(image="", text=tr("qr_error").format(error=exc))
+                qr_label.configure(image="", text=f"QR-fel: {exc}")
 
         def translate(*_args) -> None:
             text = self.STOD_TEXT[lang.get()]
@@ -14243,15 +14173,6 @@ class App:
             title.configure(text=text["title"])
             intro.configure(text=text["intro"])
             lang_label.configure(text=text["language"])
-            currency = "kr" if lang.get() == "sv" else "SEK"
-            for amount, button in preset_buttons:
-                button.configure(text=f"{amount} {currency}")
-            heading.configure(text=text["subhead"])
-            amount_note.configure(text=text["amount_note"])
-            custom_label.configure(text=text["custom"])
-            apply_button.configure(text=text["apply"])
-            amount_status.configure(
-                text=text["amount"].format(amount=selected["amount"]))
             paypal.configure(text=text["paypal"])
             kofi.configure(text=text["kofi"])
             swish_label.configure(text=text["swish"])

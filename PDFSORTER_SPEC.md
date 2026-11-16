@@ -2166,19 +2166,16 @@ bild, med bläddring fram/bakåt, så att användaren kan bocka i stödord med
 | 199 | "Varför?" i granskningsrutan: klartext ("ordet X i brevhuvudet, org.nr i sidfoten") | Enkelhet |
 | 200 | Hälsokort på Sortera-fliken: grönt/rött för OCR, bevakning, mappar, lär-läge | Enkelhet |
 
-### REQ-N15 (B) — Donationsvy med fasta uppgifter (uppdaterad)
-- Donationsvyn öppnas från Hjälp → "Stöd projektet 💖" och har en tydlig,
-  kortbaserad layout med svensk/engelsk växling.
-- Inga nivåer, rankingar, påhittade statistikvärden eller löften om
-  prioriterad support. Visa förvalda belopp och ett eget belopp; alla gåvor
-  är frivilliga och låser inte upp funktioner.
-- Betalningsmottagare och PayPal-/Ko-fi-länkar är fasta, inbyggda värden och
-  kan inte redigeras via appens inställningar. Äldre `swish_number`-värden i
-  användarens inställningsfil ignoreras.
-- Swish-QR skapas lokalt och uppdateras när beloppet väljs. Betalningen går
-  direkt via Swish, PayPal eller Ko-fi; ingen betalningsinformation hanteras
-  av appen.
-- Samma fasta mottagare för Swish används i HTML-donationssidan.
+### REQ-N15 (B) — Inbyggd donationsvy (uppdaterad)
+- Donationsvyn öppnas från Hjälp → "Stöd projektet 💖" och innehåller endast
+  Swish-QR-koden, PayPal-knappen och Ko-fi-knappen. Mottagare och länkar är
+  fasta i den officiella appen; äldre `swish_number`-värden ignoreras.
+- Swish QR-koden använder standardbelopp (inget förifyllt belopp) och det
+  fasta numret 0721817177. Numret eller QR-payloaden visas inte i klartext.
+- PayPal och Ko-fi finns endast som knappar i appen. Ingen separat
+  donationswebbsida eller QR-bild levereras.
+- Inga nivåer, påhittade statistikvärden eller löften om prioriterad support.
+  Alla gåvor är frivilliga och låser inte upp funktioner.
 - Programkoden distribueras under MIT License, vilken tillåter privat och
   kommersiell användning enligt licensvillkoren.
 

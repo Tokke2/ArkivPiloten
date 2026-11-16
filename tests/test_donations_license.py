@@ -31,14 +31,28 @@ def test_donation_destinations_are_fixed_not_user_settings():
     assert "DONATION_KOFI_URL" in source
 
 
-def test_donation_view_uses_optional_amounts_without_tiers_or_priority_claims():
+def test_donation_view_has_fixed_qr_and_payment_buttons_only():
     source = inspect.getsource(P.App._visa_stod)
 
-    assert "(25, 50, 100, 200)" in source
-    assert "99999" in source
-    assert "39 kr" not in source
-    assert "99 kr" not in source
-    assert "299 kr" not in source
-    assert "most picked" not in source
-    assert "prioriterad support" not in source
-    assert "no feature is unlocked by donating" in P.App.STOD_TEXT["en"]["amount_note"]
+    assert "swish_payload(self.DONATION_SWISH_NUMBER)" in source
+    assert P.swish_payload(P.App.DONATION_SWISH_NUMBER) == (
+        "https://swish.se/payment?swish=0721817177")
+    assert "PayPal" in P.App.STOD_TEXT["sv"]["paypal"]
+    assert "Ko-fi" in P.App.STOD_TEXT["sv"]["kofi"]
+    assert "amount" not in source.lower()
+    assert "ttk.Entry" not in source
+    assert "no feature is unlocked by donating" not in str(P.App.STOD_TEXT)
+
+
+def test_donation_page_is_not_shipped_separately():
+    source = (ROOT / "pdfsorter_system.py").read_text(encoding="utf-8")
+    installer = (ROOT / "tools" / "install_latest.py").read_text(encoding="utf-8")
+
+    assert not (ROOT / "Stöd ArkivPiloten.html").exists()
+    assert not (ROOT / "swish_qr.png").exists()
+    assert "Stöd ArkivPiloten.html" not in source
+    assert "Stöd ArkivPiloten.html" not in installer
+    assert "swish_qr.png" not in source
+    assert "swish_qr.png" not in installer
+    assert '"LICENSE"' in source
+    assert '"LICENSE"' in installer

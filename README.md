@@ -149,8 +149,6 @@ ArkivPiloten/
 ├── pdfsorter_read.py       text extraction, OCR, keyword suggestions
 ├── pdfsorter_system.py     icon, autostart, tray, logs, crash reports
 ├── pdfsorter_theme.py      light/dark/high-contrast themes, HiDPI
-├── Stöd ArkivPiloten.html  donation page (SV/EN, Swish QR)
-├── swish_qr.png            Swish QR (0721817177), verified
 ├── ArkivPiloten.ico/.png   app icon (used everywhere)
 ├── desktop.ini             folder icon in Explorer
 └── PDFSORTER_SPEC.md       requirements specification (source of truth)
@@ -199,21 +197,9 @@ Found a bug? Run `python pdfsorter.py --ai-rapport` (or *Copy AI report* in the 
 
 ## ❤️ Support ArkivPiloten — Donate
 
-**Yes — donations are very welcome!** ArkivPiloten is free, with no ads and no paywall, and it will stay that way. Donations are completely voluntary and go straight to what makes a difference: better matching, faster OCR, self-healing logs and new features. You support a small Swedish indie developer — not a company. 💙
+**Donations are welcome but always optional.** ArkivPiloten stays free, with no ads or paywall. To donate, open **Help → Support the project 💖** inside the app. The built-in view shows only the fixed-recipient Swish QR and PayPal/Ko-fi buttons; no separate donation page is provided.
 
-Any amount is appreciated — choose a preset or enter a custom amount in the app. Donations do not unlock features or change support priority; the app stays free for everyone. Contributions can be one-off or monthly through the payment provider:
-
-- 💙 **PayPal:** [paypal.me/Rickard3dPrint](https://paypal.me/Rickard3dPrint)
-- ☕ **Ko-fi:** [ko-fi.com/tokke2](https://ko-fi.com/tokke2) *(monthly giving available, cancel anytime)*
-- 📱 **Swish (Sweden):** **0721817177** — scan the QR code below with the Swish app
-
-<div align="center">
-<img src="swish_qr.png" alt="Swish QR code for 0721817177" width="200">
-</div>
-
-You can also donate from inside the app via **Help → Support the project 💖**, or open the donation page [`Stöd ArkivPiloten.html`](St%C3%B6d%20ArkivPiloten.html) included in this folder (SV/EN toggle included). Payments go directly through PayPal, Ko-fi or Swish over HTTPS — neither the app nor the developer ever sees your card number, and your receipt comes straight from the payment provider.
-
-*Thank you for keeping ArkivPiloten free for everyone! ✨*
+*Thank you for helping keep ArkivPiloten free for everyone! ✨*
 
 ---
 
@@ -354,8 +340,6 @@ ArkivPiloten/
 ├── pdfsorter_read.py       textextraktion, OCR, stödordsförslag
 ├── pdfsorter_system.py     ikon, autostart, tray, loggar, kraschrapporter
 ├── pdfsorter_theme.py      ljust/mörkt/högkontrast-tema, HiDPI
-├── Stöd ArkivPiloten.html  donationssida (SV/EN, Swish-QR)
-├── swish_qr.png            Swish-QR (0721817177), verifierad
 ├── ArkivPiloten.ico/.png   appikoner (Windows + övriga system)
 ├── brand/*.svg            tryckfärdig logotyp och vektorikon
 ├── desktop.ini             mappikon i Utforskaren
@@ -405,21 +389,9 @@ Hittat en bugg? Kör `python pdfsorter.py --ai-rapport` (eller *Kopiera AI-rappo
 
 ## ❤️ Stöd ArkivPiloten — Donera
 
-**Ja — donationer tas tacksamt emot!** ArkivPiloten är gratis, utan reklam och utan betalvägg, och så förblir det. Donationer är helt frivilliga och går direkt till det som märks: bättre matchning, snabbare OCR, självläkande loggar och nya funktioner. Du stödjer en liten svensk indie-utvecklare — inte ett bolag. 💙
+**Donationer är välkomna men alltid frivilliga.** ArkivPiloten förblir gratis, utan reklam och betalvägg. För att bidra, öppna **Hjälp → Stöd projektet 💖** inifrån appen. Den inbyggda vyn visar endast Swish-QR-koden för den fasta mottagaren samt PayPal-/Ko-fi-knappar. Det finns ingen separat donationssida.
 
-Valfritt belopp — välj ett förslag eller ange en egen summa i appen. Donationer låser inte upp funktioner och påverkar inte supportprioritet; appen förblir gratis för alla. Du kan bidra en gång eller månadsvis via betaltjänsten:
-
-- 💙 **PayPal:** [paypal.me/Rickard3dPrint](https://paypal.me/Rickard3dPrint)
-- ☕ **Ko-fi:** [ko-fi.com/tokke2](https://ko-fi.com/tokke2) *(månadsgivande möjligt, avsluta när du vill)*
-- 📱 **Swish:** **0721817177** — skanna QR-koden nedan med Swish-appen
-
-<div align="center">
-<img src="swish_qr.png" alt="Swish-QR-kod för 0721817177" width="200">
-</div>
-
-Du kan också donera inifrån appen via **Hjälp → Stöd projektet 💖**, eller öppna donationssidan [`Stöd ArkivPiloten.html`](St%C3%B6d%20ArkivPiloten.html) som ligger i den här mappen (SV/EN-växel finns). Betalningarna går direkt via PayPal, Ko-fi eller Swish över HTTPS — varken appen eller utvecklaren ser någonsin ditt kortnummer, och kvittot kommer direkt från betaltjänsten.
-
-*Tack för att du håller ArkivPiloten gratis för alla! ✨*
+*Tack för att du hjälper till att hålla ArkivPiloten gratis för alla! ✨*
 
 ---
 

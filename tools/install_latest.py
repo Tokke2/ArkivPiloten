@@ -62,8 +62,8 @@ FILES = (
     "brand/arkivpiloten-logo.svg", "brand/arkivpiloten-icon.svg",
     "ArkivPiloten - Installera senaste Python och starta.bat",
     "arkivpiloten_python.ps1", "arkivpiloten_schedule_python_updates.ps1",
-    "README.md", "PDFSORTER_SPEC.md", "Stöd ArkivPiloten.html",
-    "swish_qr.png", "desktop.ini", "BUILD-MANIFEST.json",
+    "README.md", "PDFSORTER_SPEC.md", "LICENSE", "desktop.ini",
+    "BUILD-MANIFEST.json",
 )
 
 _VERSION_RE = re.compile(r'(?:APP_)?VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"')
