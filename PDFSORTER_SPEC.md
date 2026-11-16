@@ -2166,33 +2166,21 @@ bild, med bläddring fram/bakåt, så att användaren kan bocka i stödord med
 | 199 | "Varför?" i granskningsrutan: klartext ("ordet X i brevhuvudet, org.nr i sidfoten") | Enkelhet |
 | 200 | Hälsokort på Sortera-fliken: grönt/rött för OCR, bevakning, mappar, lär-läge | Enkelhet |
 
-### REQ-N15 (B) — Donationsvy + Swish-QR + SV/EN (LEVERERAD 2026-10-15)
-(ANVÄNDARORDER: "donationssida som dom andra apparna, anpassad för denna
-app, visas i app och html bredvid, swish qr ska jämföras med original,
-sve/eng i appen".)
-**AC-15:**
-- AC-15.1 Donationsvy i appen (Hjälp → "Stöd projektet 💖"): nivåer
-  39/99/299 kr, PayPal/Ko-fi/valfritt, SV/EN-växel som översätter vyn
-  direkt.
-- AC-15.2 HTML-sida bredvid appen: "Stöd ArkivPiloten.html" med samma
-  design, SV/EN-växel (JS), Swish-sektion som visar swish_qr.png när
-  den finns.
-- AC-15.3 Swish-QR ritas BEROENDEFRITT i appen (egen QR-kodare: byte-läge,
-  EC M, v1-6, mask 0) när användaren fyller i sitt nummer
-  (`settings["swish_number"]`). Verifierad mot oberoende avkodare
-  (OpenCV): payloaden avkodas tecken för tecken identiskt - det är
-  jämförelsen med originalet. Payload + kopieringsknappar visas i vyn
-  så att originalet kan skannas och jämföras.
-- AC-15.5 Swish-numret 0721817177 inbakat som standard; swish_qr.png
-  ligger bredvid HTML-sidan och visas där ("visa endast QR" -
-  Öppna Swish-knappen och fejk-citat/sektionen "quotes" borttagna
-  på beställning). QR-payloaden verifierad mot oberoende avkodare.
-- AC-15.6 Donationsvyn i appen visar liksom HTML-sidan ENDAST
-  QR-koden i Swish-sektionen (nummer/text/payload/kopieringsknappar
-  borttagna 2026-10-15: "samma i appen nu?"). Numret ändras vid
-  behov via settings["swish_number"].
-- AC-15.4 Helappens i18n (SV/EN i hela gränssnittet) läggs som förslag
-  #201 i kön - donationsvyn är först ut.
+### REQ-N15 (B) — Donationsvy med fasta uppgifter (uppdaterad)
+- Donationsvyn öppnas från Hjälp → "Stöd projektet 💖" och har en tydlig,
+  kortbaserad layout med svensk/engelsk växling.
+- Inga nivåer, rankingar, påhittade statistikvärden eller löften om
+  prioriterad support. Visa förvalda belopp och ett eget belopp; alla gåvor
+  är frivilliga och låser inte upp funktioner.
+- Betalningsmottagare och PayPal-/Ko-fi-länkar är fasta, inbyggda värden och
+  kan inte redigeras via appens inställningar. Äldre `swish_number`-värden i
+  användarens inställningsfil ignoreras.
+- Swish-QR skapas lokalt och uppdateras när beloppet väljs. Betalningen går
+  direkt via Swish, PayPal eller Ko-fi; ingen betalningsinformation hanteras
+  av appen.
+- Samma fasta mottagare för Swish används i HTML-donationssidan.
+- Programkoden distribueras under MIT License, vilken tillåter privat och
+  kommersiell användning enligt licensvillkoren.
 
 | 201 | Helappens i18n: SV/EN-växel i hela gränssnittet (strängtabell + växling live) | Enkelhet | VÄNTAR |
 

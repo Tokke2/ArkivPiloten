@@ -649,7 +649,6 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "tesseract_path": "",        # manuell sökväg till tesseract.exe
     "learned_matching": True,    # bakåtkompatibilitet; fast alltid aktivt
     "learned_confirmed_only_v1": False,  # modell ombyggd från bekräftade val
-    "swish_number": "0721817177",  # Swish-nummer för donations-QR (N15)
     "check_updates": True,       # 2026-10-16: sök Git-uppdatering vid start
     # 2026-10-20: autouppdatering på som standard. Nya versioner hämtas
     # från GitHub Releases, verifieras mot release-postens SHA256SUMS.txt

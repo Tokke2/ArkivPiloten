@@ -10,6 +10,9 @@
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
 
+**MIT licensed — private and commercial use are permitted.** See [LICENSE](LICENSE).
+**MIT-licens — privat och kommersiell användning är tillåten.** Se [LICENSE](LICENSE).
+
 [**🇬🇧 English**](#english) · [**🇸🇪 Svenska**](#svenska) · [**❤️ Donate / Donera**](#support)
 
 </div>
@@ -132,6 +135,7 @@ Run `python pdfsorter.py --help` for all options (`--copy`, `--exclude`, `--json
 
 ```text
 ArkivPiloten/
+├── LICENSE                 MIT license (private and commercial use)
 ├── ArkivPiloten - Installera senaste Python och starta.bat   the only launcher you need (Windows)
 ├── install.sh              installer for macOS & Linux (venv, shortcut, autostart)
 ├── uppgradera-arkivpiloten.bat / .sh   one-time upgrade from 1.0.0/1.1.0
@@ -197,13 +201,7 @@ Found a bug? Run `python pdfsorter.py --ai-rapport` (or *Copy AI report* in the 
 
 **Yes — donations are very welcome!** ArkivPiloten is free, with no ads and no paywall, and it will stay that way. Donations are completely voluntary and go straight to what makes a difference: better matching, faster OCR, self-healing logs and new features. You support a small Swedish indie developer — not a company. 💙
 
-| Tier | | What it does |
-|---|---|---|
-| ☕ **A coffee — 39 SEK** | | A small thanks that fuels evening coding |
-| 📚 **Book friend — 99 SEK** *(most picked)* | | Covers a month of maintenance and test files |
-| 🌟 **Hero — 299 SEK** | | Carries the project further; your idea jumps the queue |
-
-**Any amount is appreciated** — one-off or monthly, no commitment:
+Any amount is appreciated — choose a preset or enter a custom amount in the app. Donations do not unlock features or change support priority; the app stays free for everyone. Contributions can be one-off or monthly through the payment provider:
 
 - 💙 **PayPal:** [paypal.me/Rickard3dPrint](https://paypal.me/Rickard3dPrint)
 - ☕ **Ko-fi:** [ko-fi.com/tokke2](https://ko-fi.com/tokke2) *(monthly giving available, cancel anytime)*
@@ -409,13 +407,7 @@ Hittat en bugg? Kör `python pdfsorter.py --ai-rapport` (eller *Kopiera AI-rappo
 
 **Ja — donationer tas tacksamt emot!** ArkivPiloten är gratis, utan reklam och utan betalvägg, och så förblir det. Donationer är helt frivilliga och går direkt till det som märks: bättre matchning, snabbare OCR, självläkande loggar och nya funktioner. Du stödjer en liten svensk indie-utvecklare — inte ett bolag. 💙
 
-| Nivå | | Vad den gör |
-|---|---|---|
-| ☕ **En kaffe — 39 kr** | | Ett litet tack som ger energi till kvällskodning |
-| 📚 **Bokvän — 99 kr** *(mest vald)* | | Täcker en månads underhåll och testfiler |
-| 🌟 **Hjälte — 299 kr** | | Bär projektet en extra bit; din idé hamnar högt i kön |
-
-**Valfritt belopp går lika bra** — engångs eller månadsvis, ingen bindning:
+Valfritt belopp — välj ett förslag eller ange en egen summa i appen. Donationer låser inte upp funktioner och påverkar inte supportprioritet; appen förblir gratis för alla. Du kan bidra en gång eller månadsvis via betaltjänsten:
 
 - 💙 **PayPal:** [paypal.me/Rickard3dPrint](https://paypal.me/Rickard3dPrint)
 - ☕ **Ko-fi:** [ko-fi.com/tokke2](https://ko-fi.com/tokke2) *(månadsgivande möjligt, avsluta när du vill)*
