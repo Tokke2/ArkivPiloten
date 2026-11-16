@@ -10644,9 +10644,12 @@ class App:
         ttk.Button(map_actions, text="Koppla loss valt ord",
                    command=self._cat_map_remove).grid(
                        row=2, column=1, sticky="ew", padx=(3, 0))
+        ttk.Button(map_actions, text="Ta bort vald mapp · behåll och skanna filer",
+                   command=self._cat_map_remove_folder).grid(
+                       row=3, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         ttk.Button(map_actions, text="Öppna kopplingsdialog…",
                    command=self._open_subfolder_keyword_editor).grid(
-                       row=3, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+                       row=4, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         self._map_drag_word = ""
         self.kw_tree.bind("<ButtonPress-1>", self._cat_map_drag_start, add="+")
         self.kw_tree.bind("<B1-Motion>", self._cat_map_drag_motion, add="+")
@@ -11086,6 +11089,135 @@ class App:
         self._refresh_subfolder_map()
         self.lbl_subfolder_map_status.configure(
             text=f"Skapade mappen ‘{folder}’ i kategorin {cat['name']}.")
+
+    def _cat_map_remove_folder(self) -> None:
+        """Remove a created folder while preserving its files and rescanning PDFs."""
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        tree = getattr(self, "subfolder_map_tree", None)
+        selection = tree.selection() if tree else ()
+        if not cat or not selection:
+            self.lbl_subfolder_map_status.configure(
+                text="Markera först en skapad mapp i listan till höger.")
+            return
+        folder = str(tree.item(selection[0], "values")[0] or "").strip()
+        folder, error = validate_subfolder_override(folder)
+        if error or not folder:
+            self.lbl_subfolder_map_status.configure(text="Den valda mappen är ogiltig.")
+            return
+        if getattr(self, "_rescanning", False):
+            self.messagebox.showinfo(
+                APP_NAME, "Vänta tills den pågående omskanningen är klar.",
+                parent=self.root)
+            return
+        if not self.messagebox.askyesno(
+                APP_NAME,
+                f"Ta bort mappen ‘{folder}’ från kategorin {cat['name']}?\n\n"
+                "Alla filer behålls och flyttas upp till mappens förälder. "
+                "PDF-filerna skannas sedan om.", parent=self.root):
+            return
+        try:
+            moved_pdfs = self._remove_category_mapping_folder(cat, folder)
+        except (OSError, ValueError) as exc:
+            self.messagebox.showerror(
+                APP_NAME, f"Mappen kunde inte tas bort: {exc}", parent=self.root)
+            return
+        mapping = cat.setdefault("subfolder_keyword_map", {})
+        prefix = folder.casefold() + "/"
+        for word, target in list(mapping.items()):
+            if (str(target).casefold() == folder.casefold()
+                    or str(target).casefold().startswith(prefix)):
+                mapping.pop(word, None)
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self.lbl_subfolder_map_status.configure(
+            text=(f"Mappen ‘{folder}’ togs bort. Filerna finns kvar; "
+                  f"{len(moved_pdfs)} PDF-filer skannas om."))
+        if moved_pdfs:
+            self._start_rescan_files(moved_pdfs, cat["name"])
+
+    def _remove_category_mapping_folder(
+            self, cat: Dict[str, Any], folder: str) -> List[Path]:
+        """Move folder contents to each folder's parent, then remove empty dirs.
+
+        Mapping rows collapse year/date paths, so remove every matching physical
+        instance (for example the same document-type folder under 2024 and 2025).
+        Files are flattened into the parent with collision-safe names.
+        """
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if not output:
+            raise ValueError("Välj först en arkivmapp under Start.")
+        root = (Path(output) / safe_folder_name(cat["folder"])).resolve()
+        if not root.is_dir():
+            raise ValueError("Kategorimappen finns inte längre.")
+        base = self._category_subfolder_mapping_base(cat)
+        try:
+            base_parts = list(base.resolve().relative_to(root).parts)
+            base_parts = [part for part in base_parts
+                          if not (len(part) == 4 and part.isdigit())]
+        except (OSError, ValueError):
+            base_parts = []
+        matches = []
+        for directory in root.rglob("*"):
+            if not directory.is_dir():
+                continue
+            try:
+                directory.resolve().relative_to(root)
+                relative = list(directory.relative_to(root).parts)
+            except (OSError, ValueError):
+                continue
+            relative = [part for part in relative
+                        if not (len(part) == 4 and part.isdigit())]
+            if base_parts and relative[:len(base_parts)] == base_parts:
+                relative = relative[len(base_parts):]
+            if "/".join(relative).casefold() == folder.casefold():
+                matches.append(directory)
+        if not matches:
+            raise ValueError("Den valda skapade mappen hittades inte.")
+
+        # Validate every instance before moving any files so a link or an
+        # unexpected path cannot leave only some year-folders processed.
+        files_by_directory: Dict[Path, List[Path]] = {}
+        for directory in matches:
+            files = []
+            for path in directory.rglob("*"):
+                if path.is_symlink():
+                    raise ValueError("Mappen innehåller en symbolisk länk; inget ändrades.")
+                if path.is_file():
+                    path.resolve().relative_to(root)
+                    files.append(path)
+            files_by_directory[directory] = files
+
+        pdfs: List[Path] = []
+        for directory in matches:
+            parent = directory.parent
+            files = files_by_directory[directory]
+            for source in files:
+                target = parent / source.name
+                if target.exists():
+                    stem, suffix = source.stem, source.suffix
+                    index = 2
+                    while target.exists():
+                        target = parent / f"{stem} ({index}){suffix}"
+                        index += 1
+                shutil.move(str(source), str(target))
+                if target.suffix.casefold() == ".pdf":
+                    pdfs.append(target)
+            for child in sorted(directory.rglob("*"),
+                                key=lambda item: len(item.parts), reverse=True):
+                if child.is_dir():
+                    child.rmdir()
+            directory.rmdir()
+        return pdfs
+
+    def _start_rescan_files(self, files: List[Path], category: str) -> None:
+        """Start the regular safe rescan worker for an explicit set of files."""
+        if self._rescanning or not files:
+            return
+        self._rescanning = True
+        self._log(f"Skannar om {len(files)} filer…", "info")
+        threading.Thread(target=self._rescan_worker, args=(files, category),
+                         daemon=True, name="pdfsorter-rescan").start()
 
     def _cat_map_remove(self) -> None:
         name = self._selected_cat()
