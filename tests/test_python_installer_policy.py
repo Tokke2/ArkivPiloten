@@ -15,14 +15,15 @@ def test_windows_launcher_calls_the_python_policy_script():
     assert "winget install --id Python.Python.3.13" not in text
 
 
-def test_existing_python_updates_same_track_and_fresh_install_is_missing_only():
+def test_python_runtime_is_not_auto_updated_but_is_installed_if_missing():
     policy = (ROOT / "arkivpiloten_python.ps1").read_text(encoding="utf-8")
 
-    assert "if ($currentTrack -eq $latestTrack)" in policy
-    assert 'TargetDir="' in policy
-    assert "elseif (-not $exe -and $latest)" in policy
+    assert "Automatisk versionsuppdatering av Python är avstängd." in policy
+    assert "if (-not $exe) { $latest = Get-LatestPythonVersion }" in policy
+    assert "if (-not $exe -and $latest) {" in policy
     assert "Install-Python $latest $null 0 $true" in policy
-    assert "Behåll befintlig Python och installera den nya serien bredvid." in policy
+    assert "if ($currentTrack -eq $latestTrack)" not in policy
+    assert "if ($WeeklyUpdate -and $exe -and $latest" not in policy
 
 
 def test_python_policy_is_in_the_release_update_manifest():
@@ -48,8 +49,11 @@ def test_package_updates_are_scheduled_weekly_not_run_on_each_start():
     bootstrap, later = package_block.split(") else (", 1)
     assert "pip install --upgrade" in bootstrap
     assert "pip install --upgrade" not in later
-    assert "if ($WeeklyUpdate -or -not $exe)" in policy
+    assert "if (-not $exe) { $latest = Get-LatestPythonVersion }" in policy
     assert "if ($WeeklyUpdate) {" in policy
+    assert "pip install --upgrade --prefer-binary" in policy
+    assert "Automatisk versionsuppdatering av Python är avstängd." in policy
+    assert "Python-versionen ändras inte automatiskt." in scheduler
     assert "-DaysOfWeek Monday" in scheduler
     assert "$nextMonday = $now.Date.AddDays($daysUntilMonday).AddHours(8)" in scheduler
     assert "if ($nextMonday -le $now) { $nextMonday = $nextMonday.AddDays(7) }" in scheduler
@@ -58,15 +62,19 @@ def test_package_updates_are_scheduled_weekly_not_run_on_each_start():
     assert "Interactive" in scheduler
 
 
-def test_python_itself_is_not_updated_on_normal_launcher_start():
+def test_python_itself_is_never_updated_automatically():
     launcher = (ROOT / "ArkivPiloten - Installera senaste Python och starta.bat")
     startup = launcher.read_text(encoding="utf-8")
     updater = (ROOT / "arkivpiloten_python.ps1").read_text(encoding="utf-8")
+    scheduler = (ROOT / "arkivpiloten_schedule_python_updates.ps1").read_text(
+        encoding="utf-8")
 
     assert "arkivpiloten_python.ps1" in startup
     assert "-WeeklyUpdate" not in startup
-    assert "if ($WeeklyUpdate -or -not $exe) { $latest = Get-LatestPythonVersion }" in updater
-    assert "if ($WeeklyUpdate -and $exe -and $latest -and $cur" in updater
+    assert "Python-versionen ändras inte automatiskt" in scheduler
+    assert "if ($WeeklyUpdate -and $exe -and $latest" not in updater
+    assert "if (-not $exe) { $latest = Get-LatestPythonVersion }" in updater
+    assert 'Install-Python $latest $null 0 $true' in updater
 
 
 def test_manual_addon_update_remains_available_in_help_dialog():

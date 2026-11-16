@@ -94,56 +94,11 @@ function Install-Python([string]$version, [string]$targetDir, [int]$allUsers,
 
 $exe = Find-Python
 $latest = $null
-# Python-version och internet kontrolleras bara i veckokörningen,
-# eller om Python saknas helt. Vanlig start återanvänder befintlig Python.
-if ($WeeklyUpdate -or -not $exe) { $latest = Get-LatestPythonVersion }
-$cur = Get-PythonVersion $exe
+# Automatisk versionsuppdatering av Python är avstängd. Internetkontroll och
+# installation görs bara om ingen fungerande Python finns vid bootstrap.
+if (-not $exe) { $latest = Get-LatestPythonVersion }
 
-if ($WeeklyUpdate -and $exe -and $latest -and $cur -and
-        ([version]$cur -lt [version]$latest)) {
-    $currentTrack = ($cur.Split('.')[0..1] -join '.')
-    $latestTrack = ($latest.Split('.')[0..1] -join '.')
-    $allUsers = 0
-    $machineRoot = $null
-    foreach ($programRoot in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-        if ($programRoot -and $exe.StartsWith(
-                $programRoot, [StringComparison]::OrdinalIgnoreCase)) {
-            $allUsers = 1
-            $machineRoot = $programRoot
-        }
-    }
-
-    if ($currentTrack -eq $latestTrack) {
-        # Patchuppdatering inom samma Python-serie: återanvänd exakt den
-        # befintliga installationen i stället för att skapa en kopia.
-        $installDir = Split-Path -Parent $exe
-    } else {
-        # En ny major/minor-serie har en egen standardmapp på Windows.
-        # Behåll befintlig Python och installera den nya serien bredvid.
-        $installRoot = if ($allUsers) { $machineRoot } else {
-            Join-Path $env:LOCALAPPDATA 'Programs\Python'
-        }
-        $installDir = Join-Path $installRoot ('Python' + ($latestTrack -replace '\.', ''))
-        [Console]::Error.WriteLine(
-            "Python $cur hittades; installerar nya serien $latest bredvid den.")
-    }
-
-    try {
-        $null = Install-Python $latest $installDir $allUsers $false
-        $candidate = Join-Path $installDir 'python.exe'
-        $candidateVersion = Get-PythonVersion $candidate
-        if (-not $candidateVersion -or [version]$candidateVersion -lt [version]$latest) {
-            $candidate = Find-Python
-            $candidateVersion = Get-PythonVersion $candidate
-        }
-        if ($candidateVersion -and [version]$candidateVersion -ge [version]$latest) {
-            $exe = $candidate
-        }
-    } catch {
-        [Console]::Error.WriteLine(
-            "Python kunde inte uppdateras: $($_.Exception.Message). Befintlig Python används.")
-    }
-} elseif (-not $exe -and $latest) {
+if (-not $exe -and $latest) {
     # Nyinstallation sker bara när ingen fungerande Python hittades alls.
     try {
         $null = Install-Python $latest $null 0 $true
@@ -186,7 +141,7 @@ if ($WeeklyUpdate) {
         if ($latest) {
             "Senaste Python: $latest" | Out-File -FilePath $LogPath -Append -Encoding utf8
         } else {
-            "Python-version kunde inte kontrolleras; paket uppdateras ändå." |
+            "Python-versionen uppdateras inte automatiskt; befintlig installation används." |
                 Out-File -FilePath $LogPath -Append -Encoding utf8
         }
 

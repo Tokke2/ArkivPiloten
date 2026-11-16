@@ -2013,10 +2013,11 @@ En `requirements.txt` bredvid `pdfsorter.py` listar Python-tilläggen. Från
 senaste version som är kompatibel med installerad Python. Appens egna
 programuppdateringar distribueras fortfarande enbart via GitHub Releases.
 **AC-N2:**
-- AC-2.1 Första installationen installerar tilläggen en gång; därefter
-  kontrolleras/uppdateras Python och tillägg måndagar kl. 08:00 via Windows
-  Schemaläggaren, inte vid varje appstart. En missad körning startar när
-  datorn är tillgänglig igen.
+- AC-2.1 Första installationen installerar Python om den saknas och
+  installerar tilläggen en gång. Python-tolkens version uppdateras inte
+  automatiskt. Därefter uppdaterar Windows Schemaläggaren endast Python-
+  tilläggen måndagar kl. 08:00, inte vid varje appstart. En missad körning
+  startar när datorn är tillgänglig igen.
 - AC-2.2 Tilläggen använder vald delad Python-miljö (ingen separat venv);
   andra program som använder samma Python-miljö kan därför påverkas.
 - AC-2.3 Appens start kan fortsätta om ett valfritt tillägg saknas och visar

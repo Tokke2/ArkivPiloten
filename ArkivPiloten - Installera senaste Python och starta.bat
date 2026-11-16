@@ -3,8 +3,8 @@ setlocal EnableExtensions EnableDelayedExpansion
 rem ======================================================================
 rem ArkivPiloten - ENDA startfilen (utokad installationsrunda 2026-10-16).
 rem 1) Hittar befintlig Python; latest kontrolleras bara om den saknas.
-rem 2) Python och tillagg uppdateras veckovis, mandagar kl. 08:00.
-rem    Forsta korningen installerar bara tillagg som appen behover.
+rem 2) Python-versionen andras inte automatiskt; installeras bara om den saknas.
+rem    Python-tillagg uppdateras veckovis, mandagar kl. 08:00.
 rem 3) Kontrollerar Tesseract OCR (winget, basta forsok).
 rem 4) Fragar om autostart (standard ja, kan stangas av).
 rem Fungerar fran valfri mapp/USB - allt utgar fran denna fils plats.

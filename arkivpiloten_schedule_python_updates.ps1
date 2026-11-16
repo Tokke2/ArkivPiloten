@@ -16,9 +16,11 @@ $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + 
 try {
     $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     $sameAction = $false
+    $taskDescription = 'Uppdaterar endast ArkivPilotens Python-paket varje måndag kl. 08:00; Python-versionen ändras inte automatiskt.'
     if ($existing -and $existing.Actions.Count -gt 0) {
         $sameAction = ($existing.Actions[0].Execute -eq $powershell -and
-                       $existing.Actions[0].Arguments -eq $arguments)
+                       $existing.Actions[0].Arguments -eq $arguments -and
+                       $existing.Description -eq $taskDescription)
     }
     if ($sameAction) { exit 0 }
 
@@ -45,7 +47,7 @@ try {
 
     Register-ScheduledTask -TaskName $taskName -Action $action `
         -Trigger $trigger -Settings $settings -Principal $principal `
-        -Description 'Kontrollerar och uppdaterar ArkivPilotens Python och tillägg varje måndag kl. 08:00.' `
+        -Description $taskDescription `
         -Force | Out-Null
 } catch {
     [Console]::Error.WriteLine(
