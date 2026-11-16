@@ -896,17 +896,15 @@ OS-platsen om appmappen är skrivskyddad (read-only USB/programkatalog).
 - AC-5.3 Launcher (.pyw) och `--diag` använder samma regel så att allt
   pekar på samma ställe. Verifierat: USB-simulering (tom appmapp),
   skrivskyddad mapp (fallback), migrering med rules.json.
-- AC-5.4 **EN enda startfil med tydligt namn (ANVÄNDARORDER 2026-10-06:
-  "inga bat-filer, endast en ... alltid installera senaste python,
-  tydligt namn"):** `PDF Sorter - Installera senaste Python och
-  starta.bat`. Den 1) söker Python (py-launcher → PATH utan
-  Store-stubben → per-user/Program Files-kataloger, högsta versionen
-  väljs), 2) jämför mot senaste stabila från python.org och installerar
-  UPPGRADERAR alltid vid behov (tyst, per user, inget admin: `/quiet
-  InstallAllUsers=0 PrependPath=1 Include_pip=1`), 3) `pip install -r
-  requirements.txt` tyst, 4) start via `pythonw.exe pdfsorter.pyw`
-  (konsolfritt). Äldre `starta_pdfsorter.bat` borttagen - exakt en
-  bat-fil finns. Felvägar: tydligt meddelande + manuell länk.
+- AC-5.4 **En ordinarie startfil per plattform; ingen fristående Python-
+  installations-BAT.** Windows-startfilen hittar Python (py-launcher → PATH
+  utan Store-stubben → installationsmappar). Bara om Python saknas frågar den
+  om senaste stabila versionen ska hämtas från python.org. Finns Python
+  frågar den aldrig och gör ingen nätverkskontroll eller versionsuppdatering.
+  macOS/Linux-installationsstarten erbjuder installation via systemets
+  pakethanterare endast om Python saknas. Veckoschemat uppdaterar bara Python-
+  paketen. En befintlig Python-version lämnas orörd; en frånvarande Python
+  installeras bara efter användarens uttryckliga ja.
 
 ### REQ-B1 (M) — Textextraktion från flera motorer
 Text ska kunna läsas ur en PDF via åtminstone en av `pymupdf` / `pypdf` /

@@ -62,7 +62,7 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 ## Quick start (Windows)
 
 1. Double-click **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — at ordinary launches it reuses installed Python without checking online; if none exists, it installs the latest stable version. The Python interpreter is not updated automatically. Required add-ons are bootstrapped once, then a Windows scheduled task updates only Python packages weekly on Monday at 08:00 (a missed run starts when the PC is available again). Packages use the selected shared Python environment, so other programs using that interpreter may also be affected. The launcher also checks/installs Tesseract OCR (best effort), runs the detailed status check only during first-time package setup, asks about autostart (default yes), and starts the app.
+   — it reuses installed Python without checking online. Only if Python is missing, the launcher offers to install the latest stable version; it never asks or updates Python when a usable interpreter is found. No separate Python-installer BAT is included in the release. Required add-ons are bootstrapped once, then a Windows scheduled task updates only Python packages weekly on Monday at 08:00 (a missed run starts when the PC is available again). Packages use the selected shared Python environment, so other programs using that interpreter may also be affected. The launcher also checks/installs Tesseract OCR (best effort), runs the detailed status check only during first-time package setup, asks about autostart (default yes), and starts the app.
 2. Done. The app starts without a console window, and will start with Windows minimized to the tray on future logins.
 
 ### Manual install
@@ -97,7 +97,7 @@ Download the launcher anywhere and double-click it — it finds the app folder o
 ./install.sh --uninstall  # remove autostart + shortcuts, keep your data
 ```
 
-`install.sh` installs everything in a local `.venv` (no sudo), checks Tkinter and Tesseract with per-distro hints, creates a desktop/app-menu shortcut, and builds a real `~/Applications/ArkivPiloten.app` on macOS. Autostart uses a LaunchAgent on macOS and XDG `autostart/*.desktop` on Linux (KDE, GNOME, XFCE, …) — both are verified after writing and repaired on the next start if they break.
+`install.sh` installs everything in a local `.venv`; if Python is missing it offers installation through the OS package manager and requests `sudo` only after you accept. It never updates an existing Python interpreter. It checks Tkinter and Tesseract with per-distro hints, creates a desktop/app-menu shortcut, and builds a real `~/Applications/ArkivPiloten.app` on macOS. Autostart uses a LaunchAgent on macOS and XDG `autostart/*.desktop` on Linux (KDE, GNOME, XFCE, …) — both are verified after writing and repaired on the next start if they break.
 
 > Tray on Linux needs a StatusNotifier host. GNOME requires the *AppIndicator* extension; without it the app still opens its window instead of hiding it.
 
@@ -169,7 +169,7 @@ git commit -am "Release 1.4.1" && git push
 
 ## Privacy & safety
 
-- 🔒 **Everything happens locally.** Sorting makes no network calls and there is no tracking. (Only the Windows installer — Python/pip downloads — and the donation buttons open external sites.)
+- 🔒 **Everything happens locally.** Sorting makes no network calls and there is no tracking. (Only a platform setup launcher, when Python or packages are missing, and the donation buttons open external sites.)
 - 🛡️ **Your files are safe:** never overwritten, moves can be undone, and unreadable files are left exactly where they were.
 - 💾 **Your data stays yours:** rules, settings and history are plain JSON in the app folder — open them, back them up, take them with you.
 
@@ -272,7 +272,7 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 ## Kom igång (Windows)
 
 1. Dubbelklicka på **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — vid vanliga starter återanvänds installerad Python utan nätverkskontroll; saknas Python installeras senaste stabila version. Python-tolkens version uppdateras inte automatiskt. Nödvändiga tillägg grundinstalleras en gång. Därefter uppdaterar en schemalagd Windows-uppgift endast Python-paketen varje måndag kl. 08:00; en missad körning startar när datorn och användarsessionen blir tillgängliga. Paketen använder vald delad Python-miljö och kan därför påverka andra program som använder samma interpreter. Startfilen kontrollerar/installerar även Tesseract OCR (bästa försök), kör detaljerad statuskontroll bara vid första paketinstallationen, frågar om autostart (standard ja) och startar appen.
+   — installerad Python återanvänds utan nätverkskontroll. Bara om Python saknas erbjuder startfilen att installera senaste stabila version; finns en fungerande Python frågar den aldrig och uppdaterar inte Python-tolken. En fristående Python-installations-BAT ingår inte i releasen. Nödvändiga tillägg grundinstalleras en gång. Därefter uppdaterar en schemalagd Windows-uppgift endast Python-paketen varje måndag kl. 08:00; en missad körning startar när datorn och användarsessionen blir tillgängliga. Paketen använder vald delad Python-miljö och kan därför påverka andra program som använder samma interpreter. Startfilen kontrollerar/installerar även Tesseract OCR (bästa försök), kör detaljerad statuskontroll bara vid första paketinstallationen, frågar om autostart (standard ja) och startar appen.
 2. Klart. Appen startar utan konsolfönster och alltid minimerad; systemfältet används om det kan visas säkert, annars aktivitetsfältet. Vid framtida inloggningar startar appen också minimerad.
 
 ### Uppgradera från gamla 1.0.0 / 1.1.0
@@ -307,7 +307,7 @@ Eller starta gränssnittet direkt med `python pdfsorter.py` (utan argument öppn
 ./install.sh --uninstall  # ta bort autostart + genvägar, behåll din data
 ```
 
-`install.sh` installerar allt i en lokal `.venv` (inget sudo), kontrollerar Tkinter och Tesseract med tips per distribution, skapar genväg på skrivbordet/i appmenyn och bygger en riktig `~/Applications/ArkivPiloten.app` på macOS. Autostarten använder LaunchAgent på macOS och XDG `autostart/*.desktop` på Linux (KDE, GNOME, XFCE, …) — båda verifieras efter skrivning och lagas vid nästa start om de går sönder.
+`install.sh` installerar allt i en lokal `.venv`. Om Python saknas erbjuder skriptet installation via operativsystemets pakethanterare och frågar efter `sudo` först efter ditt ja. En befintlig Python-tolk uppdateras aldrig. Skriptet kontrollerar Tkinter och Tesseract med tips per distribution, skapar genväg på skrivbordet/i appmenyn och bygger en riktig `~/Applications/ArkivPiloten.app` på macOS. Autostarten använder LaunchAgent på macOS och XDG `autostart/*.desktop` på Linux (KDE, GNOME, XFCE, …) — båda verifieras efter skrivning och lagas vid nästa start om de går sönder.
 
 > Systemfältet på Linux kräver en StatusNotifier-värd. På GNOME behövs tillägget *AppIndicator*; utan det öppnar appen fönstret i stället för att gömma sig.
 
@@ -381,7 +381,7 @@ git commit -am "Release 1.4.1" && git push
 
 ## Integritet & säkerhet
 
-- 🔒 **Allt sker lokalt.** Sorteringen gör inga nätverksanrop och det finns ingen spårning. (Bara Windows-installeraren — Python-/pip-hämtningar — och donationsknapparna öppnar externa sidor.)
+- 🔒 **Allt sker lokalt.** Sorteringen gör inga nätverksanrop och det finns ingen spårning. (Bara en plattforms start-/installationsfil, när Python eller tillägg saknas, och donationsknapparna öppnar externa sidor.)
 - 🛡️ **Dina filer är trygga:** de skrivs aldrig över, flyttar går att ångra, och oläsliga filer lämnas exakt där de låg.
 - 💾 **Din data förblir din:** regler, inställningar och historik är vanlig JSON i appmappen — öppna dem, säkerhetskopiera dem, ta dem med dig.
 

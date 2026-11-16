@@ -1,5 +1,6 @@
 param(
     [switch]$WeeklyUpdate,
+    [switch]$InstallIfMissing,
     [string]$RequirementsPath,
     [string]$LogPath,
     [string]$StatePath
@@ -94,11 +95,11 @@ function Install-Python([string]$version, [string]$targetDir, [int]$allUsers,
 
 $exe = Find-Python
 $latest = $null
-# Automatisk versionsuppdatering av Python är avstängd. Internetkontroll och
-# installation görs bara om ingen fungerande Python finns vid bootstrap.
-if (-not $exe) { $latest = Get-LatestPythonVersion }
+# Automatisk versionsuppdatering av Python är avstängd. Kontrollera/installera
+# bara efter uttryckligt anrop från startfilen när Python saknas.
+if (-not $exe -and $InstallIfMissing) { $latest = Get-LatestPythonVersion }
 
-if (-not $exe -and $latest) {
+if (-not $exe -and $InstallIfMissing -and $latest) {
     # Nyinstallation sker bara när ingen fungerande Python hittades alls.
     try {
         $null = Install-Python $latest $null 0 $true

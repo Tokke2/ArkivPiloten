@@ -57,6 +57,13 @@ jobs:
             fi
           fi
 
+          # Den fristående Python-installationsbatten ska inte ligga i releasen:
+          # installation erbjuds endast av plattformens ordinarie startfil.
+          if gh release view "$TAG" --json assets --jq '.assets[].name' | \
+              grep -Fxq 'Installera senaste Python.bat'; then
+            gh release delete-asset "$TAG" "Installera senaste Python.bat" --yes
+          fi
+
           gh release upload "$TAG" dist/ArkivPiloten.zip dist/SHA256SUMS.txt \
             dist/install_latest.py dist/uppgradera-arkivpiloten.bat \
             dist/uppgradera-arkivpiloten.sh \

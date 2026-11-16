@@ -2,10 +2,10 @@
 # ==========================================================================
 # ArkivPiloten - installation för macOS och Linux
 # ==========================================================================
-# Skapar en isolerad Python-miljö (.venv) i appmappen, installerar de
-# pinnade paketen från requirements.txt, kontrollerar Tesseract/Tkinter
-# och aktiverar autostart som standard. Inget installeras systembrett
-# och inga sudo-kommandon körs utan att du själv klistrar in dem.
+# Skapar en isolerad Python-miljö (.venv) i appmappen, installerar paketen
+# från requirements.txt, kontrollerar Tesseract/Tkinter och aktiverar
+# autostart som standard. Om Python saknas frågar skriptet först innan det
+# använder operativsystemets pakethanterare (sudo kan då efterfrågas).
 #
 #   ./install.sh                  aktiverar autostart
 #   ./install.sh --autostart      slår på autostart
@@ -17,7 +17,15 @@
 set -euo pipefail
 
 APPDIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-PYTHON="${PYTHON:-python3}"
+if [ -z "${PYTHON:-}" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON="python3"
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON="python"
+    else
+        PYTHON="python3"
+    fi
+fi
 AUTOSTART="yes"
 MAKE_BUNDLE=1
 MAKE_SHORTCUT=1
@@ -29,8 +37,9 @@ usage() {
 ArkivPiloten - installation för macOS och Linux
 
 Skapar en isolerad Python-miljö (.venv), installerar requirements.txt,
-kontrollerar Tesseract/Tkinter och kan slå på autostart. Inget installeras
-systembrett och inga sudo-kommandon körs.
+kontrollerar Tesseract/Tkinter och kan slå på autostart. Om Python saknas
+frågar skriptet innan det erbjuder installation via pakethanteraren; en
+befintlig Python-version ändras inte.
 
   ./install.sh                  aktiverar autostart som standard
   ./install.sh --autostart      slår på autostart
@@ -71,7 +80,48 @@ case "$(uname -s)" in
     *) die "Det här skriptet stöder macOS och Linux. På Windows: använd .bat-filen." ;;
 esac
 
-command -v "$PYTHON" >/dev/null 2>&1 || die "Hittar ingen '$PYTHON'. Installera Python 3.10+ och kör igen (eller sätt PYTHON=/sökväg/till/python3)."
+install_missing_python() {
+    say "Python saknas."
+    [ -r /dev/tty ] || die "Kör startfilen i en terminal för att kunna välja Python-installation."
+    read -r -p "Installera senaste Python 3 från systemets pakethanterare? [j/N] " answer </dev/tty
+    case "$answer" in
+        j|J|ja|JA|y|Y|yes|YES) ;;
+        *) die "Python installerades inte. Inget ändrades på systemet." ;;
+    esac
+
+    run_system_install() {
+        if [ "$(id -u)" -eq 0 ]; then
+            "$@"
+        else
+            command -v sudo >/dev/null 2>&1 || die "sudo saknas; installera Python manuellt och kör startfilen igen."
+            sudo "$@"
+        fi
+    }
+
+    case "$OS" in
+        macos)
+            command -v brew >/dev/null 2>&1 || die "Homebrew saknas. Installera Python från python.org och kör startfilen igen."
+            brew install python ;;
+        linux)
+            if command -v apt-get >/dev/null 2>&1; then
+                run_system_install apt-get update
+                run_system_install apt-get install -y python3 python3-venv python3-tk
+            elif command -v dnf >/dev/null 2>&1; then
+                run_system_install dnf install -y python3 python3-tkinter
+            elif command -v pacman >/dev/null 2>&1; then
+                run_system_install pacman -S --needed --noconfirm python python-pip tk
+            elif command -v zypper >/dev/null 2>&1; then
+                run_system_install zypper --non-interactive install python3 python3-venv python3-tk
+            else
+                die "Pakethanteraren stöds inte automatiskt. Installera Python 3.10+ manuellt och kör igen."
+            fi ;;
+    esac
+}
+
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+    install_missing_python
+fi
+command -v "$PYTHON" >/dev/null 2>&1 || die "Python kunde inte hittas efter installationen."
 
 "$PYTHON" - <<'PY' || die "Python 3.10 eller nyare krävs."
 import sys

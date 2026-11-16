@@ -2,8 +2,8 @@
 setlocal EnableExtensions EnableDelayedExpansion
 rem ======================================================================
 rem ArkivPiloten - ENDA startfilen (utokad installationsrunda 2026-10-16).
-rem 1) Hittar befintlig Python; latest kontrolleras bara om den saknas.
-rem 2) Python-versionen andras inte automatiskt; installeras bara om den saknas.
+rem 1) Hittar befintlig Python; fragar bara om installation om den saknas.
+rem 2) Python-versionen andras inte automatiskt.
 rem    Python-tillagg uppdateras veckovis, mandagar kl. 08:00.
 rem 3) Kontrollerar Tesseract OCR (winget, basta forsok).
 rem 4) Fragar om autostart (standard ja, kan stangas av).
@@ -34,7 +34,18 @@ if not exist "%PSSCRIPT%" (
 )
 for /f "delims=" %%i in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%PSSCRIPT%"') do set "PYEXE=%%i"
 if "%PYEXE%"=="" (
-    echo       Hittade eller kunde inte installera Python. Se felmeddelandet ovan.
+    echo       Python saknas pa systemet.
+    choice /C JN /N /M "Vill du installera senaste Python nu? [J/N] "
+    if errorlevel 2 (
+        echo       Ingen Python installerades. Avslutar utan att andra systemet.
+        pause
+        exit /b 1
+    )
+    echo       Hamtar senaste stabila Python fran python.org ...
+    for /f "delims=" %%i in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%PSSCRIPT%" -InstallIfMissing') do set "PYEXE=%%i"
+)
+if "%PYEXE%"=="" (
+    echo       Python kunde inte installeras. Se felmeddelandet ovan.
     pause
     exit /b 1
 )
