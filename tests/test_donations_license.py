@@ -44,6 +44,17 @@ def test_donation_view_has_fixed_qr_and_payment_buttons_only():
     assert "no feature is unlocked by donating" not in str(P.App.STOD_TEXT)
 
 
+def test_donation_dialog_is_reachable_from_the_help_menu():
+    help_menu = next(menu for menu in P.meny_spec()
+                     if menu["titel"] == "Hjälp")
+    donation_item = next(item for item in help_menu["poster"]
+                         if item.get("id") == "stod")
+
+    assert donation_item["text"] == "Stöd projektet 💖"
+    assert donation_item["atgard"] == "_visa_stod"
+    assert callable(getattr(P.App, donation_item["atgard"]))
+
+
 def test_donation_page_is_not_shipped_separately():
     source = (ROOT / "pdfsorter_system.py").read_text(encoding="utf-8")
     installer = (ROOT / "tools" / "install_latest.py").read_text(encoding="utf-8")

@@ -7393,6 +7393,8 @@ def meny_spec() -> List[Dict[str, Any]]:
         {"titel": "Hjälp", "poster": [
             {"id": "hjalp", "text": "Användarhjälp", "snabb": "F1",
              "typ": "flik", "flik": "tab_help"},
+            {"id": "stod", "text": "Stöd projektet 💖",
+             "atgard": "_visa_stod"},
             {"id": "kortkommandon", "text": "Tangentbordsgenvägar…",
              "atgard": "_show_shortcuts"},
             {"typ": "avdelare"},
@@ -14058,8 +14060,10 @@ class App:
     STOD_TEXT = {
         "sv": {
             "title": "Stöd ArkivPiloten 💚",
-            "intro": "ArkivPiloten är gratis och utan reklam. Frivilliga bidrag "
-                     "hjälper till att hålla utveckling och underhåll igång.",
+            "intro": "ArkivPiloten hjälper dig få ordning på dina PDF:er — utan "
+                     "reklam och prenumeration. Om appen sparar tid för dig får "
+                     "du gärna stötta fortsatt utveckling. Helt frivilligt; "
+                     "appen förblir gratis.",
             "swish": "Swish · skanna QR-koden",
             "paypal": "💙 PayPal", "kofi": "☕ Ko-fi",
             "privacy": "Swish-mottagaren är fast inbyggd. Betalningen hanteras "
@@ -14070,8 +14074,10 @@ class App:
         },
         "en": {
             "title": "Support ArkivPiloten 💚",
-            "intro": "ArkivPiloten is free and ad-free. Voluntary donations "
-                     "help keep development and maintenance going.",
+            "intro": "ArkivPiloten helps you keep your PDFs organised — with no "
+                     "ads or subscriptions. If the app saves you time, you are "
+                     "welcome to support its continued development. Entirely "
+                     "optional; the app stays free.",
             "swish": "Swish · scan the QR code",
             "paypal": "💙 PayPal", "kofi": "☕ Ko-fi",
             "privacy": "The Swish recipient is fixed in the app. Payments "
