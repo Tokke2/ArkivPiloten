@@ -10713,7 +10713,8 @@ class App:
         self.cat_meta = meta
         meta.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 8))
         meta.columnconfigure(1, weight=1)
-        ttk.Label(meta, text="Mappnamn:", style="Card.TLabel").grid(
+        ttk.Label(meta, text="Arkivmapp i Utforskaren:",
+                  style="Card.TLabel").grid(
             row=0, column=0, sticky="w", padx=12, pady=(12, 0))
         self.var_folder = tk.StringVar()
         ttk.Entry(meta, textvariable=self.var_folder).grid(
@@ -10735,6 +10736,12 @@ class App:
             row=1, column=3, padx=(0, 4), pady=(10, 0))
         ttk.Button(meta, text="Spara", command=self._cat_save_subpath).grid(
             row=1, column=4, padx=(0, 12), pady=(10, 0))
+        ttk.Label(meta,
+                  text="Byt arkivmappens namn och tryck Spara för att döpa om den "
+                       "i Utforskaren; befintliga filer följer med.",
+                  style="CardMuted.TLabel", wraplength=560, justify="left").grid(
+                      row=7, column=1, columnspan=4, sticky="w", padx=8,
+                      pady=(8, 0))
         ttk.Label(meta,
                   text="Relativt till kategoriens datum-/årsmapp; skapas vid första sorteringen.",
                   style="CardMuted.TLabel").grid(
@@ -11997,12 +12004,93 @@ class App:
                 text=f"olika stödord innan filen flyttas hit "
                      f"(nivån kräver {nivå})")
 
+    def _rename_category_archive_folder(self, old_folder: str,
+                                        new_folder: str) -> Tuple[bool, str]:
+        """Safely rename one category's physical archive folder, if present.
+
+        Missing old folders are allowed: this covers a folder already renamed
+        in Explorer, so saving its new name simply updates the app's mapping.
+        Existing destination folders are never merged or overwritten.
+        """
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if not output:
+            return True, ""
+        root = Path(output).expanduser()
+        old_path = root / safe_folder_name(old_folder)
+        new_path = root / safe_folder_name(new_folder)
+        try:
+            root_resolved = root.resolve()
+            if old_path.parent.resolve() != root_resolved:
+                return False, "Den gamla arkivmappen ligger inte direkt i arkivet."
+            if new_path.parent.resolve() != root_resolved:
+                return False, "Den nya arkivmappen ligger inte direkt i arkivet."
+            if old_path.is_symlink():
+                return False, "Den gamla arkivmappen är en genväg/länk; den ändrades inte."
+
+            old_norm = os.path.normcase(os.path.abspath(str(old_path)))
+            new_norm = os.path.normcase(os.path.abspath(str(new_path)))
+            if old_norm == new_norm:
+                # Handle case-only renames on case-insensitive filesystems.
+                if str(old_path) == str(new_path) or not old_path.is_dir():
+                    return True, ""
+                temporary = old_path.with_name(
+                    f".{old_path.name}.rename-{os.getpid()}-{time.time_ns()}")
+                old_path.rename(temporary)
+                try:
+                    temporary.rename(new_path)
+                except OSError:
+                    try:
+                        temporary.rename(old_path)
+                    except OSError:
+                        pass
+                    raise
+                return True, ""
+
+            if not old_path.exists():
+                return True, ""
+            if not old_path.is_dir():
+                return False, "Det gamla namnet finns, men det är inte en mapp."
+            if new_path.exists() or new_path.is_symlink():
+                return False, (f"Mappen ‘{new_path.name}’ finns redan. "
+                               "Inget ändrades; mappar slås aldrig ihop automatiskt.")
+            old_path.rename(new_path)
+            return True, ""
+        except OSError as exc:
+            return False, f"Mappen kunde inte döpas om: {exc}"
+
     def _cat_save_meta(self) -> None:
         name = self._selected_cat()
         cat = self.rules.get(name) if name else None
         if not cat:
             return
-        cat["folder"] = safe_folder_name(self.var_folder.get() or cat["name"])
+        old_folder = safe_folder_name(cat.get("folder") or cat["name"])
+        new_folder = safe_folder_name(self.var_folder.get() or cat["name"])
+        if old_folder != new_folder:
+            if self._busy or getattr(self, "_rescanning", False):
+                self.messagebox.showwarning(
+                    APP_NAME,
+                    "Vänta tills sortering och omskanning är klara innan du "
+                    "byter namn på arkivmappen.", parent=self.root)
+                self.var_folder.set(old_folder)
+                return
+            if not self.messagebox.askyesno(
+                    APP_NAME,
+                    f"Byta arkivmapp från ‘{old_folder}’ till ‘{new_folder}’?\n\n"
+                    "Om den gamla mappen finns döps den om i Utforskaren. "
+                    "Alla årsmappar, undermappar och filer följer med. "
+                    "Befintliga mappar slås aldrig ihop.",
+                    parent=self.root):
+                self.var_folder.set(old_folder)
+                self.var_cat_enabled.set(bool(cat.get("enabled", True)))
+                return
+            ok, error = self._rename_category_archive_folder(
+                old_folder, new_folder)
+            if not ok:
+                self.messagebox.showerror(APP_NAME, error, parent=self.root)
+                self.var_folder.set(old_folder)
+                self.var_cat_enabled.set(bool(cat.get("enabled", True)))
+                return
+        cat["folder"] = new_folder
         cat["enabled"] = bool(self.var_cat_enabled.get())
         self.rules.save()
         self.var_folder.set(cat["folder"])
