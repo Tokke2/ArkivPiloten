@@ -662,6 +662,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "last_update_check_ok": True,  # falskt -> kortare omförsök (nätet svek)
     "last_update_seen": "",       # senaste versionen GitHub svarade
     "silent_restart": True,       # starta om tyst när en version installerats
+    "pending_review_paths": [],   # återställ granskningskö efter updater-omstart
     "cache_cleanup_enabled": True, # smart diskcache-rensning dagligen + vid avslut
     "last_cache_cleanup": "",     # ISO-tid för senaste smarta rensningen
     "ui_language": "sv",           # 1.1.0: gränssnittsspråk sv | en

@@ -7606,12 +7606,14 @@ def uppdateringsplan(info: Dict[str, Any], manual: bool,
 
 
 def omstart_kommando(rot: Path, exe: str = "", plattform: str = "",
-                     dold: bool = False, bevaka_igen: bool = False) -> List[str]:
+                     dold: bool = False, bevaka_igen: bool = False,
+                     restart_after_update: bool = False) -> List[str]:
     """Kommandot som startar om appen efter en uppdatering.
 
-    ``dold`` startar det nya fönstret i systemfältet (appen låg där när
-    uppdateringen kom), ``bevaka_igen`` slår på bevakningen direkt, så att
-    en pågående bevakning inte tystnar av omstarten. På Windows väljs
+    ``dold`` startar det nya fönstret i systemfältet, ``bevaka_igen`` slår
+    på bevakningen direkt, så att en pågående bevakning inte tystnar av
+    omstarten. ``restart_after_update`` visar det nya fönstret efter byte.
+    På Windows väljs
     pythonw.exe när det finns - en tyst omstart ska inte blinka till med
     en svart konsol.
     """
@@ -7633,13 +7635,16 @@ def omstart_kommando(rot: Path, exe: str = "", plattform: str = "",
         cmd.append("--tray")
     if bevaka_igen:
         cmd.append("--resume-watch")
+    if restart_after_update:
+        cmd.append("--restart-after-update")
     return cmd
 
 
 class App:
     def __init__(self, start_hidden: bool = False,
                  instanslås: Optional[Any] = None,
-                 resume_watch: bool = False) -> None:
+                 resume_watch: bool = False,
+                 restart_after_update: bool = False) -> None:
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk, self.ttk = tk, ttk
         self.filedialog, self.messagebox, self.simpledialog = filedialog, messagebox, simpledialog
@@ -7717,6 +7722,7 @@ class App:
         #: Startad av omstarten efter en uppdatering: bevakningen ska igång
         #: igen, annars tystnar den av en uppdatering mitt i natten.
         self._resume_watch = bool(resume_watch)
+        self._restart_after_update = bool(restart_after_update)
         #: Vakten för tyst versionssökning (startas en gång).
         self._uppdateringsvakt = False
         #: En smart diskcache-rensning kör just nu.
@@ -7836,6 +7842,8 @@ class App:
         self._refresh_categories()
         self._refresh_history()
         self._refresh_queue()
+        if self.settings.get("pending_review_paths"):
+            self.root.after(350, self._restore_pending_review_queue)
 
         # 1.1.0: engelskt gränssnitt om ui_language=en (byggs svenskt,
         # översätts här). Schemakontrollen tickar var 30:e sekund.
@@ -7925,7 +7933,18 @@ class App:
         # Alla normala starter minimeras. OS-autostarten använder också
         # --tray; en andra start kan ändå visa det här fönstret igen.
         varför = "--tray" if start_hidden else "alltid minimerad"
-        if not self.tray:
+        if self._restart_after_update:
+            try:
+                self.root.deiconify()
+                _maximize_window(self.root)
+                self.root.lift()
+                self.root.focus_force()
+                self.visible = True
+                self._h("fönster", "Appen öppnades efter automatisk omstart "
+                        "från uppdateraren")
+            except Exception as exc:
+                self._fel(exc, "visa efter uppdatering")
+        elif not self.tray:
             self._h("fönster", "Systemfältsikonen saknas - startar "
                     "minimerad i aktivitetsfältet", "warn")
             self.root.iconify()
@@ -13859,13 +13878,13 @@ class App:
                 self._log(msg, "ok")
                 if plan["omstart"] == "tyst":
                     self._h("uppdatering",
-                            "Uppdateringen är klar; appen startar om efter "
-                            "en nedräkning på 10 sekunder.", "ok")
-                    self._visa_omstart_nedrakning()
-                elif self.messagebox.askyesno(
-                        APP_NAME, msg + "\n\nStarta om appen nu för att köra "
-                        "den nya versionen? Om du väljer ja visas en "
-                        "nedräkning på 10 sekunder.", parent=self.root):
+                            "Uppdateringen är klar; appen startar om automatiskt "
+                            "med den nya versionen.", "ok")
+                    self._planera_omstart(tyst=True)
+                else:
+                    self._h("uppdatering",
+                            "Uppdateringen är klar; appen startar om automatiskt "
+                            "om 10 sekunder.", "ok")
                     self._visa_omstart_nedrakning()
             self.root.after(0, done)
         threading.Thread(target=install, daemon=True,
@@ -13912,11 +13931,6 @@ class App:
             except Exception:
                 pass
 
-        def cancel() -> None:
-            close_dialog()
-            self._h("uppdatering", "Automatisk omstart avbröts; "
-                    "den nya versionen används nästa gång appen startas.", "warn")
-
         def restart_now() -> None:
             close_dialog()
             self._planera_omstart(tyst=True)
@@ -13924,10 +13938,9 @@ class App:
         ttk.Button(actions,
                    text="Restart now" if english else "Starta om nu",
                    style="Accent.TButton", command=restart_now).grid(
-                       row=0, column=0, sticky="e", padx=(0, 8))
-        ttk.Button(actions, text="Cancel restart" if english else "Avbryt omstart",
-                   command=cancel).grid(row=0, column=1, sticky="e")
-        dialog.protocol("WM_DELETE_WINDOW", cancel)
+                       row=0, column=0, sticky="e")
+        # The update restart is automatic; closing the window must not cancel it.
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
 
         def tick() -> None:
             if getattr(self, "_update_restart_state", None) is not state:
@@ -13947,7 +13960,8 @@ class App:
                 try:
                     self.root.after(1000, tick)
                 except Exception:
-                    cancel()
+                    close_dialog()
+                    self._planera_omstart(tyst=True)
                 return
             remaining = state["remaining"]
             countdown = (f"Restarting in {remaining} seconds…" if english else
@@ -13956,7 +13970,8 @@ class App:
             try:
                 self.root.after(1000, tick)
             except Exception:
-                cancel()
+                close_dialog()
+                self._planera_omstart(tyst=True)
 
         countdown = (f"Restarting in {state['remaining']} seconds…" if english else
                      f"Appen startar om om {state['remaining']} sekunder…")
@@ -13964,7 +13979,8 @@ class App:
         try:
             self.root.after(1000, tick)
         except Exception:
-            cancel()
+            close_dialog()
+            self._planera_omstart(tyst=True)
 
     def _kan_starta_om(self) -> Tuple[bool, str]:
         """Får appen startas om nu utan att tappa något?"""
@@ -13972,17 +13988,19 @@ class App:
             return False, "appen avslutas redan"
         if self._busy:
             return False, "en sortering pågår"
+        if getattr(self, "_rescanning", False):
+            return False, "en omskanning pågår"
         if self._review_is_open():
             return False, "granskningsrutan är öppen"
-        if self.queue:
-            return False, f"{len(self.queue)} filer väntar på granskning"
+        # Pending queue paths are persisted and reanalyzed by the new process.
+        # Do not hold an installed update hostage until every review is done.
         return True, ""
 
     def _planera_omstart(self, tyst: bool = True) -> None:
         """Starta om nu, eller så snart appen är ledig.
 
-        En uppdatering får aldrig slita bort en pågående sortering eller en
-        granskningskö: då väntar omstarten och görs när arbetet är klart.
+        En uppdatering får aldrig avbryta en sortering, omskanning eller
+        öppen granskningsdialog. Köade filer sparas och återställs efteråt.
         """
         ok, orsak = self._kan_starta_om()
         if ok:
@@ -14015,11 +14033,34 @@ class App:
             pass
 
     def _spara_fore_omstart(self) -> None:
-        """Spara det som annars bara finns i minnet när fönstret rivs."""
+        """Spara inställningar och väntande granskningar före processbyte."""
         try:
             self._collect_settings()
         except Exception as exc:
             session_error("uppdatering", exc)
+        try:
+            # Köbeslut finns bara i minnet. Spara filvägar så de kan läsas om
+            # och återställas efter att uppdateraren startat den nya processen.
+            paths = list(self.settings.get("pending_review_paths", []) or [])
+            paths.extend(str(item.path) for item in getattr(self, "queue", [])
+                         if getattr(item, "path", None) is not None)
+            unique = []
+            seen = set()
+            for raw in paths:
+                try:
+                    path = Path(raw).expanduser().resolve()
+                    key = os.path.normcase(str(path))
+                    if key not in seen and path.is_file():
+                        seen.add(key)
+                        unique.append(str(path))
+                except (OSError, TypeError, ValueError):
+                    continue
+            self.settings["pending_review_paths"] = unique
+            save_settings(self.settings)
+        except Exception as exc:
+            session_error("uppdatering", exc)
+            self._log("Granskningskön kunde inte sparas före omstarten: "
+                      f"{exc}", "warn")
         try:
             if self.watcher:
                 self.watcher.stop()
@@ -14029,6 +14070,65 @@ class App:
         except Exception as exc:
             session_error("uppdatering", exc)
 
+    def _restore_pending_review_queue(self) -> None:
+        """Reanalyze persisted queue paths so an update restart loses no work."""
+        raw = self.settings.get("pending_review_paths", [])
+        if not isinstance(raw, list) or not raw:
+            return
+        paths = []
+        seen = set()
+        for value in raw:
+            try:
+                path = Path(str(value)).expanduser().resolve()
+                key = os.path.normcase(str(path))
+                if key not in seen and path.is_file():
+                    seen.add(key)
+                    paths.append(path)
+            except (OSError, TypeError, ValueError):
+                continue
+
+        def worker() -> None:
+            decisions = []
+            for path in paths:
+                try:
+                    decision = self.engine.analyze(path)
+                except Exception as exc:
+                    decision = Decision(
+                        path, Extraction(path=path), [], "ask",
+                        f"Kunde inte läsa om efter uppdatering: {exc}")
+                # Återställda objekt kräver fortfarande ett uttryckligt
+                # användarval, även om nya regler nu skulle auto-matcha dem.
+                decision.status = "ask"
+                decision.reason = ("Återställd från granskningskön efter "
+                                   "uppdatering; välj kategori igen.")
+                decisions.append(decision)
+            self._post(lambda: finish(decisions))
+
+        def finish(decisions: List[Decision]) -> None:
+            added = 0
+            for decision in decisions:
+                key = os.path.normcase(os.path.abspath(str(decision.path)))
+                if key not in self._queued_paths:
+                    self._queued_paths.add(key)
+                    self.queue.append(decision)
+                    added += 1
+            self.settings["pending_review_paths"] = []
+            try:
+                save_settings(self.settings)
+            except Exception as exc:
+                session_error("uppdatering", exc)
+            self._refresh_queue()
+            if added:
+                self._log(f"Återställde {added} filer från granskningskön "
+                          "efter uppdateringen.", "info")
+
+        if not paths:
+            self.settings["pending_review_paths"] = []
+            save_settings(self.settings)
+            return
+        threading.Thread(target=worker, daemon=True,
+                         name="återställ-granskningskö").start()
+
     def _restart_app(self, tyst: bool = False) -> bool:
         """Starta om appen. ``tyst`` = inga frågor, ingen konsol, inget hopp.
 
@@ -14036,11 +14136,14 @@ class App:
         släpps först - annars skulle den nya instansen tro att appen redan
         kör och bara be den döende processen visa fönstret.
         """
-        dold = True
+        # An update restart should reopen the window so it is unmistakable
+        # that the new process started; normal app launches stay minimized.
+        dold = False
         bevaka = bool(self.watcher and self.watcher.running)
         rot = Path(__file__).resolve().parent
-        cmd = omstart_kommando(rot, sys.executable or "", dold=dold,
-                               bevaka_igen=bevaka)
+        cmd = omstart_kommando(
+            rot, sys.executable or "", dold=dold, bevaka_igen=bevaka,
+            restart_after_update=True)
         self._spara_fore_omstart()
         lås = self.instanslås
         if lås is not None:
@@ -15300,7 +15403,8 @@ def _start_gui_without_console(argv: List[str]) -> bool:
     """
     if (not sys.platform.startswith("win")
             or os.environ.get(_GUI_CONSOLE_HANDOFF_ENV)
-            or any(arg not in ("--tray", "--resume-watch") for arg in argv)):
+            or any(arg not in ("--tray", "--resume-watch",
+                                "--restart-after-update") for arg in argv)):
         return False
     exe = Path(sys.executable or "python.exe")
     if exe.name.lower() == "pythonw.exe":
@@ -15399,8 +15503,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--tray", action="store_true",
                    help="Starta alltid minimerad (systemfältet om möjligt, annars aktivitetsfältet)")
     p.add_argument("--resume-watch", action="store_true",
-                   help="Starta bevakningen direkt (används av appens egen "
-                        "omstart efter en uppdatering)")
+                   help="Starta bevakningen direkt efter omstart")
+    p.add_argument("--restart-after-update", action="store_true",
+                   help="Visa appfönstret efter automatisk uppdateringsomstart")
     p.add_argument("--install-autostart", action="store_true",
                    help="Slå på autostart med operativsystemet och avsluta")
     p.add_argument("--remove-autostart", action="store_true",
@@ -15651,7 +15756,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"{args.tray}, återupptar bevakningen: {args.resume_watch})")
     try:
         App(start_hidden=args.tray, instanslås=lås,
-            resume_watch=args.resume_watch).run()
+            resume_watch=args.resume_watch,
+            restart_after_update=args.restart_after_update).run()
     finally:
         lås.release()
     session_log("avslut", "main() avslutas normalt")

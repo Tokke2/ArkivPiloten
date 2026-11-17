@@ -136,6 +136,12 @@ def test_restart_command_can_stay_hidden_and_resume_watching(tmp_path):
     assert cmd[2:] == ["--tray", "--resume-watch"]
 
 
+def test_update_restart_reopens_the_window(tmp_path):
+    cmd = P.omstart_kommando(
+        tmp_path, "/usr/bin/python3", "linux", restart_after_update=True)
+    assert cmd[-1] == "--restart-after-update"
+
+
 def test_windows_restart_prefers_pythonw_and_pyw(tmp_path):
     (tmp_path / "pdfsorter.py").write_text("", encoding="utf-8")
     (tmp_path / "pdfsorter.pyw").write_text("", encoding="utf-8")
@@ -168,7 +174,7 @@ def test_restart_is_refused_while_work_is_in_flight():
     assert _App()._kan_starta_om() == (True, "")
     assert _App(_busy=True)._kan_starta_om()[0] is False
     assert _App(_review_dialog=object())._kan_starta_om()[0] is False
-    assert _App(queue=[1, 2])._kan_starta_om()[0] is False
+    assert _App(queue=[1, 2])._kan_starta_om() == (True, "")
     assert _App(_quitting=True)._kan_starta_om()[0] is False
     assert "sortering" in _App(_busy=True)._kan_starta_om()[1]
 
@@ -283,7 +289,9 @@ def test_saving_the_tab_keeps_the_silent_restart_setting():
 def test_cli_can_resume_watching_after_a_restart():
     rot = (_ROT / "pdfsorter.py").read_text(encoding="utf-8")
     assert '"--resume-watch"' in rot
+    assert '"--restart-after-update"' in rot
     assert "resume_watch=args.resume_watch" in rot
+    assert "restart_after_update=args.restart_after_update" in rot
     assert "instanslås=lås" in rot
 
 
@@ -483,15 +491,15 @@ def _tyst_uppdatering(monkeypatch, app, resultat=(True, "Installerat")):
     return app
 
 
-def test_silent_update_installs_and_shows_restart_countdown(
+def test_silent_update_installs_and_schedules_automatic_restart(
         tmp_path, monkeypatch):
     monkeypatch.setenv("PDFSORTER_HOME", str(tmp_path / "data"))
     app = _tyst_uppdatering(monkeypatch, _Sken())
     app._update_prompt(_info_med_ny_version(), manual=False)
     assert app.messagebox.fragor == []          # ingen fråga
     assert app.messagebox.varningar == []
-    assert app.countdown_calls == 1              # synlig dialog efter installation
-    assert app.omstarter == []                   # inte före nedräkningen
+    assert app.countdown_calls == 0
+    assert app.omstarter == [True]               # restart sker automatiskt
     assert app.package_updates == []             # paketuppdatering sker veckovis
     assert app.settings["last_update_check"]    # tiden sparad
     assert any("Tyst uppdatering" in t for _n, t in app.handelser)
@@ -507,15 +515,14 @@ def test_failed_silent_update_is_logged_not_shown(tmp_path, monkeypatch):
     assert any("nätet svek" in t for _n, t in app.gui + app.handelser)
 
 
-def test_manual_install_asks_and_then_restarts(tmp_path, monkeypatch):
+def test_manual_install_asks_once_then_restarts_automatically(tmp_path, monkeypatch):
     monkeypatch.setenv("PDFSORTER_HOME", str(tmp_path / "data"))
     app = _tyst_uppdatering(monkeypatch, _Sken())
     app.settings["silent_restart"] = False
     app._update_prompt(_info_med_ny_version(), manual=True)
-    assert len(app.messagebox.fragor) == 2      # 1) installera? 2) starta om?
-    assert "Starta om" in app.messagebox.fragor[1]
-    assert app.countdown_calls == 1
-    assert app.omstarter == []                   # omstart efter nedräkningen
+    assert len(app.messagebox.fragor) == 1      # only confirm installation
+    assert app.countdown_calls == 1              # optional visible countdown
+    assert app.omstarter == []                   # then restarts automatically
 
 
 def test_silent_check_without_new_version_only_logs(tmp_path, monkeypatch):
@@ -696,6 +703,8 @@ def test_restart_releases_the_lock_then_starts_the_new_process(
     cmd = händelser[1][1]
     script_name = "pdfsorter.pyw" if os.name == "nt" else "pdfsorter.py"
     assert cmd[0] and Path(cmd[1]).name == script_name
+    assert "--restart-after-update" in cmd
+    assert "--tray" not in cmd
     assert app.root.riven is True
 
 
