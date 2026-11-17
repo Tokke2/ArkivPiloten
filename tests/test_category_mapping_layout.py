@@ -18,7 +18,9 @@ def test_category_mapping_has_top_selector_and_two_role_specific_fields():
     assert '"write", lambda *_args: self._on_cat_select()' in source
     assert "self.default_keyword_combo = ttk.Combobox(" in source
     assert 'cols = ("word", "kind", "weight", "whole", "hits")' in source
-    assert 'columns=("folder",), show="headings"' in source
+    assert 'columns=("folder", "words"), show="headings"' in source
+    assert 'text="KOPPLADE STÖDORD"' in source
+    assert 'values=(folder, ", ".join(mapped) or "—")' in source
     assert 'text="SPARDA STÖDORD"' in source
     assert 'text="SKAPADE MAPPAR"' in source
     assert 'text="+ Skapa mapp…"' in source
@@ -264,3 +266,46 @@ def test_selecting_support_word_shows_its_saved_folder_mapping():
 
     assert "invoice" in app.lbl_subfolder_map_status.text
     assert "Invoices/Received" in app.lbl_subfolder_map_status.text
+
+
+def test_folder_list_displays_which_saved_words_are_mapped_to_each_folder():
+    class Tree:
+        def __init__(self):
+            self.rows = []
+
+        def get_children(self):
+            return ()
+
+        def insert(self, _parent, _index, iid, values):
+            self.rows.append((iid, values))
+
+    class Rules:
+        def get(self, _name):
+            return {
+                "keywords": [
+                    {"text": "Utbetalningar"}, {"text": "faktura"},
+                ],
+                "subfolder_keyword_map": {
+                    "utbetalningar": "Bank/Utbetalningar",
+                    "faktura": "Fakturor",
+                },
+            }
+
+    class Label:
+        def configure(self, **kwargs):
+            self.text = kwargs["text"]
+
+    app = object.__new__(P.App)
+    app.subfolder_map_tree = Tree()
+    app._selected_cat = lambda: "Supplier"
+    app.rules = Rules()
+    app._subfolder_mapping_options = lambda _cat: [
+        "Bank/Utbetalningar", "Fakturor"]
+    app.lbl_subfolder_map_status = Label()
+
+    P.App._refresh_subfolder_map(app)
+
+    assert [values for _iid, values in app.subfolder_map_tree.rows] == [
+        ("Bank/Utbetalningar", "Utbetalningar"),
+        ("Fakturor", "faktura"),
+    ]

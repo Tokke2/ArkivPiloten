@@ -10593,6 +10593,7 @@ class App:
         ttk.Label(
             mapbody,
             text="Endast redan skapade mappar i vald kategori visas här. "
+                 "Kolumnen ‘KOPPLADE STÖDORD’ visar vad som sorteras till varje mapp. "
                  "Årsmappen visas inte; mappar som återkommer under olika år visas en gång.",
             style="CardMuted.TLabel", wraplength=580, justify="left",
         ).grid(row=0, column=0, sticky="ew", padx=T.INNER,
@@ -10602,10 +10603,14 @@ class App:
         map_view.columnconfigure(0, weight=1)
         map_view.rowconfigure(0, weight=1)
         self.subfolder_map_tree = ttk.Treeview(
-            map_view, columns=("folder",), show="headings",
+            map_view, columns=("folder", "words"), show="headings",
             selectmode="browse", height=12)
-        self.subfolder_map_tree.heading("folder", text="SKAPADE MAPPAR")
-        self.subfolder_map_tree.column("folder", width=240, anchor="w", stretch=True)
+        self.subfolder_map_tree.heading("folder", text="MAPP")
+        self.subfolder_map_tree.heading("words", text="KOPPLADE STÖDORD")
+        self.subfolder_map_tree.column(
+            "folder", width=140, minwidth=90, anchor="w", stretch=True)
+        self.subfolder_map_tree.column(
+            "words", width=190, minwidth=120, anchor="w", stretch=True)
         self.subfolder_map_tree.grid(row=0, column=0, sticky="nsew")
         self.theme.zebra(self.subfolder_map_tree)
         try:
@@ -10860,8 +10865,19 @@ class App:
             mapping = {}
             cat["subfolder_keyword_map"] = mapping
         folders = self._subfolder_mapping_options(cat)
+        keyword_labels = {
+            normalize(keyword.get("text", "")): str(keyword.get("text", ""))
+            for keyword in cat.get("keywords", [])
+            if normalize(keyword.get("text", ""))
+        }
         for index, folder in enumerate(folders):
-            tree.insert("", "end", iid=f"map-folder-{index}", values=(folder,))
+            mapped = sorted(
+                (keyword_labels.get(normalize(word), str(word))
+                 for word, target in mapping.items()
+                 if str(target).casefold() == folder.casefold()),
+                key=str.casefold)
+            tree.insert("", "end", iid=f"map-folder-{index}",
+                        values=(folder, ", ".join(mapped) or "—"))
         self.lbl_subfolder_map_status.configure(
             text=(f"{len(folders)} skapade mappar. Dra ett sparat stödord "
                   "från vänster eller markera ord och mapp och tryck Ctrl+M."))
