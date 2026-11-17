@@ -363,6 +363,8 @@ class Theme:
                      foreground=c["text"], font=self.f_head)
         self._cfg("CardTitle.TLabel", background=c["surface"],
                      foreground=c["text"], font=self.f_title)
+        self._cfg("CardHuge.TLabel", background=c["surface"],
+                     foreground=c["text"], font=self.f_huge)
         self._cfg("CardKey.TLabel", background=c["surface"],
                      foreground=c["text"], font=self.f_bold)
 

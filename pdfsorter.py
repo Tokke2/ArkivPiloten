@@ -4120,7 +4120,7 @@ except ImportError as _theme_err:   # noqa: F401
                          "Hero.TFrame", "Step.TFrame"):
                 self.style.configure(name)
             for name in ("Card.TLabel", "CardMuted.TLabel", "CardHead.TLabel",
-                         "CardTitle.TLabel", "CardKey.TLabel", "Muted.TLabel",
+                         "CardTitle.TLabel", "CardHuge.TLabel", "CardKey.TLabel", "Muted.TLabel",
                          "Faint.TLabel", "Title.TLabel", "Head.TLabel",
                          "Huge.TLabel", "Section.TLabel", "Ok.TLabel",
                          "Warn.TLabel", "Err.TLabel", "Status.TLabel",
@@ -13892,34 +13892,60 @@ class App:
 
     # -- omstart ----------------------------------------------------------
     def _visa_omstart_nedrakning(self) -> None:
-        """Show a visible 10-second countdown before restarting after update."""
+        """Show a clear, non-cancellable countdown before the updated app opens."""
         current = getattr(self, "_update_restart_state", None)
         if current is not None:
             return
         tk, ttk = self.tk, self.ttk
         dialog = tk.Toplevel(self.root)
         dialog._icon_ref = brand_window(dialog)
-        dialog.title("Uppdateringen är klar")
+        dialog.title("Uppdateringen är klar" if self.settings.get(
+            "ui_language", "sv") != "en" else "Update complete")
         dialog.transient(self.root)
         dialog.resizable(False, False)
-        dialog.geometry("500x205")
+        dialog.geometry("520x270")
         dialog.columnconfigure(0, weight=1)
         english = self.settings.get("ui_language", "sv") == "en"
-        title = ("Update installed" if english else "Uppdateringen är installerad")
-        ttk.Label(dialog, text=title, style="CardTitle.TLabel").grid(
-            row=0, column=0, sticky="w", padx=18, pady=(18, 6))
-        intro = ("The app will restart to finish the update." if english else
-                 "Appen startar om för att slutföra uppdateringen.")
-        ttk.Label(dialog, text=intro, style="CardMuted.TLabel",
-                  wraplength=460, justify="left").grid(
-                      row=1, column=0, sticky="w", padx=18, pady=(0, 8))
-        status = ttk.Label(dialog, style="CardTitle.TLabel", justify="left")
-        status.grid(row=2, column=0, sticky="w", padx=18, pady=(0, 12))
-        actions = ttk.Frame(dialog, style="CardInner.TFrame")
-        actions.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 16))
+
+        card = ttk.Frame(dialog, style="Card.TFrame")
+        card.grid(row=0, column=0, sticky="nsew", padx=16, pady=16)
+        card.columnconfigure(0, weight=1)
+        title = ("Update installed successfully" if english else
+                 "Uppdateringen är installerad")
+        ttk.Label(card, text=title, style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", padx=18, pady=(16, 4))
+        intro = ("ArkivPiloten will restart automatically to finish the update."
+                 if english else
+                 "ArkivPiloten startar om automatiskt för att börja använda "
+                 "den nya versionen.")
+        ttk.Label(card, text=intro, style="CardMuted.TLabel",
+                  wraplength=450, justify="left").grid(
+                      row=1, column=0, sticky="w", padx=18, pady=(0, 12))
+
+        timing = ttk.Frame(card, style="CardInner.TFrame")
+        timing.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 8))
+        timing.columnconfigure(1, weight=1)
+        countdown_value = ttk.Label(timing, style="CardHuge.TLabel", width=3,
+                                    anchor="center")
+        countdown_value.grid(row=0, column=0, rowspan=2, sticky="nsw",
+                             padx=(0, 14))
+        countdown_label = ttk.Label(timing, style="CardHead.TLabel")
+        countdown_label.grid(row=0, column=1, sticky="sw")
+        status = ttk.Label(timing, style="CardMuted.TLabel", justify="left",
+                           wraplength=360)
+        status.grid(row=1, column=1, sticky="nw")
+
+        note = ("You can close this notice; the restart will continue." if english
+                else "Du kan stänga rutan – omstarten fortsätter ändå.")
+        ttk.Label(card, text=note, style="CardMuted.TLabel",
+                  wraplength=450, justify="left").grid(
+                      row=3, column=0, sticky="w", padx=18, pady=(0, 12))
+        actions = ttk.Frame(card, style="CardInner.TFrame")
+        actions.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 16))
         actions.columnconfigure(0, weight=1)
         state = {"dialog": dialog, "remaining": UPDATE_RESTART_COUNTDOWN_SECONDS,
-                 "status": status, "english": english}
+                 "status": status, "countdown_value": countdown_value,
+                 "countdown_label": countdown_label, "english": english}
         self._update_restart_state = state
 
         def close_dialog() -> None:
@@ -13938,9 +13964,38 @@ class App:
         ttk.Button(actions,
                    text="Restart now" if english else "Starta om nu",
                    style="Accent.TButton", command=restart_now).grid(
-                       row=0, column=0, sticky="e")
-        # The update restart is automatic; closing the window must not cancel it.
-        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+                       row=0, column=1, sticky="e")
+        # Hiding the notice never cancels the automatic restart.
+        dialog.protocol("WM_DELETE_WINDOW", dialog.withdraw)
+
+        def show_countdown() -> None:
+            remaining = state["remaining"]
+            countdown_value.configure(text=str(remaining))
+            countdown_label.configure(
+                text=("seconds until restart" if english else
+                      "sekunder till omstart"))
+            status.configure(text=("The app will reopen with the update." if english
+                                   else "Appen öppnas igen med uppdateringen."))
+
+        def show_waiting(reason: str) -> None:
+            if english:
+                message = {
+                    "en sortering pågår": "Waiting for sorting to finish safely.",
+                    "en omskanning pågår": "Waiting for the rescan to finish safely.",
+                    "granskningsrutan är öppen": "Waiting for the review window to close.",
+                    "appen avslutas redan": "Waiting for the app to finish closing.",
+                }.get(reason, "Waiting until it is safe to restart.")
+                countdown_label.configure(text="Restarting as soon as it is safe")
+            else:
+                message = {
+                    "en sortering pågår": "Väntar på att sorteringen ska bli klar.",
+                    "en omskanning pågår": "Väntar på att omskanningen ska bli klar.",
+                    "granskningsrutan är öppen": "Väntar tills granskningsrutan stängs.",
+                    "appen avslutas redan": "Väntar på att appen ska avslutas.",
+                }.get(reason, "Väntar tills det är säkert att starta om.")
+                countdown_label.configure(text="Startar om så snart det är säkert")
+            countdown_value.configure(text="…")
+            status.configure(text=message)
 
         def tick() -> None:
             if getattr(self, "_update_restart_state", None) is not state:
@@ -13953,29 +14008,16 @@ class App:
                     close_dialog()
                     self._planera_omstart(tyst=True)
                     return
-                waiting = ("The countdown is complete; waiting until the app is idle."
-                           if english else
-                           f"Nedräkningen är klar; väntar tills appen är ledig ({reason}).")
-                status.configure(text=waiting)
-                try:
-                    self.root.after(1000, tick)
-                except Exception:
-                    close_dialog()
-                    self._planera_omstart(tyst=True)
-                return
-            remaining = state["remaining"]
-            countdown = (f"Restarting in {remaining} seconds…" if english else
-                         f"Appen startar om om {remaining} sekunder…")
-            status.configure(text=countdown)
+                show_waiting(reason)
+            else:
+                show_countdown()
             try:
                 self.root.after(1000, tick)
             except Exception:
                 close_dialog()
                 self._planera_omstart(tyst=True)
 
-        countdown = (f"Restarting in {state['remaining']} seconds…" if english else
-                     f"Appen startar om om {state['remaining']} sekunder…")
-        status.configure(text=countdown)
+        show_countdown()
         try:
             self.root.after(1000, tick)
         except Exception:

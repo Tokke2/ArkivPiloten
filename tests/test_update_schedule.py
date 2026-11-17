@@ -365,6 +365,8 @@ class _FakeWidget:
         self.options = kwargs
         self.text = kwargs.get("text", "")
         self.riven = False
+        self.protocols = {}
+        self.withdrawn = False
 
     def grid(self, **kwargs):
         pass
@@ -389,8 +391,11 @@ class _FakeWidget:
     def geometry(self, *args):
         pass
 
-    def protocol(self, *args):
-        pass
+    def protocol(self, name, callback):
+        self.protocols[name] = callback
+
+    def withdraw(self):
+        self.withdrawn = True
 
     def destroy(self):
         self.riven = True
@@ -643,13 +648,18 @@ def test_countdown_shows_ten_seconds_and_waits_if_app_is_busy(monkeypatch):
     assert P.UPDATE_RESTART_COUNTDOWN_SECONDS == 10
     state = app._update_restart_state
     assert state["remaining"] == 10
-    assert state["status"].text.endswith("10 sekunder…")
+    assert state["countdown_value"].text == "10"
+    assert state["countdown_label"].text == "sekunder till omstart"
+    assert "öppnas igen" in state["status"].text
+    created[0].protocols["WM_DELETE_WINDOW"]()
+    assert created[0].withdrawn is True  # closing the notice doesn't cancel
+    assert app._update_restart_state is state
 
     app._busy = True
     for _ in range(10):
         app.root.run_next()
     assert state["remaining"] == 0
-    assert "väntar" in state["status"].text
+    assert "väntar" in state["status"].text.lower()
     assert app.omstarter == []
     assert app._update_restart_state is state
 
