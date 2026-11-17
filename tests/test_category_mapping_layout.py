@@ -179,7 +179,8 @@ def test_dragging_support_word_to_folder_saves_mapping():
     assert app.rules.saved == 1
     assert folder_tree.tags["folder"] == ()
     assert app.root.options == {"cursor": ""}
-    assert "Koppling sparad" in app.lbl_subfolder_map_status.text
+    assert "Invoice" in app.lbl_subfolder_map_status.text
+    assert "mappen ‘Invoices’" in app.lbl_subfolder_map_status.text
 
 
 def test_folder_options_deduplicate_created_folders_across_years(tmp_path):
@@ -235,3 +236,31 @@ def test_default_support_word_selector_is_scoped_to_selected_category():
     assert "self.var_default_keyword = tk.StringVar()" in source
     assert "cat[\"default_keyword\"] = word" in source
     assert "self._refresh_subfolder_map()" in source
+
+
+def test_selecting_support_word_shows_its_saved_folder_mapping():
+    class KeywordTree:
+        def selection(self):
+            return ("invoice",)
+
+        def set(self, _row, _column):
+            return "Invoice"
+
+    class Rules:
+        def get(self, _name):
+            return {"subfolder_keyword_map": {"invoice": "Invoices/Received"}}
+
+    class Label:
+        def configure(self, **kwargs):
+            self.text = kwargs["text"]
+
+    app = object.__new__(P.App)
+    app.kw_tree = KeywordTree()
+    app.rules = Rules()
+    app._selected_cat = lambda: "Supplier"
+    app.lbl_subfolder_map_status = Label()
+
+    P.App._cat_map_show_selected_mapping(app)
+
+    assert "invoice" in app.lbl_subfolder_map_status.text
+    assert "Invoices/Received" in app.lbl_subfolder_map_status.text

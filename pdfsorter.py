@@ -10522,6 +10522,8 @@ class App:
                           pady=(T.INNER, 4))
         self.theme.zebra(self.kw_tree)
         self.kw_tree.bind("<Delete>", lambda e: self._kw_remove())
+        self.kw_tree.bind("<<TreeviewSelect>>",
+                          self._cat_map_show_selected_mapping, add="+")
         self.kw_tree.bind("<Double-1>", lambda e: self._kw_edit())
         self.kw_menu = tk.Menu(self.kw_tree, tearoff=0)
         self.kw_menu.add_command(label="Ändra ord…", command=self._kw_edit)
@@ -10986,7 +10988,7 @@ class App:
         self._refresh_subfolder_map()
         self._cat_map_drag_restore()
         self.lbl_subfolder_map_status.configure(
-            text=f"✓ Koppling sparad: ‘{word}’ → ‘{folder}’. "
+            text=f"✓ Stödordet ‘{word}’ är nu kopplat till mappen ‘{folder}’. "
                  f"Standardord: {normalize(cat.get('default_keyword', '')) or 'inte valt'}.")
 
     def _cat_map_folder_selected(self, selected_tree, _event=None) -> None:
@@ -10995,6 +10997,29 @@ class App:
                 selection = tree.selection()
                 if selection:
                     tree.selection_remove(*selection)
+
+    def _cat_map_show_selected_mapping(self, _event=None) -> None:
+        """Show the saved folder for the selected support word persistently."""
+        selection = self.kw_tree.selection()
+        if not selection:
+            return
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            return
+        mapping = cat.get("subfolder_keyword_map", {})
+        entries = []
+        for row in selection:
+            word = normalize(self.kw_tree.set(row, "word"))
+            if not word:
+                continue
+            folder = mapping.get(word) if isinstance(mapping, dict) else None
+            entries.append(
+                f"‘{word}’ → ‘{folder}’" if folder
+                else f"‘{word}’ → ingen mappkoppling")
+        if entries:
+            self.lbl_subfolder_map_status.configure(
+                text="Kopplat stödord: " + " · ".join(entries))
 
     def _cat_map_assign_selected(self, _event=None):
         """Assign selected support word(s) to the selected folder; Ctrl+M."""
