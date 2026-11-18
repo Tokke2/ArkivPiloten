@@ -62,7 +62,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 #: Programmets version. Höjs vid varje leverans.
 VERSION = "1.4.14"
-EXTRACTION_CACHE_SCHEMA = 2
+EXTRACTION_CACHE_SCHEMA = 3
 
 __all__ = [
     # extraktion
@@ -79,7 +79,8 @@ __all__ = [
     # datum - för sortering i årsmappar
     "find_document_date",
     # delar som matchningsmotorn behöver
-    "normalize", "_luhn_ok", "_recipient_zone", "_head_of",
+    "normalize", "search_extracted_pages", "compare_extracted_pages",
+    "_luhn_ok", "_recipient_zone", "_head_of",
     "_DOC_TYPE_WORDS", "_ID_HINT", "_RECIPIENT_MARKERS", "_looks_like_code",
 ]
 
@@ -534,7 +535,6 @@ def _x_pymupdf(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, in
                 and v and _useful_meta(str(v))}
         total = len(doc)
         n = min(total, max_pages) if max_pages > 0 else min(total, HARD_PAGE_CAP)
-        chunks = []
         sidtexter: List[str] = []          # en post per sida (flersidig)
         for i in range(n):
             page = doc[i]
@@ -546,10 +546,8 @@ def _x_pymupdf(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, in
                 sidtext = page.get_text("text", sort=True) or ""
             except TypeError:                     # äldre PyMuPDF
                 sidtext = page.get_text("text") or ""
-            chunks.append(sidtext)
             extras = _page_extras(page)
             if extras:
-                chunks.append(extras)
                 sidtext = sidtext + "\n" + extras
             sidtexter.append(sidtext)
             top, bottom = _page_bands(page)
@@ -558,7 +556,10 @@ def _x_pymupdf(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, in
             if bottom:
                 footer_txt.append(bottom)
 
-    text = _clean("\n".join(chunks))
+    # Keep page boundaries in the extracted text. Besides helping search
+    # results cite the right page, form-feeds behave like whitespace for the
+    # existing matcher while preserving per-page snippets.
+    text = _clean("\f".join(sidtexter))
     meta["_page_starts"] = json.dumps([
         "\n".join(line.strip() for line in page.splitlines()
                     if line.strip())[:1200]
@@ -619,7 +620,7 @@ def _x_pypdf(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, int]
     tp = token_page_counts(chunks)
     if tp:
         meta["_token_pages"] = json.dumps(tp, ensure_ascii=False)
-    return _clean("\n".join(chunks)), meta, n, total
+    return _clean("\f".join(chunks)), meta, n, total
 
 
 def _x_pdfminer(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, int]:
@@ -1388,6 +1389,64 @@ def extract(path: Path, max_pages: int = 0, ocr_enabled: bool = True,
         res.error = res.error or f"{type(exc).__name__}: {exc}"
     return res
 
+
+
+def search_extracted_pages(path: Path, text: str, query: str,
+                           context: int = 90) -> List[Dict[str, Any]]:
+    """Return local, page-numbered literal-search hits from extracted PDF text."""
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return []
+    pages = (str(text or "").split("\f")
+             if "\f" in str(text or "") else [str(text or "")])
+    hits: List[Dict[str, Any]] = []
+    for page_number, page_text in enumerate(pages, 1):
+        folded = page_text.casefold()
+        start = 0
+        while len(hits) < 500:
+            index = folded.find(needle, start)
+            if index < 0:
+                break
+            left = max(0, index - max(0, int(context)))
+            right = min(len(page_text), index + len(needle) + max(0, int(context)))
+            snippet = " ".join(page_text[left:right].split())
+            if left:
+                snippet = "…" + snippet
+            if right < len(page_text):
+                snippet += "…"
+            hits.append({"path": str(path), "page": page_number,
+                         "snippet": snippet})
+            start = index + max(1, len(needle))
+        if len(hits) >= 500:
+            break
+    return hits
+
+
+def compare_extracted_pages(left_text: str, right_text: str,
+                            max_changes: int = 20) -> List[Dict[str, Any]]:
+    """Summarize changed/added/removed pages without altering either PDF."""
+    left_pages = (str(left_text or "").split("\f")
+                  if "\f" in str(left_text or "") else [str(left_text or "")])
+    right_pages = (str(right_text or "").split("\f")
+                   if "\f" in str(right_text or "") else [str(right_text or "")])
+    changes = []
+    for index in range(max(len(left_pages), len(right_pages))):
+        before = left_pages[index] if index < len(left_pages) else None
+        after = right_pages[index] if index < len(right_pages) else None
+        if before == after:
+            continue
+        if before is None:
+            kind = "added"
+        elif after is None:
+            kind = "removed"
+        else:
+            kind = "changed"
+        changes.append({"page": index + 1, "kind": kind,
+                        "before": " ".join((before or "").split())[:600],
+                        "after": " ".join((after or "").split())[:600]})
+        if len(changes) >= max(1, int(max_changes)):
+            break
+    return changes
 
 
 # Ord som finns i nästan alla affärsdokument och därför är värdelösa som

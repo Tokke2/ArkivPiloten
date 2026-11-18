@@ -172,6 +172,8 @@ try:
         ocr_available,
         STOPWORDS,
         reading_health,
+        search_extracted_pages,
+        compare_extracted_pages,
         set_tesseract_path,
         status_text,
         suggest_keywords,
@@ -8605,6 +8607,10 @@ class App:
         ttk.Button(outbox, text="Öppna mappen", command=self.open_output
                    ).grid(row=1, column=1, sticky="ew", padx=(0, T.INNER),
                           pady=(0, T.INNER))
+        ttk.Button(outbox, text="Sök och jämför PDF:er…",
+                   command=self._open_archive_search).grid(
+                       row=2, column=0, columnspan=2, sticky="ew",
+                       padx=T.INNER, pady=(0, T.INNER))
         outbox.columnconfigure(0, weight=1)
         outbox.columnconfigure(1, weight=1)
 
@@ -9839,6 +9845,386 @@ class App:
         else:
             self.messagebox.showinfo(APP_NAME, "Ingen giltig utmapp vald än.",
                                      parent=self.root)
+
+    def _open_archive_search(self) -> None:
+        """Open a read-only local search, compare and page-overview window."""
+        existing = getattr(self, "_archive_search_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    return
+            except Exception:
+                pass
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if not output or not Path(output).is_dir():
+            self.messagebox.showinfo(
+                APP_NAME, "Välj först en giltig arkivmapp på fliken Start.",
+                parent=self.root)
+            return
+
+        tk, ttk = self.tk, self.ttk
+        english = self.settings.get("ui_language", "sv") == "en"
+        text_for = lambda sv, en: en if english else sv
+        win = tk.Toplevel(self.root)
+        self._archive_search_window = win
+        win._icon_ref = brand_window(win)
+        win.title(text_for("Sök och jämför i arkivet", "Search and compare in archive"))
+        win.transient(self.root)
+        win.geometry("1040x690")
+        win.minsize(720, 470)
+        win.columnconfigure(0, weight=1)
+        ttk.Label(win, text=text_for("Sök i ditt PDF-arkiv",
+                                      "Search your PDF archive"),
+                  style="CardTitle.TLabel").grid(
+                      row=0, column=0, sticky="w", padx=16, pady=(14, 4))
+        ttk.Label(win,
+                  text=text_for(
+                      "Sökningen är lokal och ändrar inte dokumenten. "
+                      "Träffar visar sida och textutdrag.",
+                      "Search runs locally and does not change documents. "
+                      "Results show the page and a text excerpt."),
+                  style="CardMuted.TLabel", wraplength=950).grid(
+                      row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+
+        query_bar = ttk.Frame(win, style="Card.TFrame")
+        query_bar.grid(row=2, column=0, sticky="new", padx=14, pady=(0, 8))
+        query_bar.columnconfigure(0, weight=1)
+        query = tk.StringVar()
+        entry = ttk.Entry(query_bar, textvariable=query)
+        entry.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        status = ttk.Label(
+            query_bar, text=text_for("Ange ett ord eller en fras.",
+                                    "Enter a word or phrase."),
+            style="CardMuted.TLabel")
+        status.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 8))
+        controls = ttk.Frame(query_bar, style="CardInner.TFrame")
+        controls.grid(row=0, column=1, rowspan=2, sticky="e", padx=10, pady=8)
+
+        table_box = ttk.Frame(win, style="Card.TFrame")
+        table_box.grid(row=3, column=0, sticky="nsew", padx=14, pady=(0, 8))
+        win.rowconfigure(3, weight=1)
+        table_box.columnconfigure(0, weight=1)
+        table_box.rowconfigure(0, weight=1)
+        columns = ("file", "page", "snippet")
+        tree = ttk.Treeview(table_box, columns=columns, show="headings",
+                            selectmode="extended")
+        tree.heading("file", text="PDF")
+        tree.heading("page", text=text_for("Sida", "Page"))
+        tree.heading("snippet", text=text_for("Textutdrag", "Text excerpt"))
+        tree.column("file", width=280, minwidth=130, stretch=False)
+        tree.column("page", width=65, minwidth=55, anchor="center", stretch=False)
+        tree.column("snippet", width=600, minwidth=180, stretch=True)
+        tree.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        scroll = ttk.Scrollbar(table_box, orient="vertical", command=tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=10)
+        tree.configure(yscrollcommand=scroll.set)
+        buttons = ttk.Frame(win, style="CardInner.TFrame")
+        buttons.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 12))
+        buttons.columnconfigure(0, weight=1)
+        state = {"rows": [], "busy": False, "cancel": threading.Event()}
+
+        def alive() -> bool:
+            try:
+                return bool(win.winfo_exists())
+            except Exception:
+                return False
+
+        def close_window() -> None:
+            state["cancel"].set()
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self._archive_search_window = None
+
+        def run_search(_event=None) -> None:
+            term = query.get().strip()
+            if not term:
+                status.configure(text=text_for("Skriv först ett ord eller en fras.",
+                                               "Enter a word or phrase first."))
+                entry.focus_set()
+                return
+            if state["busy"]:
+                return
+            state["busy"] = True
+            state["cancel"] = threading.Event()
+            cancel = state["cancel"]
+            for item in tree.get_children():
+                tree.delete(item)
+            state["rows"] = []
+            root = Path(output)
+            files = list_pdfs(root, recursive=True)
+            status.configure(text=(
+                f"Searching {len(files)} PDF files…" if english else
+                f"Söker i {len(files)} PDF-filer…"))
+            search_button.configure(state="disabled")
+
+            def worker() -> None:
+                found: List[Dict[str, Any]] = []
+                errors = 0
+                ocr_partial = 0
+                limited = False
+                for number, path in enumerate(files, 1):
+                    if cancel.is_set():
+                        return
+                    try:
+                        extraction = read_pdf(path, self.settings)
+                        if extraction.error:
+                            errors += 1
+                        else:
+                            if (extraction.used_ocr and extraction.page_count
+                                    and extraction.pages_read < extraction.page_count):
+                                ocr_partial += 1
+                            found.extend(search_extracted_pages(
+                                path, extraction.text, term))
+                            if len(found) >= 5000:
+                                found[:] = found[:5000]
+                                limited = True
+                                break
+                    except Exception as exc:
+                        errors += 1
+                        session_error("arkivsökning", exc)
+                    if number % 20 == 0:
+                        text = (f"Searching… {number} of {len(files)} PDF files"
+                                if english else
+                                f"Söker… {number} av {len(files)} PDF-filer")
+                        self._post(lambda text=text: (
+                            status.configure(text=text) if alive() else None))
+                self._post(lambda: finish(found, errors, ocr_partial, term,
+                                          len(files), limited))
+
+            threading.Thread(target=worker, daemon=True,
+                             name="arkivsökning").start()
+
+        def finish(found: List[Dict[str, Any]], errors: int,
+                   ocr_partial: int, term: str, file_count: int,
+                   limited: bool) -> None:
+            if not alive():
+                return
+            state["busy"] = False
+            state["rows"] = found
+            for index, hit in enumerate(found):
+                path = Path(hit["path"])
+                try:
+                    display_path = str(path.relative_to(Path(output)))
+                except ValueError:
+                    display_path = path.name
+                tree.insert("", "end", iid=f"hit{index}", values=(
+                    display_path, hit["page"], hit["snippet"]))
+            message = (f"{len(found)} matches for ‘{term}’ in {file_count} PDF files."
+                       if english else
+                       f"{len(found)} träffar för ‘{term}’ i {file_count} PDF-filer.")
+            if errors:
+                message += (f" {errors} files could not be read." if english else
+                            f" {errors} filer kunde inte läsas.")
+            if limited:
+                message += (" Showing the first 5,000 matches." if english else
+                            " Visar de första 5 000 träffarna.")
+            if ocr_partial:
+                message += (f" OCR read only the configured first pages in "
+                            f"{ocr_partial} scanned PDFs." if english else
+                            f" OCR läste bara de inställda första sidorna i "
+                            f"{ocr_partial} skannade PDF-filer.")
+            status.configure(text=message)
+            search_button.configure(state="normal")
+
+        def selected_paths() -> List[Path]:
+            paths = []
+            seen = set()
+            for item in tree.selection():
+                try:
+                    index = int(item[3:])
+                    path = Path(state["rows"][index]["path"])
+                except (ValueError, IndexError, KeyError):
+                    continue
+                key = os.path.normcase(os.path.abspath(str(path)))
+                if key not in seen:
+                    seen.add(key)
+                    paths.append(path)
+            return paths
+
+        def compare_selected() -> None:
+            paths = selected_paths()
+            if len(paths) != 2:
+                self.messagebox.showinfo(
+                    APP_NAME, text_for(
+                        "Markera träffar i exakt två olika PDF-filer "
+                        "för att jämföra dem.",
+                        "Select results from exactly two different PDFs to compare."),
+                    parent=win)
+                return
+            report = tk.Toplevel(win)
+            report._icon_ref = brand_window(report)
+            report.title(text_for("Jämför PDF-dokument", "Compare PDF documents"))
+            report.transient(win)
+            _fit_geometry(report, 900, 680, 600, 400)
+            report.columnconfigure(0, weight=1)
+            report.rowconfigure(1, weight=1)
+            heading = ttk.Label(
+                report, text=text_for("Jämför text per sida…",
+                                      "Comparing text page by page…"),
+                style="CardTitle.TLabel", wraplength=820)
+            heading.grid(row=0, column=0, sticky="w", padx=14, pady=12)
+            body = ttk.Frame(report, style="Card.TFrame")
+            body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 10))
+            body.columnconfigure(0, weight=1)
+            body.rowconfigure(0, weight=1)
+            text = tk.Text(body, wrap="word", state="disabled", padx=12, pady=10,
+                           background=self.C["surface"], foreground=self.C["text"],
+                           font=self.theme.f_base, borderwidth=0)
+            text.grid(row=0, column=0, sticky="nsew")
+            text_scroll = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+            text_scroll.grid(row=0, column=1, sticky="ns")
+            text.configure(yscrollcommand=text_scroll.set)
+
+            def compare_worker() -> None:
+                try:
+                    left = read_pdf(paths[0], self.settings)
+                    right = read_pdf(paths[1], self.settings)
+                    same_bytes = sha256_file(paths[0]) == sha256_file(paths[1])
+                    changes = compare_extracted_pages(left.text, right.text)
+                    result = (left, right, same_bytes, changes, "")
+                except Exception as exc:
+                    result = (None, None, False, [], str(exc))
+                self._post(lambda: show_comparison(result))
+
+            def show_comparison(result) -> None:
+                if not report.winfo_exists():
+                    return
+                left, right, same_bytes, changes, error = result
+                if error:
+                    heading.configure(text=f"Jämförelsen misslyckades: {error}")
+                    return
+                heading.configure(text=("Innehåll identiskt byte för byte" if same_bytes
+                                        else "Jämförelse klar · originalfilerna är oförändrade"))
+                lines = [f"A: {paths[0]}\nB: {paths[1]}",
+                         f"Sidor: {left.page_count} mot {right.page_count}"]
+                if left.error or right.error:
+                    lines.append("Varning: minst en PDF kunde inte läsas helt.")
+                if same_bytes:
+                    lines.append("\nFilerna har samma SHA-256-kontrollsumma.")
+                elif not changes:
+                    lines.append("\nDen extraherade sidtexten matchar, men filerna ")
+                    lines.append("skiljer sig i metadata, skanning eller formatering.")
+                else:
+                    lines.append(f"\nOlika sidor: {len(changes)} (högst 20 visas)")
+                    for change in changes:
+                        lines.append(f"\nSida {change['page']} · {change['kind']}")
+                        if change["before"]:
+                            lines.append(f"  A: {change['before']}")
+                        if change["after"]:
+                            lines.append(f"  B: {change['after']}")
+                text.configure(state="normal")
+                text.insert("1.0", "\n".join(lines))
+                text.configure(state="disabled")
+
+            threading.Thread(target=compare_worker, daemon=True,
+                             name="jämför-pdf").start()
+
+        def show_contact_sheet() -> None:
+            paths = selected_paths()
+            if not paths:
+                self.messagebox.showinfo(
+                    APP_NAME, text_for("Markera en träff för att visa sidöversikten.",
+                                       "Select a result to show the page overview."),
+                    parent=win)
+                return
+            path = paths[0]
+            sheet = tk.Toplevel(win)
+            sheet._icon_ref = brand_window(sheet)
+            sheet.title(text_for(f"Sidöversikt · {path.name}",
+                                 f"Page overview · {path.name}"))
+            sheet.transient(win)
+            _fit_geometry(sheet, 1080, 760, 640, 440)
+            sheet.columnconfigure(0, weight=1)
+            sheet.rowconfigure(1, weight=1)
+            note = ttk.Label(sheet, text="Skapar sidöversikt…",
+                             style="CardMuted.TLabel")
+            note.grid(row=0, column=0, sticky="w", padx=14, pady=10)
+            surface = ttk.Frame(sheet, style="Card.TFrame")
+            surface.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+            surface.columnconfigure(0, weight=1)
+            surface.rowconfigure(0, weight=1)
+            canvas = tk.Canvas(surface, highlightthickness=0,
+                               background=self.C["surface"])
+            canvas.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+            sheet_scroll = ttk.Scrollbar(surface, orient="vertical",
+                                         command=canvas.yview)
+            sheet_scroll.grid(row=0, column=1, sticky="ns", pady=8, padx=(0, 8))
+            canvas.configure(yscrollcommand=sheet_scroll.set)
+            inner = ttk.Frame(canvas, style="CardInner.TFrame")
+            inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+            inner.bind("<Configure>", lambda _e: canvas.configure(
+                scrollregion=canvas.bbox("all")))
+            canvas.bind("<Configure>", lambda e: canvas.itemconfigure(
+                inner_id, width=e.width))
+
+            def render_worker() -> None:
+                try:
+                    pymupdf = _open_pymupdf()
+                    thumbnails = []
+                    with pymupdf.open(str(path)) as doc:
+                        total = len(doc)
+                        count = min(total, 120)
+                        for page_index in range(count):
+                            page = doc[page_index]
+                            zoom = _bounded_render_zoom(page.rect, 0.28)
+                            pix = page.get_pixmap(
+                                matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+                            thumbnails.append((page_index + 1, pix.tobytes("png")))
+                    self._post(lambda: paint_contact_sheet(
+                        thumbnails, total, ""))
+                except Exception as exc:
+                    self._post(lambda exc=exc: paint_contact_sheet([], 0, str(exc)))
+
+            def paint_contact_sheet(thumbnails, total: int, error: str) -> None:
+                try:
+                    if not sheet.winfo_exists():
+                        return
+                except Exception:
+                    return
+                if error:
+                    note.configure(text=f"Kunde inte skapa sidöversikten: {error}")
+                    return
+                import base64
+                refs = []
+                for index, (page_number, png) in enumerate(thumbnails):
+                    photo = tk.PhotoImage(
+                        data=base64.b64encode(png).decode("ascii"))
+                    refs.append(photo)
+                    cell = ttk.Frame(inner, style="CardInner.TFrame")
+                    cell.grid(row=index // 4, column=index % 4,
+                              padx=10, pady=10, sticky="n")
+                    ttk.Label(cell, image=photo).pack()
+                    ttk.Label(cell, text=f"Sida {page_number}",
+                              style="CardMuted.TLabel").pack(pady=(4, 0))
+                sheet._contact_sheet_images = refs
+                note.configure(text=(f"Visar {len(thumbnails)} av {total} sidor. "
+                                     "Originalfilen har inte ändrats."))
+
+            threading.Thread(target=render_worker, daemon=True,
+                             name="pdf-sidöversikt").start()
+
+        search_button = ttk.Button(
+            controls, text=text_for("Sök", "Search"),
+            style="Accent.TButton", command=run_search)
+        search_button.pack(side="left", padx=(0, 6))
+        ttk.Button(controls, text=text_for("Jämför två…", "Compare two…"),
+                   command=compare_selected).pack(side="left", padx=3)
+        ttk.Button(controls, text=text_for("Alla sidor…", "All pages…"),
+                   command=show_contact_sheet).pack(
+            side="left", padx=(3, 0))
+        ttk.Button(buttons, text=text_for("Stäng", "Close"),
+                   command=close_window).pack(side="right")
+        tree.bind("<Double-1>", lambda _event: (
+            open_externally(Path(state["rows"][int(tree.focus()[3:])]["path"]))
+            if tree.focus().startswith("hit") else None))
+        entry.bind("<Return>", run_search)
+        win.protocol("WM_DELETE_WINDOW", close_window)
+        win.bind("<Escape>", lambda _event: close_window())
+        entry.focus_set()
 
     def all_input_files(self) -> List[Path]:
         """Alla PDF-filer i samtliga bevakade mappar, utan dubbletter.
