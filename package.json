@@ -1,0 +1,11 @@
+{
+  "name": "tadega-portal-browser-tests",
+  "private": true,
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:pdf": "php tests/php/skadeblankett_pdf_regression.php"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

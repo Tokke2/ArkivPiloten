@@ -1,0 +1,70 @@
+{
+  "id": "./",
+  "name": "Tadega Dokumentportalen",
+  "short_name": "Tadega",
+  "description": "Tadega Portals interna verkstadsdokument och administration.",
+  "lang": "sv-SE",
+  "start_url": "./index.php?tab=protocol",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#f3f7f5",
+  "theme_color": "#07172d",
+  "categories": ["business", "productivity"],
+  "icons": [
+    {
+      "src": "./index.php?view_file=assets/pwa-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./index.php?view_file=assets/pwa-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Fakturaunderlag",
+      "short_name": "Underlag",
+      "description": "Öppna Fakturaunderlaget i portalen.",
+      "url": "./index.php?tab=invoice",
+      "icons": [
+        {
+          "src": "./index.php?view_file=assets/pwa-icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Serviceprotokoll",
+      "short_name": "Protokoll",
+      "description": "Öppna Serviceprotokollet i portalen.",
+      "url": "./index.php?tab=protocol",
+      "icons": [
+        {
+          "src": "./index.php?view_file=assets/pwa-icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Skadeblankett (personal)",
+      "short_name": "Skada",
+      "description": "Öppna personalens skadeblankettflik i portalen.",
+      "url": "./index.php?tab=skadeblankett",
+      "icons": [
+        {
+          "src": "./index.php?view_file=assets/pwa-icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
+}

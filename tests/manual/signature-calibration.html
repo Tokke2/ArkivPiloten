@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Kalibrering av signaturstreck</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #183344; background: #f4f8f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; }
+    main { width: min(100%, 1040px); margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: clamp(1.35rem, 3vw, 2rem); }
+    p, li { line-height: 1.5; }
+    .notice { padding: 13px 15px; border: 1px solid #e4c77d; border-radius: 12px; background: #fff8e5; color: #594718; }
+    .instructions { padding-left: 22px; }
+    .profiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
+    .profile { min-width: 0; padding: 14px; border: 1px solid #d5e1de; border-radius: 14px; background: #fff; box-shadow: 0 2px 8px rgba(21, 54, 62, .04); }
+    .profile h2 { margin: 0 0 5px; font-size: 1rem; }
+    .profile p { min-height: 44px; margin: 0 0 10px; color: #576d76; font-size: .82rem; }
+    canvas { display: block; width: 100%; height: 150px; border: 1px solid #aabbbd; border-radius: 9px; background: #fff; touch-action: none; user-select: none; -webkit-user-select: none; }
+    .actions { display: flex; justify-content: flex-end; margin: 8px 0; }
+    button { min-height: 42px; padding: 8px 13px; border: 1px solid #a9c4bc; border-radius: 8px; background: #f3faf7; color: #164a43; font: inherit; font-weight: 700; cursor: pointer; }
+    button:focus-visible { outline: 3px solid rgba(11, 122, 114, .25); outline-offset: 2px; }
+    output { display: block; min-height: 116px; padding: 10px; border-radius: 8px; background: #f5f8f8; color: #344d56; font: .76rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .foot { margin-top: 16px; color: #526b73; font-size: .82rem; }
+    @media (max-width: 760px) { body { padding: 12px; } .profiles { grid-template-columns: 1fr; } .profile p { min-height: 0; } canvas { height: 136px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Kalibrering av signaturstreck</h1>
+  <p class="notice"><strong>Endast för test i staging.</strong> Rita provstreck eller slingor — inte en kunds riktiga namnteckning. Den här sidan sparar, skickar eller loggar varken streck eller signaturbilder.</p>
+  <ol class="instructions">
+    <li>Rita samma lilla slinga i varje ruta: först lätt tryck, sedan medel och tyngre tryck.</li>
+    <li>Prova ett långsamt kort streck, en snabb linje och en stillastående tryckprick.</li>
+    <li>Jämför känslan och diagnosvärdena. Värdena finns bara tillfälligt i sidan och försvinner när den laddas om.</li>
+  </ol>
+
+  <section class="profiles" aria-label="Jämförelse av pennans tryckkurvor">
+    <article class="profile" data-profile="soft">
+      <h2>Mjuk tryckkurva</h2>
+      <p>Ger lite mer bredd vid lätt tryck.</p>
+      <canvas width="1000" height="260" aria-label="Testyta, mjuk tryckkurva" tabindex="0"></canvas>
+      <div class="actions"><button type="button">Rensa</button></div>
+      <output aria-live="polite">Rita en testslinga för att visa lokala mätvärden.</output>
+    </article>
+    <article class="profile" data-profile="linear">
+      <h2>Rak tryckkurva</h2>
+      <p>Nuvarande neutrala jämförelseprofil.</p>
+      <canvas width="1000" height="260" aria-label="Testyta, rak tryckkurva" tabindex="0"></canvas>
+      <div class="actions"><button type="button">Rensa</button></div>
+      <output aria-live="polite">Rita en testslinga för att visa lokala mätvärden.</output>
+    </article>
+    <article class="profile" data-profile="firm">
+      <h2>Fast tryckkurva</h2>
+      <p>Ger lite mindre bredd vid lätt tryck.</p>
+      <canvas width="1000" height="260" aria-label="Testyta, fast tryckkurva" tabindex="0"></canvas>
+      <div class="actions"><button type="button">Rensa</button></div>
+      <output aria-live="polite">Rita en testslinga för att visa lokala mätvärden.</output>
+    </article>
+  </section>
+  <p class="foot">Tryckområde, händelseintervall, längre inmatningsglapp, förlust av pekarfångst och beskärningsmarginal visas endast lokalt. PDF-marginalen är en beräkning enligt skadeblankettens placeringsregler; verifiera slutresultatet i en test-PDF innan någon kalibrering förs över till produktion.</p>
+</main>
+<script src="../../index.php?asset=signature_pad.js"></script>
+<script>
+(function () {
+  'use strict';
+  var pointToMm = 25.4 / 72;
+
+  function formatNumber(value, digits) {
+    return Number.isFinite(value) ? value.toFixed(digits).replace('.', ',') : '–';
+  }
+
+  function estimateSkadePdfPadding(crop) {
+    if (!crop || crop.imageWidthPx < 1 || crop.imageHeightPx < 1) return null;
+    var aspect = crop.imageWidthPx / crop.imageHeightPx;
+    var boxWidthPt = 203.1;
+    var boxHeightPt = 21.9;
+    var maxOverrunPt = 28.34;
+    var maxWidthPt = boxWidthPt + maxOverrunPt * 2;
+    var maxHeightPt = boxHeightPt + maxOverrunPt * 2;
+    var preferredWidthPt = Math.min(boxWidthPt * 0.94, maxWidthPt);
+    var preferredHeightPt = Math.min(boxHeightPt + 8, maxHeightPt);
+    var imageWidthPt = Math.min(preferredWidthPt, preferredHeightPt * aspect);
+    var imageHeightPt = imageWidthPt / aspect;
+    var imageWidthMm = imageWidthPt * pointToMm;
+    var imageHeightMm = imageHeightPt * pointToMm;
+    return {
+      left: crop.padLeftPx / crop.imageWidthPx * imageWidthMm,
+      right: crop.padRightPx / crop.imageWidthPx * imageWidthMm,
+      top: crop.padTopPx / crop.imageHeightPx * imageHeightMm,
+      bottom: crop.padBottomPx / crop.imageHeightPx * imageHeightMm,
+    };
+  }
+
+  function describe(diagnostics, crop) {
+    var pressure = diagnostics.pressureSamples > 0
+      ? formatNumber(diagnostics.pressureMin, 2) + '–' + formatNumber(diagnostics.pressureMax, 2)
+        + ' (' + diagnostics.pressureMode + ', ' + diagnostics.pressureSamples + ' prov)'
+      : 'inte tillgängligt';
+    var lines = [
+      'Pekartyp: ' + diagnostics.pointerType,
+      'Tryck: ' + pressure,
+      'Prov: ' + diagnostics.eventSamples + ', sammanslagna: ' + diagnostics.coalescedSamples,
+      'Ungefärlig frekvens: ' + formatNumber(diagnostics.approximateHz, 0) + ' Hz',
+      'Största glapp: ' + formatNumber(diagnostics.maxGapMs, 1) + ' ms; >100 ms: ' + diagnostics.longGapCount,
+      'Icke-monotona tidsstämplar: ' + diagnostics.nonMonotonicTimestamps,
+      'Pekarfångst tappad/avbruten: ' + (diagnostics.pointerCaptureLost ? 'ja' : 'nej')
+        + (diagnostics.pointerCancelled ? ' / avbruten' : ''),
+      'Handflatskontakt ersatt av penna: ' + (diagnostics.palmStrokeDiscarded ? 'ja' : 'nej'),
+    ];
+    var padding = estimateSkadePdfPadding(crop);
+    if (padding) {
+      lines.push('Beräknad luft i skade-PDF: V ' + formatNumber(padding.left, 2) + '/' + formatNumber(padding.right, 2)
+        + ' mm, H ' + formatNumber(padding.top, 2) + '/' + formatNumber(padding.bottom, 2) + ' mm');
+    }
+    return lines.join('\n');
+  }
+
+  document.querySelectorAll('.profile').forEach(function (card) {
+    var canvas = card.querySelector('canvas');
+    var clearButton = card.querySelector('button');
+    var output = card.querySelector('output');
+    var pad = window.TadegaSignaturePad && typeof window.TadegaSignaturePad.attach === 'function'
+      ? window.TadegaSignaturePad.attach(canvas, {
+          background: null,
+          pressureCurve: card.getAttribute('data-profile'),
+          onEnd: function () {
+            if (!pad) return;
+            var png = pad.serializeCropped();
+            var crop = pad.getLastCropMetrics();
+            var diagnostics = pad.getLastStrokeDiagnostics();
+            output.textContent = png && diagnostics ? describe(diagnostics, crop) : 'Inget exporterbart bläck. Rita ett nytt teststreck.';
+          }
+        })
+      : null;
+
+    if (!pad) {
+      output.textContent = 'Signaturmotorn kunde inte laddas. Öppna sidan i staging via Dokumentportalen.';
+      return;
+    }
+    clearButton.addEventListener('click', function () {
+      pad.clear();
+      output.textContent = 'Rensad. Inga testdata har sparats eller skickats.';
+    });
+  });
+}());
+</script>
+</body>
+</html>
