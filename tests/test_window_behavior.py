@@ -188,3 +188,22 @@ def test_legacy_saved_start_setting_cannot_disable_minimized_start():
     source = (ROOT / "pdfsorter_data.py").read_text(encoding="utf-8")
     assert 'clean["start_minimized"] = True' in source
     assert 's["start_minimized"] = True' in source
+
+
+def test_restart_after_update_stays_minimized_too():
+    source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    app = next(node for node in tree.body
+               if isinstance(node, ast.ClassDef) and node.name == "App")
+    init = next(node for node in app.body
+                if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    text = ast.unparse(init)
+
+    assert "if self._restart_after_update" in text
+    assert "Appen startas minimerad efter uppdateringen." in text
+    assert "self.root = tk.Tk()" in text
+    assert "self.root.withdraw()" in text
+    assert "_maximize_window(self.root)" not in text
+    assert "_maximize_after_map(self.root, event)" in text
+    assert "self.root.deiconify()" not in text
+    assert "self.root.iconify()" in text

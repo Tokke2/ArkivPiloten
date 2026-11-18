@@ -3223,6 +3223,7 @@ UPDATE_FILES = (
     # Engångsuppgraderingen från 1.0.0/1.1.0. Ligger kvar i mappen så att
     # den som behöver den slipper leta.
     "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
+    "ArkivPiloten - Starta tyst.vbs",
     "ArkivPiloten - Installera senaste Python och starta.bat",
     "arkivpiloten_python.ps1", "arkivpiloten_schedule_python_updates.ps1",
     "README.md", "PDFSORTER_SPEC.md", "LICENSE", "desktop.ini",

@@ -11,13 +11,14 @@ def test_windows_launcher_calls_the_python_policy_script():
     text = launcher.read_text(encoding="utf-8")
 
     assert 'set "PSSCRIPT=%~dp0arkivpiloten_python.ps1"' in text
-    assert 'powershell -NoProfile -ExecutionPolicy Bypass -File "%PSSCRIPT%"' in text
+    assert 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%PSSCRIPT%"' in text
     assert "winget install --id Python.Python.3.13" not in text
-    assert "choice /C JN /N /M \"Vill du installera senaste Python nu? [J/N] \"" in text
+    assert "choice /C" not in text
+    assert "[System.Windows.Forms.MessageBox]::Show('Python saknas." in text
     guard_start = text.index('if "%PYEXE%"=="" (')
     guard_end = text.index('if "%PYEXE%"=="" (', guard_start + 1)
     missing_python_branch = text[guard_start:guard_end]
-    assert "choice /C JN" in missing_python_branch
+    assert "MessageBoxButtons]::YesNo" in missing_python_branch
     assert "-File \"%PSSCRIPT%\" -InstallIfMissing" in missing_python_branch
 
 

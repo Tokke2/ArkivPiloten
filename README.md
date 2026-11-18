@@ -64,9 +64,8 @@ It recognises senders by organisation number, VAT number, bankgiro, domain and c
 
 ## Quick start (Windows)
 
-1. Double-click **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — it reuses installed Python without checking online. Only if Python is missing, the launcher offers to install the latest stable version; it never asks or updates Python when a usable interpreter is found. No separate Python-installer BAT is included in the release. Required add-ons are bootstrapped once, then a Windows scheduled task updates only Python packages weekly on Monday at 08:00 (a missed run starts when the PC is available again). Packages use the selected shared Python environment, so other programs using that interpreter may also be affected. The launcher also checks/installs Tesseract OCR (best effort), runs the detailed status check only during first-time package setup, asks about autostart (default yes), and starts the app.
-2. Done. The app starts without a console window, and will start with Windows minimized to the tray on future logins.
+1. Double-click **`ArkivPiloten - Starta tyst.vbs`**. It runs the bootstrap without a terminal window. The batch bootstrap is also self-hiding if launched directly. It reuses installed Python without checking online; only if Python is missing does it offer to install the latest stable version. It never asks or updates Python when a usable interpreter is found. No separate Python-installer BAT is included in the release. Required add-ons are bootstrapped once, then a Windows scheduled task updates only Python packages weekly on Monday at 08:00. The setup questions use Windows dialogs; progress and diagnostics are written to logs. The launcher checks/installs Tesseract OCR (best effort), asks about autostart (default yes), then starts the GUI through `pythonw`.
+2. The app starts minimized every time, including after an update restart. PDF-reading and OCR diagnostics are kept out of a terminal; details remain in the app logs. The app uses the tray when safe, otherwise the taskbar.
 
 ### Manual install
 
@@ -136,7 +135,8 @@ Run `python pdfsorter.py --help` for all options (`--copy`, `--exclude`, `--json
 ```text
 ArkivPiloten/
 ├── LICENSE                 MIT license (private and commercial use)
-├── ArkivPiloten - Installera senaste Python och starta.bat   the only launcher you need (Windows)
+├── ArkivPiloten - Starta tyst.vbs   console-free Windows entry point
+├── ArkivPiloten - Installera senaste Python och starta.bat   hidden bootstrap (Windows)
 ├── install.sh              installer for macOS & Linux (venv, shortcut, autostart)
 ├── uppgradera-arkivpiloten.bat / .sh   one-time upgrade from 1.0.0/1.1.0
 ├── tests/                  pytest suite (autostart per OS, updater, config dir)
@@ -255,9 +255,8 @@ Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domä
 
 ## Kom igång (Windows)
 
-1. Dubbelklicka på **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — installerad Python återanvänds utan nätverkskontroll. Bara om Python saknas erbjuder startfilen att installera senaste stabila version; finns en fungerande Python frågar den aldrig och uppdaterar inte Python-tolken. En fristående Python-installations-BAT ingår inte i releasen. Nödvändiga tillägg grundinstalleras en gång. Därefter uppdaterar en schemalagd Windows-uppgift endast Python-paketen varje måndag kl. 08:00; en missad körning startar när datorn och användarsessionen blir tillgängliga. Paketen använder vald delad Python-miljö och kan därför påverka andra program som använder samma interpreter. Startfilen kontrollerar/installerar även Tesseract OCR (bästa försök), kör detaljerad statuskontroll bara vid första paketinstallationen, frågar om autostart (standard ja) och startar appen.
-2. Klart. Appen startar utan konsolfönster och alltid minimerad; systemfältet används om det kan visas säkert, annars aktivitetsfältet. Vid framtida inloggningar startar appen också minimerad.
+1. Dubbelklicka på **`ArkivPiloten - Starta tyst.vbs`**. Den kör grundinstallationen utan terminalfönster. BAT-filen döljer sig också om den startas direkt. Installerad Python återanvänds utan nätverkskontroll; bara om Python saknas erbjuds installation av senaste stabila version. Python-tolken uppdateras aldrig automatiskt. En fristående Python-installations-BAT ingår inte i releasen. Nödvändiga tillägg grundinstalleras en gång; därefter uppdaterar en schemalagd Windows-uppgift endast Python-paketen varje måndag kl. 08:00. Frågor visas som Windows-dialoger och diagnostik sparas i loggar. Startaren kontrollerar/installerar även Tesseract OCR och frågar om autostart (standard ja).
+2. Appen startar alltid minimerad, även efter omstart vid programuppdatering. PDF-/OCR-diagnostik visas inte i något terminalfönster; detaljer finns i appens loggar. Systemfältet används om det kan visas säkert, annars aktivitetsfältet.
 
 ### Uppgradera från gamla 1.0.0 / 1.1.0
 
@@ -328,7 +327,8 @@ Kör `python pdfsorter.py --help` för alla växlar (`--copy`, `--exclude`, `--j
 
 ```text
 ArkivPiloten/
-├── ArkivPiloten - Installera senaste Python och starta.bat   enda startfilen du behöver (Windows)
+├── ArkivPiloten - Starta tyst.vbs   konsolfri startfil för Windows
+├── ArkivPiloten - Installera senaste Python och starta.bat   dold grundinstallation (Windows)
 ├── install.sh              installation för macOS & Linux (venv, genväg, autostart)
 ├── tests/                  pytest-svit (autostart per OS, uppdateraren, datamapp)
 ├── tools/build_release.py  bygger ArkivPiloten.zip + SHA256SUMS.txt

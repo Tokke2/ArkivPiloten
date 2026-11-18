@@ -1,4 +1,9 @@
 @echo off
+if /i not "%~1"=="--hidden" (
+    wscript.exe //B //NoLogo "%~dp0ArkivPiloten - Starta tyst.vbs" "%~f0"
+    exit /b
+)
+shift
 setlocal EnableExtensions EnableDelayedExpansion
 rem ======================================================================
 rem ArkivPiloten - ENDA startfilen (utokad installationsrunda 2026-10-16).
@@ -28,25 +33,18 @@ echo [1/6] Kontrollerar att Python finns ...
 set "PSSCRIPT=%~dp0arkivpiloten_python.ps1"
 set "PYEXE="
 if not exist "%PSSCRIPT%" (
-    echo       Python-kontrollskript saknas: %PSSCRIPT%
-    pause
+    echo       Python-kontrollskript saknas: %PSSCRIPT% >> "%LOG%"
     exit /b 1
 )
-for /f "delims=" %%i in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%PSSCRIPT%"') do set "PYEXE=%%i"
+for /f "delims=" %%i in ('powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%PSSCRIPT%"') do set "PYEXE=%%i"
 if "%PYEXE%"=="" (
-    echo       Python saknas pa systemet.
-    choice /C JN /N /M "Vill du installera senaste Python nu? [J/N] "
-    if errorlevel 2 (
-        echo       Ingen Python installerades. Avslutar utan att andra systemet.
-        pause
-        exit /b 1
-    )
+    powershell.exe -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; if ([System.Windows.Forms.MessageBox]::Show('Python saknas. Vill du installera senaste Python nu?', 'ArkivPiloten', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question) -eq [System.Windows.Forms.DialogResult]::Yes) { exit 0 } else { exit 1 }"
+    if errorlevel 1 exit /b 2
     echo       Hamtar senaste stabila Python fran python.org ...
-    for /f "delims=" %%i in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%PSSCRIPT%" -InstallIfMissing') do set "PYEXE=%%i"
+    for /f "delims=" %%i in ('powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%PSSCRIPT%" -InstallIfMissing') do set "PYEXE=%%i"
 )
 if "%PYEXE%"=="" (
     echo       Python kunde inte installeras. Se felmeddelandet ovan.
-    pause
     exit /b 1
 )
 echo       Python: %PYEXE%
@@ -70,7 +68,7 @@ if not exist "%PKGSTATE%" (
     )
     rem Markera engangskontrollen sa tillagg inte kontrolleras vid varje appstart.
     > "%PKGSTATE%" echo bootstrap-attempted
-    "%PYEXE%" "%~dp0pdfsorter.py" --status
+    "%PYEXE%" "%~dp0pdfsorter.py" --status >> "%LOG%" 2>&1
 ) else (
     echo [2/6] Python-tillagg uppdateras schemalagt mandagar kl. 08:00.
 )
@@ -78,7 +76,7 @@ if not exist "%PKGSTATE%" (
 echo [3/6] Schemalagger tillaggskontroll till mandagar kl. 08:00 ...
 set "SCHEDULESCRIPT=%~dp0arkivpiloten_schedule_python_updates.ps1"
 if exist "%SCHEDULESCRIPT%" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%SCHEDULESCRIPT%"
+    powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%SCHEDULESCRIPT%"
     if errorlevel 1 (
         echo       VARNING: kunde inte skapa veckoschemat; se logs\python-packages-update.log.
         echo Kunde inte skapa veckoschemat %DATE% %TIME% >> "%LOG%"
@@ -103,7 +101,7 @@ if defined TESS (
     "%TESS%" --list-langs 2>nul | findstr /X /C:"swe" >nul
     if errorlevel 1 (
         echo       Svenska saknas - hamtar swe.traineddata ...
-        powershell -NoProfile -Command "try{Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/swe.traineddata' -OutFile '%ProgramFiles%\Tesseract-OCR\tessdata\swe.traineddata'}catch{exit 1}"
+        powershell.exe -NoProfile -WindowStyle Hidden -Command "try{Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/swe.traineddata' -OutFile '%ProgramFiles%\Tesseract-OCR\tessdata\swe.traineddata'}catch{exit 1}"
         if errorlevel 1 echo       Kunde inte skriva till Tesseract-mappen - svenskan kan kompletteras i appen: Hjalp, Komplettera installationen.
     ) else (
         echo       Sprak: svenska + engelska OK
@@ -118,12 +116,12 @@ if defined TESS (
 set "PYW=%PYEXE:python.exe=pythonw.exe%"
 if not exist "%PYW%" set "PYW=%PYEXE%"
 echo [5/6] Autostart (standard ja) ...
-choice /C JN /N /T 15 /D J /M "Starta ArkivPiloten automatiskt vid inloggning? [J/N] "
-if errorlevel 2 (
+powershell.exe -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; if ([System.Windows.Forms.MessageBox]::Show('Starta ArkivPiloten automatiskt vid inloggning?', 'ArkivPiloten', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question) -eq [System.Windows.Forms.DialogResult]::Yes) { exit 0 } else { exit 1 }"
+if errorlevel 1 (
     echo       Autostart stangs av enligt ditt val.
-    "%PYEXE%" "%~dp0pdfsorter.py" --remove-autostart
+    "%PYEXE%" "%~dp0pdfsorter.py" --remove-autostart >> "%LOG%" 2>&1
 ) else (
-    "%PYEXE%" "%~dp0pdfsorter.py" --install-autostart
+    "%PYEXE%" "%~dp0pdfsorter.py" --install-autostart >> "%LOG%" 2>&1
 )
 echo [6/6] Startar ArkivPiloten ...
 echo Startar: %PYW% pdfsorter.pyw >> "%LOG%"

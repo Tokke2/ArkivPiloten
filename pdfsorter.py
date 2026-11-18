@@ -7893,7 +7893,7 @@ class App:
         self._cache_cleanup_running = False
         #: En omstart väntar på att appen blir ledig.
         self._omstart_vantar = False
-        self.visible = True
+        self.visible = False
         self._quitting = False
         self._rescanning = False
         self._hiding_for_minimize = False
@@ -7907,17 +7907,19 @@ class App:
         self._icon_ref = None                    # håll kvar PhotoImage
 
         self.root = tk.Tk()
+        # Keep the top-level withdrawn while the interface and tray icon are
+        # initialized. This prevents even a brief maximized-window flash on
+        # normal launch and after a background update restart.
+        self.root.withdraw()
         if diag is not None:
             # Undantag i knappar/after-jobb fångas av Tk och skrevs tidigare
             # bara till stderr - som inte finns när appen startas med
             # pythonw. Nu hamnar de i loggen och i AI-rapporten.
             diag.install_tk_hooks(self.root)
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        # Sätt först en säker reservgeometri och maximera sedan. Fönstret
-        # startar fortfarande minimerat enligt inställningen, men ska alltid
-        # fylla skärmen när det visas/återställs.
+        # Sätt reservgeometri medan fönstret är dolt. Maximering sker först
+        # när användaren faktiskt visar fönstret, inte som en startflash.
         _fit_geometry(self.root, 1280, 880, 1060, 720)
-        _maximize_window(self.root)
         self.theme = Theme(
             self.root, ttk,
             dark=str(self.settings.get("theme", "ljus")) == "mork",
@@ -8098,17 +8100,8 @@ class App:
         # --tray; en andra start kan ändå visa det här fönstret igen.
         varför = "--tray" if start_hidden else "alltid minimerad"
         if self._restart_after_update:
-            try:
-                self.root.deiconify()
-                _maximize_window(self.root)
-                self.root.lift()
-                self.root.focus_force()
-                self.visible = True
-                self._h("fönster", "Appen öppnades efter automatisk omstart "
-                        "från uppdateraren")
-            except Exception as exc:
-                self._fel(exc, "visa efter uppdatering")
-        elif not self.tray:
+            self._h("fönster", "Appen startas minimerad efter uppdateringen.")
+        if not self.tray:
             self._h("fönster", "Systemfältsikonen saknas - startar "
                     "minimerad i aktivitetsfältet", "warn")
             self.root.iconify()
