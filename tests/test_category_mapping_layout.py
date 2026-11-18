@@ -5,12 +5,19 @@ import pdfsorter as P
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_category_mapping_has_top_selector_and_two_role_specific_fields():
+def test_category_mapping_has_top_selector_and_three_role_specific_columns():
     source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
 
     assert "self.cat_combo = ttk.Combobox(" in source
+    assert "f.columnconfigure(0, weight=42)" in source
+    assert "f.columnconfigure(1, weight=27)" in source
+    assert "f.columnconfigure(2, weight=31)" in source
     assert "support_card.grid(row=2, column=0" in source
-    assert "folder_card.grid(row=2, column=1" in source
+    assert 'linked_card = T.card(f, "Kopplade mappar")' in source
+    assert "linked_card.grid(row=2, column=1" in source
+    assert "folder_card.grid(row=2, column=2" in source
+    assert 'columns=("word", "folder"), show="headings"' in source
+    assert 'self.selected_keyword_map_tree.heading("folder", text="KOPPLAD MAPP")' in source
     tab_source = source[source.index("    def _build_cats_tab("):source.index("    def _build_category_settings_window(")]
     assert "Mappnamn:" not in tab_source
     assert "Kategoriinställningar…" in tab_source
@@ -240,13 +247,26 @@ def test_default_support_word_selector_is_scoped_to_selected_category():
     assert "self._refresh_subfolder_map()" in source
 
 
-def test_selecting_support_word_shows_its_saved_folder_mapping():
+def test_selecting_support_word_shows_its_saved_folder_in_own_column():
     class KeywordTree:
         def selection(self):
             return ("invoice",)
 
         def set(self, _row, _column):
             return "Invoice"
+
+    class DetailTree:
+        def __init__(self):
+            self.rows = []
+
+        def get_children(self):
+            return tuple(str(index) for index in range(len(self.rows)))
+
+        def delete(self, _item):
+            self.rows.pop(0)
+
+        def insert(self, _parent, _index, values):
+            self.rows.append(values)
 
     class Rules:
         def get(self, _name):
@@ -258,13 +278,15 @@ def test_selecting_support_word_shows_its_saved_folder_mapping():
 
     app = object.__new__(P.App)
     app.kw_tree = KeywordTree()
+    app.selected_keyword_map_tree = DetailTree()
     app.rules = Rules()
     app._selected_cat = lambda: "Supplier"
     app.lbl_subfolder_map_status = Label()
 
     P.App._cat_map_show_selected_mapping(app)
 
-    assert "invoice" in app.lbl_subfolder_map_status.text
+    assert app.selected_keyword_map_tree.rows == [("Invoice", "Invoices/Received")]
+    assert "invoice" in app.lbl_subfolder_map_status.text.casefold()
     assert "Invoices/Received" in app.lbl_subfolder_map_status.text
 
 

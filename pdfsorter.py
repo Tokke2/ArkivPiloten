@@ -7329,6 +7329,13 @@ _UI_EN = {
     "De här inställningarna påverkar inte listorna med stödord och skapade mappar.":
         "These settings do not affect the support-word and created-folder lists.",
     "SPARDA STÖDORD": "SAVED SUPPORT WORDS", "SKAPADE MAPPAR": "CREATED FOLDERS",
+    "KOPPLADE MAPPAR": "LINKED FOLDERS",
+    "Välj stödord för att se dess mappkoppling här.":
+        "Select a support word to see its folder mapping here.",
+    "KOPPLAD MAPP": "LINKED FOLDER",
+    "Ingen mappkoppling": "No folder mapping",
+    "Välj en kategori": "Choose a category",
+    "Välj ett stödord": "Select a support word",
     "Dra stödord till en skapad mapp →": "Drag a support word to a created folder →",
     "+ Skapa mapp…": "+ Create folder…", "Öppna kopplingsdialog…": "Open mapping dialog…",
     "Välj en kategori i menyn ovan för att visa dess stödord och undermappar.":
@@ -11159,12 +11166,15 @@ class App:
         tk, ttk = self.tk, self.ttk
         T = self.theme
         f = self.tab_cats
-        f.columnconfigure(0, weight=1, uniform="category-mapping-panels")
-        f.columnconfigure(1, weight=1, uniform="category-mapping-panels")
+        # Keep the support-word list readable, with a dedicated live view of
+        # the selected word's folder mapping between it and the folder list.
+        f.columnconfigure(0, weight=42)
+        f.columnconfigure(1, weight=27)
+        f.columnconfigure(2, weight=31)
         f.rowconfigure(2, weight=1)
 
         catbar = ttk.Frame(f, style="Card.TFrame")
-        catbar.grid(row=0, column=0, columnspan=2, sticky="ew",
+        catbar.grid(row=0, column=0, columnspan=3, sticky="ew",
                     padx=T.PAD, pady=(T.PAD, 0))
         catbar.columnconfigure(1, weight=1)
         ttk.Label(catbar, text="Kategori", style="CardKey.TLabel").grid(
@@ -11194,7 +11204,7 @@ class App:
         self.btn_cat_restore.grid(row=0, column=7, padx=(4, T.INNER))
 
         bar = ttk.Frame(f, style="Card.TFrame")
-        bar.grid(row=1, column=0, columnspan=2, sticky="ew",
+        bar.grid(row=1, column=0, columnspan=3, sticky="ew",
                  padx=T.PAD, pady=(6, 0))
         bar.columnconfigure(0, weight=1)
         self.lbl_kwcount = ttk.Label(bar, text="", style="CardMuted.TLabel")
@@ -11289,8 +11299,46 @@ class App:
                    command=self._import).pack(side="left", padx=5)
         self.empty_cat_panel.grid_remove()
 
+        linked_card = T.card(f, "Kopplade mappar")
+        linked_card.grid(row=2, column=1, sticky="nsew",
+                         padx=(T.GAP // 2, T.GAP // 2), pady=T.GAP)
+        linked_body = linked_card.body
+        linked_body.columnconfigure(0, weight=1)
+        linked_body.rowconfigure(1, weight=1)
+        ttk.Label(
+            linked_body,
+            text="Välj stödord för att se dess mappkoppling här.",
+            style="CardMuted.TLabel", wraplength=360, justify="left",
+        ).grid(row=0, column=0, sticky="ew", padx=T.INNER,
+               pady=(T.INNER, 8))
+        linked_view = ttk.Frame(linked_body, style="CardInner.TFrame")
+        linked_view.grid(row=1, column=0, sticky="nsew", padx=T.INNER, pady=2)
+        linked_view.columnconfigure(0, weight=1)
+        linked_view.rowconfigure(0, weight=1)
+        self.selected_keyword_map_tree = ttk.Treeview(
+            linked_view, columns=("word", "folder"), show="headings",
+            selectmode="none", height=12)
+        self.selected_keyword_map_tree.heading("word", text="STÖDORD")
+        self.selected_keyword_map_tree.heading("folder", text="KOPPLAD MAPP")
+        self.selected_keyword_map_tree.column(
+            "word", width=120, minwidth=90, anchor="w", stretch=True)
+        self.selected_keyword_map_tree.column(
+            "folder", width=170, minwidth=110, anchor="w", stretch=True)
+        self.selected_keyword_map_tree.grid(row=0, column=0, sticky="nsew")
+        self.theme.zebra(self.selected_keyword_map_tree)
+        linked_scroll = ttk.Scrollbar(
+            linked_view, orient="vertical",
+            command=self.selected_keyword_map_tree.yview)
+        linked_scroll.grid(row=0, column=1, sticky="ns")
+        linked_xscroll = ttk.Scrollbar(
+            linked_view, orient="horizontal",
+            command=self.selected_keyword_map_tree.xview)
+        linked_xscroll.grid(row=1, column=0, sticky="ew")
+        self.selected_keyword_map_tree.configure(
+            yscrollcommand=linked_scroll.set,
+            xscrollcommand=linked_xscroll.set)
         folder_card = T.card(f, "Skapade mappar")
-        folder_card.grid(row=2, column=1, sticky="nsew",
+        folder_card.grid(row=2, column=2, sticky="nsew",
                          padx=(T.GAP // 2, T.PAD), pady=T.GAP)
         mapbody = folder_card.body
         mapbody.columnconfigure(0, weight=1)
@@ -11571,6 +11619,8 @@ class App:
         if not cat:
             self.lbl_subfolder_map_status.configure(
                 text="Välj en kategori i menyn ovan.")
+            if hasattr(self, "kw_tree"):
+                self._cat_map_show_selected_mapping()
             return
         mapping = cat.setdefault("subfolder_keyword_map", {})
         if not isinstance(mapping, dict):
@@ -11593,6 +11643,8 @@ class App:
         self.lbl_subfolder_map_status.configure(
             text=(f"{len(folders)} skapade mappar. Dra ett sparat stödord "
                   "från vänster eller markera ord och mapp och tryck Ctrl+M."))
+        if hasattr(self, "kw_tree"):
+            self._cat_map_show_selected_mapping()
 
     def _cat_map_set_row_highlight(self, state_attr: str, tree, row: str,
                                    tag: str) -> None:
@@ -11727,24 +11779,40 @@ class App:
                     tree.selection_remove(*selection)
 
     def _cat_map_show_selected_mapping(self, _event=None) -> None:
-        """Show the saved folder for the selected support word persistently."""
+        """Show selected support words and their mapped folders in its own column."""
+        detail_tree = getattr(self, "selected_keyword_map_tree", None)
+        if detail_tree is not None:
+            for item in detail_tree.get_children():
+                detail_tree.delete(item)
         selection = self.kw_tree.selection()
-        if not selection:
-            return
         name = self._selected_cat()
         cat = self.rules.get(name) if name else None
         if not cat:
+            if detail_tree is not None:
+                detail_tree.insert(
+                    "", "end", values=("—", "Välj en kategori"))
             return
         mapping = cat.get("subfolder_keyword_map", {})
+        mapping_by_normalized = {
+            normalize(word): str(folder)
+            for word, folder in mapping.items()
+        } if isinstance(mapping, dict) else {}
         entries = []
         for row in selection:
-            word = normalize(self.kw_tree.set(row, "word"))
+            label = str(self.kw_tree.set(row, "word") or "").strip()
+            word = normalize(label)
             if not word:
                 continue
-            folder = mapping.get(word) if isinstance(mapping, dict) else None
+            folder = mapping_by_normalized.get(word, "")
+            shown_folder = folder or "Ingen mappkoppling"
+            if detail_tree is not None:
+                detail_tree.insert("", "end", values=(label, shown_folder))
             entries.append(
-                f"‘{word}’ → ‘{folder}’" if folder
-                else f"‘{word}’ → ingen mappkoppling")
+                f"‘{label}’ → ‘{folder}’" if folder
+                else f"‘{label}’ → ingen mappkoppling")
+        if not entries and detail_tree is not None:
+            detail_tree.insert(
+                "", "end", values=("—", "Välj ett stödord"))
         if entries:
             self.lbl_subfolder_map_status.configure(
                 text="Kopplat stödord: " + " · ".join(entries))
