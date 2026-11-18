@@ -210,6 +210,15 @@ def test_real_app_installs_navigation_after_creating_status_line():
     assert install_call > status_assign
 
 
+def test_review_dialog_exposes_keyboard_shortcuts_for_common_actions():
+    source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
+    assert 'self.win.bind("<Control-s>", save_shortcut)' in source
+    assert 'self.win.bind("<Control-u>", unsorted_shortcut)' in source
+    assert 'self.win.bind("<Alt-Left>"' in source
+    assert 'self.win.bind("<Alt-Right>"' in source
+    assert "Ctrl+S spara" in source
+
+
 def test_keyboard_handlers_never_close_the_root_window():
     source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

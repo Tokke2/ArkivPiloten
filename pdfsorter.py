@@ -2532,6 +2532,23 @@ def _inuti(barn: Path, förälder: Path) -> bool:
     return len(b) > len(f) and b[:len(f)] == f
 
 
+def processing_worker_count(settings: Optional[Dict[str, Any]] = None) -> int:
+    """Choose safe PDF parallelism, with a predictable low-memory cap."""
+    settings = settings or {}
+    if settings.get("low_memory_mode", False):
+        return 2
+    return max(2, min(8, os.cpu_count() or 2))
+
+
+def processing_batch_size(settings: Optional[Dict[str, Any]], workers: int,
+                           total: int) -> int:
+    """Bound queued PDF jobs in low-memory mode; default mode stays throughput-first."""
+    settings = settings or {}
+    if settings.get("low_memory_mode", False):
+        return max(1, min(max(1, int(total)), max(2, int(workers)) * 2))
+    return max(1, int(total))
+
+
 def list_pdfs(folder: Path, recursive: bool = False,
               excludes=()) -> List[Path]:
     folder = Path(folder)
@@ -2568,6 +2585,93 @@ def list_pdfs(folder: Path, recursive: bool = False,
         except OSError:
             continue
     return sorted(out)
+
+
+def audit_archive(files: List[Path], root: Optional[Path] = None) -> Dict[str, Any]:
+    """Read-only structural/health scan; never moves, repairs or deletes files."""
+    issues: List[Dict[str, str]] = []
+    by_name: Dict[str, List[Path]] = {}
+    by_size: Dict[int, List[Path]] = {}
+    checked = 0
+
+    def add(level: str, kind: str, path: Path, details: str) -> None:
+        issues.append({"level": level, "kind": kind,
+                       "path": str(path), "details": details})
+
+    for path in files:
+        checked += 1
+        by_name.setdefault(path.name.casefold(), []).append(path)
+        try:
+            size = path.stat().st_size
+            by_size.setdefault(size, []).append(path)
+        except OSError as exc:
+            add("error", "Kan inte läsa fil", path, str(exc))
+            continue
+        if size == 0:
+            add("error", "Tom fil", path, "Filen innehåller 0 byte.")
+            continue
+        if not pdf_looks_complete(path):
+            add("error", "PDF verkar ofullständig", path,
+                "PDF-signatur eller avslutande markör saknas.")
+            continue
+        try:
+            extraction = extract(path, max_pages=1, ocr_enabled=False)
+        except Exception as exc:
+            add("error", "PDF kunde inte kontrolleras", path,
+                f"{type(exc).__name__}: {exc}")
+            continue
+        if extraction.error:
+            add("error", "PDF kunde inte öppnas", path, extraction.error)
+        elif extraction.page_count <= 0:
+            add("warning", "Sidantal saknas", path,
+                "PDF-motorn kunde inte räkna dokumentets sidor.")
+        elif not extraction.text.strip():
+            add("info", "Saknar sökbart textlager", path,
+                f"{extraction.page_count} sidor; kan vara en skanning som kräver OCR.")
+
+    for same_name in by_name.values():
+        if len(same_name) > 1:
+            paths = sorted(same_name, key=lambda item: str(item).casefold())
+            add("warning", "Samma filnamn på flera platser", paths[0],
+                "Jämför dessa filer: " + " | ".join(str(path) for path in paths[:8]))
+
+    # Hash only equal-size candidates: exact duplicate detection without
+    # reading every large archive PDF twice.
+    for same_size in by_size.values():
+        if len(same_size) < 2:
+            continue
+        by_hash: Dict[str, List[Path]] = {}
+        for path in same_size:
+            try:
+                by_hash.setdefault(sha256_file(path), []).append(path)
+            except OSError as exc:
+                add("warning", "Dubblettkontroll misslyckades", path, str(exc))
+        for duplicates in by_hash.values():
+            if len(duplicates) > 1:
+                add("warning", "Identiska PDF-filer", duplicates[0],
+                    "Samma SHA-256: " + " | ".join(
+                        str(path) for path in duplicates[:8]))
+
+    if root is not None:
+        try:
+            for directory in Path(root).rglob("*"):
+                if directory.is_symlink() or not directory.is_dir():
+                    continue
+                try:
+                    if next(directory.iterdir(), None) is None:
+                        add("info", "Tom mapp", directory,
+                            "Mappen är tom; ta bort den bara om den inte behövs.")
+                except OSError as exc:
+                    add("warning", "Mappen kunde inte kontrolleras", directory,
+                        str(exc))
+        except OSError as exc:
+            issues.append({"level": "warning", "kind": "Arkivmappar kunde inte listas",
+                           "path": str(root), "details": str(exc)})
+
+    issues.sort(key=lambda item: (
+        {"error": 0, "warning": 1, "info": 2}.get(item["level"], 3),
+        item["path"].casefold(), item["kind"].casefold()))
+    return {"checked": checked, "issues": issues}
 
 
 def pdf_looks_complete(path: Path) -> bool:
@@ -5410,7 +5514,9 @@ class ReviewDialog:
         self._stop_review_button = ttk.Button(
             btns, text="Avsluta granskning", command=self._stop_review)
         stop_hint = ttk.Label(
-            btns, text="Den här och återstående filer blir kvar i kön.",
+            btns, text=("Avsluta: den här och återstående filer blir kvar i kön. "
+                        "Snabbtangenter: Ctrl+S spara, Ctrl+U osorterat, "
+                        "Esc lämna kvar, Alt+←/→ byt sida."),
             style="CardMuted.TLabel", wraplength=520, justify="left")
 
         self._review_buttons_compact = None
@@ -5453,6 +5559,24 @@ class ReviewDialog:
         self.win.protocol("WM_DELETE_WINDOW", self._skip)
         self.win.bind("<Escape>", lambda e: self._skip())
         self.win.bind("<Return>", self._dialog_return)
+
+        def save_shortcut(_event=None):
+            self._ok()
+            return "break"
+
+        def unsorted_shortcut(_event=None):
+            self._unmatched()
+            return "break"
+
+        def preview_page_shortcut(delta: int):
+            if getattr(self, "_prev_pil", None):
+                self._prev_show(self._prev_page + delta)
+            return "break"
+
+        self.win.bind("<Control-s>", save_shortcut)
+        self.win.bind("<Control-u>", unsorted_shortcut)
+        self.win.bind("<Alt-Left>", lambda _e: preview_page_shortcut(-1))
+        self.win.bind("<Alt-Right>", lambda _e: preview_page_shortcut(1))
         self.win.update_idletasks()
         try:
             self.win.grab_set()
@@ -6972,10 +7096,24 @@ class ConflictDialog:
         body_scroll = ttk.Scrollbar(details, orient="vertical", command=body.yview)
         body_scroll.grid(row=0, column=1, sticky="ns")
         body.configure(yscrollcommand=body_scroll.set)
+        def file_summary(path: Path) -> str:
+            try:
+                stat = path.stat()
+                changed = datetime.fromtimestamp(stat.st_mtime).strftime(
+                    "%Y-%m-%d %H:%M")
+                return (f"{path}\n  Storlek: {human_size(stat.st_size)} · "
+                        f"ändrad: {changed}")
+            except OSError:
+                return f"{path}\n  Filinformation kunde inte läsas."
+
+        known_same = ("\nInnehållet är verifierat identiskt med SHA-256."
+                      if kind != "name" else
+                      "\nSamma namn är inte bevis på samma innehåll; "
+                      "jämför storlek och ändringstid nedan.")
         body.configure(state="normal")
         body.insert(
-            "1.0", f"{vad}\n\nNy fil: {src.name}\n"
-            f"Befintlig målfil: {target.name}\n\n"
+            "1.0", f"{vad}{known_same}\n\nNy fil:\n{file_summary(src)}\n\n"
+            f"Befintlig målfil:\n{file_summary(target)}\n\n"
             "Välj hur dubbletten ska hanteras:")
         body.configure(state="disabled")
 
@@ -7115,7 +7253,24 @@ _UI_EN = {
     "Installera Python-paket": "Install Python packages",
     "Uppdatera Python-paket": "Update Python packages",
     "Starta automatiskt med datorn": "Start automatically with the computer",
+    "Sök och jämför PDF:er…": "Search and compare PDFs…",
+    "Kontrollera arkivet…": "Check archive…",
+    "Kontrollera arkivet": "Check archive",
+    "NIVÅ": "LEVEL", "HITTAD SAK": "FINDING",
+    "FIL / PLATS": "FILE / LOCATION", "DETALJER": "DETAILS",
     "Cache och lagring": "Cache and storage",
+    "Minska minnesanvändning i stora arkiv":
+        "Reduce memory use in large archives",
+    "Bearbetar i små omgångar och läser högst två PDF-filer parallellt i stället för upp till åtta. Kan minska minnestrycket; stora körningar kan ta längre tid.":
+        "Processes small batches and reads at most two PDFs at a time instead "
+        "of up to eight. This may reduce memory pressure; large runs can take longer.",
+    "Arkivkontroll · läsrapport": "Archive check · read-only report",
+    "Kontrollen är endast läsande: inga filer flyttas eller ändras.":
+        "Read-only check: no files are moved or changed.",
+    "Samma filnamn på flera platser": "Same filename in multiple locations",
+    "Identiska PDF-filer": "Identical PDF files",
+    "PDF verkar ofullständig": "PDF appears incomplete",
+    "Saknar sökbart textlager": "No searchable text layer",
     "återställs automatiskt om appen behöver texten igen":
         "recreated automatically if the app needs the text again",
     "Rensa cache automatiskt dagligen och vid avslut":
@@ -8610,6 +8765,10 @@ class App:
         ttk.Button(outbox, text="Sök och jämför PDF:er…",
                    command=self._open_archive_search).grid(
                        row=2, column=0, columnspan=2, sticky="ew",
+                       padx=T.INNER, pady=(0, 4))
+        ttk.Button(outbox, text="Kontrollera arkivet…",
+                   command=self._open_archive_audit).grid(
+                       row=3, column=0, columnspan=2, sticky="ew",
                        padx=T.INNER, pady=(0, T.INNER))
         outbox.columnconfigure(0, weight=1)
         outbox.columnconfigure(1, weight=1)
@@ -9276,15 +9435,29 @@ class App:
             command=self._toggle_cache_cleanup).grid(
                 row=0, column=0, columnspan=2, sticky="w",
                 padx=8, pady=(6, 2))
+        self.var_low_memory_mode = tk.BooleanVar(
+            value=bool(self.settings.get("low_memory_mode", False)))
+        ttk.Checkbutton(
+            cacheb, text="Minska minnesanvändning i stora arkiv",
+            style="Card.TCheckbutton", variable=self.var_low_memory_mode,
+            command=self._toggle_low_memory_mode).grid(
+                row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 2))
+        ttk.Label(
+            cacheb,
+            text="Bearbetar i små omgångar och läser högst två PDF-filer parallellt "
+                 "i stället för upp till åtta. Kan minska minnestrycket; "
+                 "stora körningar kan ta längre tid.",
+            style="CardMuted.TLabel", wraplength=760, justify="left").grid(
+                row=2, column=0, columnspan=2, sticky="w", padx=8, pady=2)
         ttk.Label(
             cacheb,
             text="Smartfilter: tar bort cache som inte använts på 30 dagar, "
                  "skadade poster vid läsning och äldsta poster över "
                  "1 500 filer / 512 MB.",
             style="CardMuted.TLabel", wraplength=760, justify="left").grid(
-                row=1, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+                row=3, column=0, columnspan=2, sticky="w", padx=8, pady=2)
         cacherad = ttk.Frame(cacheb, style="CardInner.TFrame")
-        cacherad.grid(row=2, column=0, columnspan=2, sticky="ew",
+        cacherad.grid(row=4, column=0, columnspan=2, sticky="ew",
                       padx=8, pady=(4, 6))
         self.lbl_cache_cleanup = ttk.Label(
             cacherad, text=self._cache_cleanup_status_text(),
@@ -9846,6 +10019,128 @@ class App:
             self.messagebox.showinfo(APP_NAME, "Ingen giltig utmapp vald än.",
                                      parent=self.root)
 
+    def _open_archive_audit(self) -> None:
+        """Scan the archive for damaged, unreadable and duplicate PDF files."""
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if not output or not Path(output).is_dir():
+            self.messagebox.showinfo(
+                APP_NAME, "Välj först en giltig arkivmapp på fliken Start.",
+                parent=self.root)
+            return
+        tk, ttk = self.tk, self.ttk
+        english = self.settings.get("ui_language", "sv") == "en"
+        text_for = lambda sv, en: en if english else sv
+        win = tk.Toplevel(self.root)
+        win._icon_ref = brand_window(win)
+        win.title(text_for("Arkivkontroll · läsrapport",
+                           "Archive check · read-only report"))
+        win.transient(self.root)
+        win.geometry("1050x650")
+        win.minsize(700, 440)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(1, weight=1)
+        header = ttk.Frame(win, style="CardInner.TFrame")
+        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 4))
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text=text_for("Kontrollera arkivet", "Check archive"),
+                  style="CardTitle.TLabel").grid(
+                      row=0, column=0, sticky="w")
+        status = ttk.Label(
+            header, text=text_for(
+                "Kontrollen är endast läsande: inga filer flyttas eller ändras.",
+                "Read-only check: no files are moved or changed."),
+            style="CardMuted.TLabel", wraplength=680, justify="right")
+        status.grid(row=0, column=1, sticky="e", padx=(12, 0))
+        frame = ttk.Frame(win, style="Card.TFrame")
+        frame.grid(row=1, column=0, sticky="nsew", padx=14, pady=10)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        cols = ("level", "kind", "path", "details")
+        tree = ttk.Treeview(frame, columns=cols, show="headings")
+        for col, heading, width in (
+                ("level", text_for("NIVÅ", "LEVEL"), 90),
+                ("kind", text_for("HITTAD SAK", "FINDING"), 210),
+                ("path", text_for("FIL / PLATS", "FILE / LOCATION"), 330),
+                ("details", text_for("DETALJER", "DETAILS"), 430)):
+            tree.heading(col, text=heading)
+            tree.column(col, width=width, minwidth=90,
+                        stretch=(col in {"path", "details"}))
+        tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=8)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.tag_configure("error", foreground=self.C["err"])
+        tree.tag_configure("warning", foreground=self.C["warn"])
+        tree.tag_configure("info", foreground=self.C["text_muted"])
+        ttk.Button(win, text=text_for("Stäng", "Close"),
+                   command=win.destroy).grid(
+            row=2, column=0, sticky="e", padx=16, pady=(0, 12))
+
+        status.configure(text=text_for("Söker igenom arkivets mappar…",
+                                       "Scanning archive folders…"))
+
+        def worker() -> None:
+            try:
+                files = list_pdfs(Path(output), recursive=True)
+                self._post(lambda: update_status(len(files)))
+                report = audit_archive(files, root=Path(output))
+                self._post(lambda: finish(report, ""))
+            except Exception as exc:
+                self._post(lambda exc=exc: finish({}, str(exc)))
+
+        def update_status(count: int) -> None:
+            try:
+                if win.winfo_exists():
+                    status.configure(text=(
+                        f"Checking {count} PDF files…" if english else
+                        f"Kontrollerar {count} PDF-filer…"))
+            except Exception:
+                pass
+
+        def finish(report: Dict[str, Any], error: str) -> None:
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            if error:
+                status.configure(text=(f"Check failed: {error}" if english else
+                                       f"Kontrollen misslyckades: {error}"))
+                return
+            issues = report.get("issues", [])
+            for row in issues[:5000]:
+                level = row["level"]
+                label = ({"error": "Error", "warning": "Review",
+                          "info": "Info"} if english else
+                         {"error": "Fel", "warning": "Kontrollera",
+                          "info": "Info"}).get(level, level)
+                tree.insert("", "end", values=(
+                    label, row["kind"], row["path"], row["details"]),
+                    tags=(level,))
+            if len(issues) > 5000:
+                tree.insert("", "end", values=(
+                    "Info", "Resultatgräns", "", "Endast de första 5 000 visas."),
+                    tags=("info",))
+            if not issues:
+                status.configure(text=(
+                    f"Checked {report.get('checked', 0)} PDF files. No known issues found."
+                    if english else
+                    f"Kontrollerade {report.get('checked', 0)} PDF-filer. "
+                    "Inga kända problem hittades."))
+            else:
+                errors = sum(issue["level"] == "error" for issue in issues)
+                warnings = sum(issue["level"] == "warning" for issue in issues)
+                status.configure(text=(
+                    f"Checked {report.get('checked', 0)} PDFs · {errors} errors · "
+                    f"{warnings} items to review · {len(issues)} findings. "
+                    "Nothing was changed." if english else
+                    f"Kontrollerade {report.get('checked', 0)} PDF-filer · "
+                    f"{errors} fel · {warnings} saker att granska · "
+                    f"{len(issues)} observationer. Inget har ändrats."))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="arkivkontroll").start()
+
     def _open_archive_search(self) -> None:
         """Open a read-only local search, compare and page-overview window."""
         existing = getattr(self, "_archive_search_window", None)
@@ -10286,6 +10581,7 @@ class App:
             "auto_update": bool(self.var_autoupd.get()),
             "silent_restart": bool(self.var_tystomstart.get()),
             "cache_cleanup_enabled": bool(self.var_cache_cleanup.get()),
+            "low_memory_mode": bool(self.var_low_memory_mode.get()),
         })
         if hasattr(self, "var_lang"):
             self.settings.update({
@@ -10467,7 +10763,7 @@ class App:
         # serialiserar motorn internt - "skriv aldrig över" gäller alltså
         # även när trådar tävlade om samma målnamn.
         total = len(files)
-        workers = max(2, min(8, os.cpu_count() or 2))
+        workers = processing_worker_count(self.settings)
         cancel_event = cancel_event or threading.Event()
         done = 0
         done_lock = threading.Lock()
@@ -10506,11 +10802,15 @@ class App:
         with LogContext("tid", f"batchsortering {total} filer, "
                         f"{workers} trådar"):
             try:
+                batch_size = processing_batch_size(
+                    self.settings, workers, total)
                 with concurrent.futures.ThreadPoolExecutor(
                         max_workers=workers,
                         thread_name_prefix="pdfsorter-sort") as pool:
-                    for _ in pool.map(job, files):
-                        pass
+                    for start in range(0, total, batch_size):
+                        batch = files[start:start + batch_size]
+                        for _ in pool.map(job, batch):
+                            pass
             except Exception as exc:
                 self._fel(exc, "batchsortering")
                 self._log_threadsafe(f"Sorteringen avbröts: {exc}", "err")
@@ -13209,7 +13509,7 @@ class App:
         # unika, exakta stödordsträffar får flyttas vid omskanning.
         counters = {"moved": 0, "review": 0, "still": 0}
         lock = threading.Lock()
-        workers = max(2, min(8, os.cpu_count() or 2))
+        workers = processing_worker_count(self.settings)
 
         def job(path: Path) -> None:
             if not path.exists():
@@ -13245,11 +13545,14 @@ class App:
                     counters["still"] += 1
 
         try:
+            batch_size = processing_batch_size(self.settings, workers, len(files))
             with concurrent.futures.ThreadPoolExecutor(
                     max_workers=workers,
                     thread_name_prefix="pdfsorter-rescan") as pool:
-                for _ in pool.map(job, files):
-                    pass
+                for start in range(0, len(files), batch_size):
+                    batch = files[start:start + batch_size]
+                    for _ in pool.map(job, batch):
+                        pass
         except Exception as exc:
             self._log_threadsafe(f"Omskanningen avbröts: {exc}", "err")
         finally:
@@ -13646,6 +13949,9 @@ class App:
             if hasattr(self, "var_cache_cleanup"):
                 self.var_cache_cleanup.set(
                     self.settings.get("cache_cleanup_enabled", True))
+            if hasattr(self, "var_low_memory_mode"):
+                self.var_low_memory_mode.set(
+                    bool(self.settings.get("low_memory_mode", False)))
             self.var_date_on.set(self.settings.get("date_enabled", False))
             self.var_date_fb.set(self.settings.get("date_fallback", "none"))
             mallar = [t for t, _ in SUBFOLDER_TEMPLATES if t]
@@ -14008,6 +14314,14 @@ class App:
         self._log("Automatisk smart cache-rensning "
                   + ("påslagen" if self.var_cache_cleanup.get() else "avstängd"),
                   "info")
+
+    def _toggle_low_memory_mode(self) -> None:
+        self._collect_settings()
+        workers = processing_worker_count(self.settings)
+        self._log(
+            f"Minnesläge {'på' if self.settings.get('low_memory_mode') else 'av'} "
+            f"· nästa sortering använder högst {workers} parallella PDF-läsningar.",
+            "info")
 
     def _learned_backtest(self) -> None:
         events = load_history()

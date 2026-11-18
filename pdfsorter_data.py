@@ -664,6 +664,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "silent_restart": True,       # starta om tyst när en version installerats
     "pending_review_paths": [],   # återställ granskningskö efter updater-omstart
     "cache_cleanup_enabled": True, # smart diskcache-rensning dagligen + vid avslut
+    "low_memory_mode": False,      # begränsa parallell PDF-läsning till 2 filer
     "last_cache_cleanup": "",     # ISO-tid för senaste smarta rensningen
     "ui_language": "sv",           # 1.1.0: gränssnittsspråk sv | en
     "tag_pdf_metadata": True,      # 1.1.0: skriv kategori som PDF-metadata
