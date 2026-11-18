@@ -2795,12 +2795,18 @@ def qr_png_bytes(text: str, scale: int = 8, border: int = 4) -> bytes:
 
 
 def swish_payload(number: str, amount: Optional[int] = None) -> str:
-    """Swish-betalningslänk som QR-payload. Jämförelsen med originalet:
-    samma payload => samma betalning öppnas vid skanning."""
+    """Return the official Swish QR-spec URL for a receiver.
+
+    Swedish mobile numbers are encoded in international form (46, without
+    the national trunk prefix 0). Swish/business numbers are left unchanged.
+    Donations deliberately call this without an amount so the payer chooses.
+    """
     nr = "".join(ch for ch in (number or "") if ch.isdigit())
-    url = f"https://swish.se/payment?swish={nr}"
-    if amount:
-        url += f"&amount={amount}"
+    if nr.startswith("0") and len(nr) == 10:
+        nr = "46" + nr[1:]
+    url = f"https://app.swish.nu/1/p/sw/?sw={nr}"
+    if amount is not None:
+        url += f"&amt={amount}"
     return url
 
 

@@ -36,7 +36,12 @@ def test_donation_view_has_fixed_qr_and_payment_buttons_only():
 
     assert "swish_payload(self.DONATION_SWISH_NUMBER)" in source
     assert P.swish_payload(P.App.DONATION_SWISH_NUMBER) == (
-        "https://swish.se/payment?swish=0721817177")
+        "https://app.swish.nu/1/p/sw/?sw=46721817177")
+    assert "amt=" not in P.swish_payload(P.App.DONATION_SWISH_NUMBER)
+    assert P.swish_payload("1234567890") == (
+        "https://app.swish.nu/1/p/sw/?sw=1234567890")
+    assert P.swish_payload("0721817177", amount=25) == (
+        "https://app.swish.nu/1/p/sw/?sw=46721817177&amt=25")
     assert "PayPal" in P.App.STOD_TEXT["sv"]["paypal"]
     assert "Ko-fi" in P.App.STOD_TEXT["sv"]["kofi"]
     assert "amount" not in source.lower()
