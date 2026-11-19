@@ -221,6 +221,94 @@ def _pick_font(root, candidates: Tuple[str, ...], size: int,
     return ("TkDefaultFont", size, weight)
 
 
+def navigation_icon_image(kind: str, palette: Dict[str, str], size: int = 20):
+    """Rita en liten, skalbar ikon till huvudflikarna.
+
+    Ikonerna använder samma accent- och ytfärger som temat och ritas i hög
+    upplösning för att hålla sig skarpa även på HiDPI-skärmar. Pillow är
+    valfritt här: utan det returneras ``None`` och flikarna visar vanlig text.
+    """
+    try:
+        from PIL import Image, ImageDraw
+
+        size = max(16, min(40, int(size)))
+        scale = 4
+        side = size * scale
+        unit = side / 24.0
+        image = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        accent = palette["accent"]
+        bg = palette["accent_light"]
+        outline = palette["accent_hair"]
+
+        def xy(x, y):
+            return (round(x * unit), round(y * unit))
+
+        width = max(1, round(1.8 * unit))
+        draw.rounded_rectangle(
+            (xy(1.2, 1.2), xy(22.8, 22.8)), radius=round(5 * unit),
+            fill=bg, outline=outline, width=max(1, round(0.8 * unit)))
+
+        def line(points, fill=accent, stroke=width):
+            draw.line([xy(x, y) for x, y in points], fill=fill,
+                      width=stroke, joint="curve")
+
+        def rect(box, radius=1.0, fill=None, stroke=width):
+            draw.rounded_rectangle(
+                (xy(box[0], box[1]), xy(box[2], box[3])),
+                radius=round(radius * unit), fill=fill,
+                outline=accent if fill is None else None,
+                width=stroke if fill is None else 1)
+
+        if kind == "start":
+            line(((5, 11), (12, 5), (19, 11)))
+            line(((7, 10), (7, 19), (17, 19), (17, 10)))
+            line(((10, 19), (10, 14), (14, 14), (14, 19)))
+        elif kind == "review":
+            rect((6, 4.5, 16, 19.5), radius=1.4)
+            line(((9, 9), (13, 9)), stroke=max(1, round(1.2 * unit)))
+            line(((9, 12), (12, 12)), stroke=max(1, round(1.2 * unit)))
+            line(((12.5, 16), (14, 17.5), (18.5, 12.5)),
+                 stroke=max(1, round(2.2 * unit)))
+        elif kind == "categories":
+            line(((4.5, 8), (10, 8), (11.5, 10), (19.5, 10),
+                  (18, 18.5), (5.5, 18.5), (4.5, 8)))
+            line(((5, 10.5), (19, 10.5)), stroke=max(1, round(1.2 * unit)))
+        elif kind == "settings":
+            for y, x in ((7, 8), (12, 15), (17, 10)):
+                line(((5, y), (19, y)), stroke=max(1, round(1.4 * unit)))
+                r = 1.7 * unit
+                cx, cy = xy(x, y)
+                draw.ellipse((cx - r, cy - r, cx + r, cy + r),
+                             fill=bg, outline=accent, width=width)
+        elif kind == "history":
+            draw.ellipse((xy(4.5, 4.5), xy(19.5, 19.5)),
+                         outline=accent, width=width)
+            line(((12, 7), (12, 12), (16, 14)), stroke=max(1, round(2 * unit)))
+        elif kind == "help":
+            draw.ellipse((xy(4.5, 4.5), xy(19.5, 19.5)),
+                         outline=accent, width=width)
+            line(((9, 9), (10, 7), (13, 7), (15, 9), (15, 11),
+                  (12, 13), (12, 15)), stroke=max(1, round(2 * unit)))
+            cx, cy = xy(12, 18)
+            r = 0.65 * unit
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=accent)
+        elif kind == "advanced":
+            for y, x in ((7, 14), (12, 9), (17, 16)):
+                line(((5, y), (19, y)), stroke=max(1, round(1.4 * unit)))
+                cx, cy = xy(x, y)
+                r = 1.5 * unit
+                draw.ellipse((cx - r, cy - r, cx + r, cy + r),
+                             fill=bg, outline=accent, width=width)
+        else:
+            return None
+
+        resampling = getattr(Image, "Resampling", Image)
+        return image.resize((size, size), resampling.LANCZOS)
+    except Exception:
+        return None
+
+
 class Theme:
     """Samlar färger, typsnitt och ttk-stilar på ett ställe.
 
@@ -278,16 +366,57 @@ class Theme:
         mono = ("Cascadia Mono", "Consolas", "SF Mono", "JetBrains Mono",
                 "DejaVu Sans Mono", "Menlo", "Courier New")
         self.f_base = _pick_font(root, ui, _sz(11))
-        self.f_small = _pick_font(root, ui, _sz(9))
-        self.f_tiny = _pick_font(root, ui, _sz(8))
+        self.f_small = _pick_font(root, ui, _sz(10))
+        self.f_tiny = _pick_font(root, ui, _sz(9))
         self.f_bold = _pick_font(root, ui, _sz(11), "bold")
         self.f_head = _pick_font(root, ui, _sz(13), "bold")
         self.f_title = _pick_font(root, ui, _sz(17), "bold")
         self.f_huge = _pick_font(root, ui, _sz(24), "bold")
-        self.f_mono = _pick_font(root, mono, _sz(9))
-        self.f_mono_bold = _pick_font(root, mono, _sz(9), "bold")
+        self.f_mono = _pick_font(root, mono, _sz(10))
+        self.f_mono_bold = _pick_font(root, mono, _sz(10), "bold")
 
         self._apply()
+        try:
+            # Appens Notebook byggs direkt efter Theme-instansen. Vänta till
+            # idle så att alla sju huvudflikar finns på plats.
+            self.root.after_idle(self._apply_navigation_icons)
+        except Exception:
+            pass
+
+    def _apply_navigation_icons(self) -> None:
+        """Sätt temafärgade, skalbara ikoner på huvudfönstrets flikar."""
+        try:
+            from PIL import ImageTk
+        except Exception:
+            return
+
+        kinds = ("start", "review", "categories", "settings",
+                 "history", "help", "advanced")
+        refs = []
+
+        def visit(widget):
+            try:
+                if widget.winfo_class() == "TNotebook":
+                    tabs = widget.tabs()
+                    if len(tabs) == len(kinds):
+                        for tab, kind in zip(tabs, kinds):
+                            image = navigation_icon_image(kind, self.c, size=20)
+                            if image is not None:
+                                photo = ImageTk.PhotoImage(image, master=self.root)
+                                widget.tab(tab, image=photo, compound="left")
+                                refs.append(photo)
+                for child in widget.winfo_children():
+                    visit(child)
+            except Exception:
+                return
+
+        visit(self.root)
+        # Keep current images alive; replacing this reference after tab updates
+        # also releases the previous palette's raster icons on a theme change.
+        try:
+            self.root._arkivpiloten_tab_icon_refs = refs
+        except Exception:
+            pass
 
     # -- hängningsskydd: en okänd ttk-option på en exotisk tk-build får
     # ALDRIG krascha eller låsa starten - stilen hoppas bara över.
@@ -447,7 +576,7 @@ class Theme:
         self._cfg("TNotebook", background=c["bg"], borderwidth=0,
                      tabmargins=(2, 4, 2, 0))
         self._cfg("TNotebook.Tab", background=c["bg"],
-                     foreground=c["text_muted"], padding=(10, 7),
+                     foreground=c["text_muted"], padding=(12, 8),
                      font=self.f_base, borderwidth=0)
         self._map("TNotebook.Tab",
                background=[("selected", c["surface"]), ("active", c["accent_light"])],
