@@ -4684,6 +4684,38 @@ def _review_preview_height(dialog_height: int) -> int:
     return max(160, min(440, int((height - 300) * 0.60)))
 
 
+def _existing_subfolder_choices(base: Optional[Path]) -> List[str]:
+    """Return safe existing subfolders up to two levels below ``base``."""
+    if base is None:
+        return []
+    try:
+        if not base.is_dir():
+            return []
+        root = base.resolve()
+        choices = []
+        first_level = sorted(base.iterdir(), key=lambda item: item.name.casefold())
+        for first in first_level:
+            if first.is_symlink() or not first.is_dir():
+                continue
+            resolved = first.resolve()
+            if not resolved.is_relative_to(root):
+                continue
+            choices.append(first.relative_to(base).as_posix())
+            try:
+                second_level = sorted(
+                    first.iterdir(), key=lambda item: item.name.casefold())
+            except OSError:
+                continue
+            for second in second_level:
+                if second.is_symlink() or not second.is_dir():
+                    continue
+                if second.resolve().is_relative_to(root):
+                    choices.append(second.relative_to(base).as_posix())
+        return choices
+    except OSError:
+        return []
+
+
 def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None:
     """Storleksanpassa och centrera ett fönster inom den synliga skärmen.
 
@@ -5431,16 +5463,74 @@ class ReviewDialog:
                                         style="CardMuted.TLabel",
                                         wraplength=review_text_width(), justify="left")
         wrap_widgets.append(self._combo_hint_lbl)
-        self._combo_hint_lbl.grid(row=4, column=0, columnspan=2, sticky="w",
-                                  padx=14, pady=(0, 8))
         self._combo_show_hint()
 
-        ttk.Radiobutton(catbox, text="Skapa ny mapp:", value="new",
+        # Undermappsvalet ligger direkt under kategoriväljaren, inte längst
+        # ned i dialogkortet. Kontrollerna bryts om till flera rader på smal skärm.
+        subrow = ttk.Frame(catbox, style="CardInner.TFrame")
+        subrow.grid(row=4, column=0, columnspan=2, sticky="ew",
+                    padx=14, pady=(4, 6))
+        for column in range(3):
+            subrow.columnconfigure(column, weight=1, uniform="subfolder-actions")
+        ttk.Label(subrow, text="Undermapp för den här PDF:en",
+                  style="CardKey.TLabel").grid(
+                      row=0, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        self.var_subfolder = tk.StringVar(value="")
+        self.subfolder_combo = ttk.Combobox(
+            subrow, textvariable=self.var_subfolder, values=(), state="normal")
+        self.subfolder_entry = self.subfolder_combo
+        self.subfolder_combo.grid(row=1, column=0, columnspan=3,
+                                  sticky="ew", pady=(0, 5))
+        subfolder_actions = [
+            ttk.Button(subrow, text="Välj befintlig…",
+                       command=self._browse_subfolder),
+            ttk.Button(subrow, text="Skapa ny undermapp…",
+                       command=self._create_subfolder),
+            ttk.Button(subrow, text="Standard",
+                       command=lambda: self.var_subfolder.set("")),
+        ]
+        for index, button in enumerate(subfolder_actions):
+            button.grid(row=2, column=index, sticky="ew",
+                        padx=(0 if index == 0 else 3, 0 if index == 2 else 3),
+                        pady=2)
+
+        last_subfolder_columns = None
+
+        def layout_subfolder_actions(_event=None):
+            nonlocal last_subfolder_columns
+            width = max(1, subrow.winfo_width())
+            columns = 3 if width >= 680 else 2 if width >= 440 else 1
+            if columns == last_subfolder_columns:
+                return
+            last_subfolder_columns = columns
+            for column in range(3):
+                subrow.columnconfigure(column, weight=0, uniform="")
+            for column in range(columns):
+                subrow.columnconfigure(
+                    column, weight=1, uniform="subfolder-actions")
+            for index, button in enumerate(subfolder_actions):
+                row, column = divmod(index, columns)
+                button.grid_configure(row=2 + row, column=column,
+                                     sticky="ew", padx=3, pady=2)
+
+        subrow.bind("<Configure>", layout_subfolder_actions, add="+")
+        self.win.after_idle(layout_subfolder_actions)
+
+        self.lbl_subfolder_hint = ttk.Label(
+            catbox, text="", style="CardMuted.TLabel",
+            wraplength=review_text_width(), justify="left")
+        wrap_widgets.append(self.lbl_subfolder_hint)
+        self.lbl_subfolder_hint.grid(
+            row=5, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 5))
+        self._combo_hint_lbl.grid(row=6, column=0, columnspan=2, sticky="w",
+                                  padx=14, pady=(0, 6))
+
+        ttk.Radiobutton(catbox, text="Skapa ny kategori:", value="new",
                         variable=self.mode, style="Card.TRadiobutton",
                         command=self._sync).grid(
-                            row=5, column=0, sticky="w", padx=14, pady=(0, 8))
+                            row=7, column=0, sticky="w", padx=14, pady=(0, 8))
         self.new_entry = ttk.Entry(catbox)
-        self.new_entry.grid(row=5, column=1, sticky="ew",
+        self.new_entry.grid(row=7, column=1, sticky="ew",
                             padx=(8, 14), pady=(0, 8))
         self.new_entry.bind("<KeyRelease>", self._new_name_changed)
         if self.guess_name:
@@ -5453,45 +5543,15 @@ class ReviewDialog:
                       text=f"🔎 Uppslag via org.nr: {suggested_sender}"
                            " - kontrollera namnet innan du sparar",
                       style="CardMuted.TLabel").grid(
-                          row=6, column=0, columnspan=2, sticky="w",
+                          row=8, column=0, columnspan=2, sticky="w",
                           padx=14, pady=(0, 6))
         # "Ny mapp"-fältet ska vara låst när "Befintlig" är förvalt.
         self._sync()
-
-        subrow = ttk.Frame(catbox, style="CardInner.TFrame")
-        subrow.grid(row=7, column=0, columnspan=2, sticky="ew",
-                    padx=14, pady=(4, 4))
-        subrow.columnconfigure(1, weight=1)
-        ttk.Label(subrow, text="Dokumenttyp / undermapp:", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w", padx=(0, 8))
-        self.var_subfolder = tk.StringVar(value="")
-        self.subfolder_entry = ttk.Entry(subrow, textvariable=self.var_subfolder)
-        self.subfolder_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
-        ttk.Button(subrow, text="Välj befintlig…",
-                   command=self._browse_subfolder).grid(
-                       row=0, column=2, padx=(0, 4))
-        ttk.Button(subrow, text="Skapa ny…",
-                   command=self._create_subfolder).grid(row=0, column=3, padx=(0, 4))
-        ttk.Button(subrow, text="Standard",
-                   command=lambda: self.var_subfolder.set("")).grid(row=0, column=4)
-        ttk.Label(
-            catbox,
-            text="Lämna tomt för kategoriens standardundermapp; en extra sökväg läggs under den.",
-            style="CardMuted.TLabel").grid(
-                row=8, column=0, columnspan=2, sticky="w",
-                padx=14, pady=(0, 4))
-
-        self.lbl_subfolder_hint = ttk.Label(
-            catbox, text="", style="CardMuted.TLabel",
-            wraplength=review_text_width(), justify="left")
-        wrap_widgets.append(self.lbl_subfolder_hint)
-        self.lbl_subfolder_hint.grid(
-            row=9, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 4))
         ttk.Label(
             catbox,
             text="Alla stödord du väljer sparas för framtida exakta matchningar.",
             style="CardMuted.TLabel").grid(
-                row=10, column=0, columnspan=2, sticky="w",
+                row=9, column=0, columnspan=2, sticky="w",
                 padx=14, pady=(4, 12))
         self._update_subfolder_hint()
 
@@ -6153,7 +6213,8 @@ class ReviewDialog:
         _tk_mod, _ttk, _filedialog, _messagebox, simpledialog = _tk()
         value = simpledialog.askstring(
             APP_NAME,
-            "Ny undermapp relativt kategori/år (exempel: Fakturor/2025):",
+            "Ange en undermapp relativt kategori/år (exempel: Fakturor/2025). "
+            "Den skapas när du bekräftar ‘Spara & flytta’:",
             initialvalue=self.var_subfolder.get(), parent=self.win)
         if value is None:
             return
@@ -6167,10 +6228,26 @@ class ReviewDialog:
         self.mode.set("new")
         self._update_subfolder_hint()
 
+    def _refresh_subfolder_options(self) -> None:
+        """Populate the review dropdown with safe existing subfolders."""
+        combo = getattr(self, "subfolder_combo", None)
+        if combo is None:
+            return
+        choices = _existing_subfolder_choices(self._subfolder_base())
+        variable = getattr(self, "var_subfolder", None)
+        current = str(variable.get() if variable is not None else "").strip()
+        if current and current not in choices:
+            choices.insert(0, current)
+        try:
+            combo.configure(values=choices)
+        except Exception:
+            pass
+
     def _update_subfolder_hint(self) -> None:
         label = getattr(self, "lbl_subfolder_hint", None)
         if label is None:
             return
+        self._refresh_subfolder_options()
         category = self._category()
         if not category:
             label.configure(text="Välj en kategori för att se standardplatsen.")
@@ -6178,15 +6255,15 @@ class ReviewDialog:
         base = self._subfolder_base()
         if base is None:
             label.configure(
-                text=("Lämna tomt för kategoriens standardplats eller ange en "
-                      "dokumenttyp, till exempel Transaktioner eller Utbetalningar. "
-                      "Appen lär av manuella val; annars frågar den.")
+                text=("Välj eller skriv en dokumenttyp, till exempel Transaktioner "
+                      "eller Utbetalningar. En ny undermapp skapas först när du "
+                      "bekräftar ‘Spara & flytta’.")
             )
             return
         label.configure(
-            text=(f"Standardplats: {base}  ·  Lämna tomt för standarden eller "
-                  "välj en dokumenttyp. Appen lär av manuella undermappsval "
-                  "och frågar när den är osäker."))
+            text=(f"Basplats: {base} · välj en befintlig undermapp i listan eller "
+                  "skriv en ny. Den skapas när du bekräftar flytten; tomt val "
+                  "använder standardplatsen."))
 
     def _sync(self) -> None:
         # Rullgardinen är alltid skrivbar/sökbar; bara "Ny mapp"-fältet
