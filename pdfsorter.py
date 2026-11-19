@@ -4681,7 +4681,7 @@ def _review_preview_height(dialog_height: int) -> int:
         height = int(dialog_height)
     except (TypeError, ValueError):
         height = 720
-    return max(100, min(240, int((height - 360) * 0.55)))
+    return max(160, min(440, int((height - 300) * 0.60)))
 
 
 def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None:
@@ -5185,8 +5185,9 @@ class ReviewDialog:
             prev.grid(row=2, column=1, sticky="ew", padx=14, pady=(10, 0))
             prev.columnconfigure(0, weight=1)
             prev.rowconfigure(1, weight=1)
-            self._prev_status = ttk.Label(prev, text="Läser in förhandsvisning…",
-                                          style="CardMuted.TLabel")
+            self._prev_status = ttk.Label(
+                prev, text="Laddar förhandsvisning från original-PDF…",
+                style="CardHead.TLabel")
             self._prev_status.grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
             self._prev_img = tk.Canvas(
                 prev, background=self.C["surface_sunk"], highlightthickness=0,
@@ -5208,7 +5209,7 @@ class ReviewDialog:
             self._prev_rotation = 0
             ttk.Button(nav, text="‹", width=4,
                        command=lambda: self._prev_show(self._prev_page - 1)).pack(pady=2)
-            self._prev_info = ttk.Label(nav, text="–", style="CardMuted.TLabel")
+            self._prev_info = ttk.Label(nav, text="Sida –", style="PillAccent.TLabel")
             self._prev_info.pack(pady=2)
             ttk.Button(nav, text="›", width=4,
                        command=lambda: self._prev_show(self._prev_page + 1)).pack(pady=2)
@@ -5237,6 +5238,11 @@ class ReviewDialog:
             if not has_pymupdf():
                 for button in self._preview_tool_buttons:
                     button.state(["disabled"])
+            ttk.Button(
+                tools, text="Öppna hela original-PDF:en i läsare",
+                command=lambda path=decision.path: open_externally(path)
+            ).grid(row=2, column=0, columnspan=2, sticky="w",
+                   padx=4, pady=(4, 2))
             template_bar = ttk.Frame(prev, style="CardInner.TFrame")
             template_bar.grid(row=3, column=0, columnspan=2, sticky="ew",
                               padx=12, pady=(0, 6))
@@ -5256,10 +5262,11 @@ class ReviewDialog:
                 self._template_create_button.state(["disabled"])
             preview_note = ttk.Label(
                 prev,
-                text=("Originalet sparas med .bak-kopia; Spara som väljer filplats. "
-                      "Rätning skapar en separat bildkopia. Mallvalet är frivilligt: "
-                      "rita runt en rubrik, så söker den aktiva mallen samma text "
-                      "på samma sidområde i kommande PDF:er."),
+                text=("Förhandsvisningen läser original-PDF:en. Roteringsknapparna "
+                      "ändrar bara visningen tills du väljer en spara-åtgärd. "
+                      "Rätning skapar en separat bildkopia. Mallar är frivilliga: "
+                      "rita runt en rubrik för att söka efter samma text och område "
+                      "i kommande PDF:er."),
                 style="CardMuted.TLabel", wraplength=review_text_width(),
                 justify="left")
             wrap_widgets.append(preview_note)
@@ -5768,8 +5775,8 @@ class ReviewDialog:
         direkt och bilderna dyker upp när de är klara."""
         if not has_pymupdf():
             self._prev_status.configure(
-                text="Förhandsvisningen kräver pymupdf - knappen "
-                     "Förhandsgranska PDF öppnar filen externt.")
+                text="Original-PDF kan öppnas i läsare nedan. "
+                     "Inbäddad förhandsvisning kräver PyMuPDF.")
             return
         path = self.decision.path
 
@@ -5805,8 +5812,17 @@ class ReviewDialog:
                     text="Kunde inte förhandsvisa den här filen.")
                 return
             self._prev_pil = bilder
-            self._prev_status.configure(
-                text=f"Förhandsvisning - {len(bilder)} av sidorna:")
+            total_pages = int(getattr(self.decision.extraction, "page_count", 0) or 0)
+            self._prev_total_pages = max(total_pages, len(bilder))
+            shown_pages = len(bilder)
+            total = self._prev_total_pages
+            if total > shown_pages:
+                label = f"Original-PDF · visar de första {shown_pages} av {total} sidorna"
+            elif total == 1:
+                label = "Original-PDF · 1 sida"
+            else:
+                label = f"Original-PDF · {total} sidor"
+            self._prev_status.configure(text=label)
             self._prev_show(0)
         except Exception:
             pass
@@ -5932,7 +5948,7 @@ class ReviewDialog:
             self._prev_img.create_image(0, 0, image=foto, anchor="nw",
                                         tags=("preview",))
             self._prev_info.configure(
-                text=f"{i + 1}/{len(self._prev_pil)} · {rotation}°")
+                text=f"Sida {i + 1}/{len(self._prev_pil)} · {rotation}°")
         except Exception:
             pass
 
@@ -13413,7 +13429,7 @@ class App:
                                    index=i + 1, total=len(self.queue),
                                    theme=self.theme,
                                    preview=bool(self.settings.get(
-                                       "preview_in_dialog", False)),
+                                       "preview_in_dialog", True)),
                                    suggested_sender=_hint,
                                    subfolder_base_resolver=(
                                        lambda category, d=decision:

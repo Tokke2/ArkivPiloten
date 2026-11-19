@@ -60,7 +60,7 @@ def test_review_preview_shrinks_to_fit_short_displays():
     medium = P._review_preview_height(720)
     tall = P._review_preview_height(1200)
 
-    assert 100 <= short < medium <= tall <= 240
+    assert 160 <= short < medium <= tall <= 440
 
 
 def test_shortcut_sheet_lists_platform_shortcuts_and_dialog_keys():
