@@ -10,6 +10,9 @@ def test_windows_bootstrap_has_a_hidden_vbs_entry_point():
              ).read_text(encoding="utf-8")
 
     assert "shell.Run(command, 0, True)" in launcher
+    assert 'shell.SpecialFolders("Desktop")' in launcher
+    assert 'shell.SpecialFolders("Programs")' in launcher
+    assert "CreateArkivPilotenShortcut" in launcher
     assert '"%~1"=="--hidden"' in batch
     assert "ArkivPiloten - Starta tyst.vbs" in batch
     assert "choice /C" not in batch

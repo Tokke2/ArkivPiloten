@@ -56,13 +56,8 @@ if not exist "%PKGSTATE%" (
     "%PYEXE%" -c "import importlib.util as u,sys;mods=['fitz','pypdf','pdfminer','PIL','pystray','pytesseract'];sys.exit(any(u.find_spec(m) is None for m in mods))" >nul 2>&1
     if errorlevel 1 (
         echo       Nagra tillagg saknas - installerar dem en gang ...
-        "%PYEXE%" -m pip install --upgrade --disable-pip-version-check pip >> "%LOG%" 2>&1
-        "%PYEXE%" -m pip install --upgrade --prefer-binary --disable-pip-version-check -r "%~dp0requirements.txt" >> "%LOG%" 2>&1
-        if errorlevel 1 (
-            echo       Forsta forsok misslyckades - provar en gang till ...
-            "%PYEXE%" -m pip install --upgrade --prefer-binary --disable-pip-version-check -r "%~dp0requirements.txt" >> "%LOG%" 2>&1
-            if errorlevel 1 echo       VARNING: tillaggsinstallationen misslyckades; veckokontrollen forsoker igen.
-        )
+        powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%PSSCRIPT%" -BootstrapPackages -PythonExe "%PYEXE%" -RequirementsPath "%~dp0requirements.txt" -LogPath "%LOG%"
+        if errorlevel 1 echo VARNING: tillaggsinstallationen misslyckades; se logs\install.log och veckokontrollen forsoker igen. >> "%LOG%"
     ) else (
         echo       Tillaeggen finns redan; versionsuppdatering sker mandag kl. 08:00.
     )

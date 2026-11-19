@@ -1,6 +1,8 @@
 param(
     [switch]$WeeklyUpdate,
+    [switch]$BootstrapPackages,
     [switch]$InstallIfMissing,
+    [string]$PythonExe,
     [string]$RequirementsPath,
     [string]$LogPath,
     [string]$StatePath
@@ -93,7 +95,42 @@ function Install-Python([string]$version, [string]$targetDir, [int]$allUsers,
     }
 }
 
-$exe = Find-Python
+function Write-UpdateLog([string]$Message) {
+    $Message | Out-File -FilePath $LogPath -Append -Encoding utf8
+}
+
+function Write-PipOutput([object[]]$Lines) {
+    foreach ($item in $Lines) {
+        if ($null -eq $item) { continue }
+        $line = [string]$item
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        if ($line -match '^\s*WARNING:\s*The scripts .+ are installed in .+ which is not on PATH') {
+            Write-UpdateLog "INFO (ofarlig PATH-varning; ArkivPiloten använder python -m pip): $line"
+        } elseif ($line -match 'Ignoring (?:incompletely removed|invalid) distribution\s+([^\s]+)') {
+            Write-UpdateLog "VARNING (pip ignorerade kvarlämnad metadata från avbruten avinstallation; inte i sig ett uppdateringsfel): $line"
+        } elseif ($line -match '^\s*WARNING:') {
+            Write-UpdateLog "VARNING (pip): $line"
+        } elseif ($line -match '^\s*ERROR:') {
+            Write-UpdateLog "FEL (pip): $line"
+        } else {
+            Write-UpdateLog $line
+        }
+    }
+}
+
+function Invoke-PipLogged {
+    param([string]$Executable, [string[]]$Arguments)
+    $lines = & $Executable -m pip @Arguments 2>&1
+    $code = $LASTEXITCODE
+    Write-PipOutput $lines
+    return $code
+}
+
+$exe = if ($PythonExe -and (Test-Path -LiteralPath $PythonExe)) {
+    $PythonExe
+} else {
+    Find-Python
+}
 $latest = $null
 # Automatisk versionsuppdatering av Python är avstängd. Kontrollera/installera
 # bara efter uttryckligt anrop från startfilen när Python saknas.
@@ -124,6 +161,44 @@ if (-not $exe -and $InstallIfMissing -and $latest) {
     }
 }
 
+if ($BootstrapPackages) {
+    try {
+        $logDir = Split-Path -Parent $LogPath
+        if ($logDir) { $null = New-Item -ItemType Directory -Path $logDir -Force }
+        Write-UpdateLog "`r`n=== Första Python-tilläggsinstallationen $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ==="
+        if (-not $exe -or -not (Test-Path -LiteralPath $exe)) {
+            throw 'Ingen fungerande Python hittades för tilläggsinstallationen.'
+        }
+        if (-not (Test-Path -LiteralPath $RequirementsPath)) {
+            throw "requirements.txt saknas: $RequirementsPath"
+        }
+        Write-UpdateLog "Python: $exe"
+        $pipExit = Invoke-PipLogged -Executable $exe -Arguments @(
+            'install', '--upgrade', '--disable-pip-version-check', 'pip')
+        if ($pipExit -ne 0) {
+            Write-UpdateLog "VARNING: pip själv kunde inte uppdateras (kod $pipExit); tilläggen provas ändå."
+        }
+        $packagesOk = $false
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            $pipExit = Invoke-PipLogged -Executable $exe -Arguments @(
+                'install', '--upgrade', '--prefer-binary',
+                '--disable-pip-version-check', '-r', $RequirementsPath)
+            if ($pipExit -eq 0) { $packagesOk = $true; break }
+            Write-UpdateLog "VARNING: tilläggsförsök $attempt misslyckades (kod $pipExit)."
+        }
+        if (-not $packagesOk) {
+            throw 'Tilläggsuppdateringen misslyckades två gånger.'
+        }
+        Write-UpdateLog 'INFO: Första installationen av Python-tillägg lyckades.'
+        exit 0
+    } catch {
+        $message = "FEL (Python-tillägg): $($_.Exception.Message)"
+        Write-UpdateLog $message
+        [Console]::Error.WriteLine($message)
+        exit 1
+    }
+}
+
 if ($WeeklyUpdate) {
     try {
         $logDir = Split-Path -Parent $LogPath
@@ -146,9 +221,8 @@ if ($WeeklyUpdate) {
                 Out-File -FilePath $LogPath -Append -Encoding utf8
         }
 
-        & $exe -m pip install --upgrade --disable-pip-version-check pip 2>&1 |
-            Out-File -FilePath $LogPath -Append -Encoding utf8
-        $pipExit = $LASTEXITCODE
+        $pipExit = Invoke-PipLogged -Executable $exe -Arguments @(
+            'install', '--upgrade', '--disable-pip-version-check', 'pip')
         if ($pipExit -ne 0) {
             "VARNING: pip kunde inte uppdateras (kod $pipExit); försöker ändå med tilläggen." |
                 Out-File -FilePath $LogPath -Append -Encoding utf8
@@ -156,10 +230,10 @@ if ($WeeklyUpdate) {
 
         $packagesOk = $false
         for ($attempt = 1; $attempt -le 2; $attempt++) {
-            & $exe -m pip install --upgrade --prefer-binary `
-                --disable-pip-version-check -r $RequirementsPath 2>&1 |
-                Out-File -FilePath $LogPath -Append -Encoding utf8
-            if ($LASTEXITCODE -eq 0) { $packagesOk = $true; break }
+            $pipExit = Invoke-PipLogged -Executable $exe -Arguments @(
+                'install', '--upgrade', '--prefer-binary',
+                '--disable-pip-version-check', '-r', $RequirementsPath)
+            if ($pipExit -eq 0) { $packagesOk = $true; break }
             "Försök $attempt misslyckades." |
                 Out-File -FilePath $LogPath -Append -Encoding utf8
         }

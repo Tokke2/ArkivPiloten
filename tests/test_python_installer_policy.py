@@ -54,11 +54,16 @@ def test_package_updates_are_scheduled_weekly_not_run_on_each_start():
     assert batch.count("--status") == 1  # bara vid engångs-bootstrap
     package_block = batch.split('if not exist "%PKGSTATE%"', 1)[1]
     bootstrap, later = package_block.split(") else (", 1)
-    assert "pip install --upgrade" in bootstrap
+    assert "-BootstrapPackages" in bootstrap
+    assert "pip install --upgrade" not in bootstrap
     assert "pip install --upgrade" not in later
+    assert "Invoke-PipLogged" in policy
+    assert "INFO (ofarlig PATH-varning" in policy
+    assert "kvarlämnad metadata från avbruten avinstallation" in policy
+    assert "incompletely removed|invalid" in policy
     assert "if (-not $exe -and $InstallIfMissing) { $latest = Get-LatestPythonVersion }" in policy
     assert "if ($WeeklyUpdate) {" in policy
-    assert "pip install --upgrade --prefer-binary" in policy
+    assert "'--upgrade', '--prefer-binary'" in policy
     assert "Automatisk versionsuppdatering av Python är avstängd." in policy
     assert "Python-versionen ändras inte automatiskt." in scheduler
     assert "-DaysOfWeek Monday" in scheduler

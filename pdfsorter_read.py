@@ -46,12 +46,14 @@ from __future__ import annotations
 import concurrent.futures
 import io
 import json
+import logging
 import math
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 from collections import Counter
@@ -218,6 +220,46 @@ def status_text() -> str:
     return f"PDF-motor: {engine}  |  OCR: {ocr}"
 
 
+class _PdfDiagnosticCapture(logging.Handler):
+    """Collect and de-duplicate warnings from PDF engines during one read."""
+
+    _PREFIXES = ("pdfminer", "pypdf", "fitz", "pymupdf")
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self._thread_id = threading.get_ident()
+        self._counts: Counter = Counter()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if (record.thread != self._thread_id
+                or not record.name.startswith(self._PREFIXES)):
+            return
+        try:
+            message = record.getMessage().strip()[:800]
+            if not message:
+                return
+            engine = record.name.split(".", 1)[0]
+            level = "error" if record.levelno >= logging.ERROR else "warning"
+            self._counts[(engine, level, message)] += 1
+        except Exception:
+            return
+
+    def __enter__(self):
+        logging.getLogger().addHandler(self)
+        return self
+
+    def __exit__(self, _kind, _value, _traceback):
+        logging.getLogger().removeHandler(self)
+        self.close()
+
+    def rows(self) -> List[Dict[str, Any]]:
+        return [
+            {"engine": engine, "level": level, "message": message,
+             "count": count}
+            for (engine, level, message), count in self._counts.most_common()
+        ]
+
+
 @dataclass
 class Extraction:
     path: Path
@@ -242,6 +284,9 @@ class Extraction:
     #:kommer = starkt avsändarbevis). Tom vid t.ex. pdfminer (inga sidor).
     token_pages: Dict[str, int] = field(default_factory=dict)
     error: str = ""
+    #: Transienta PDF-motorvarningar, loggas per fil av sorteringsmotorn.
+    #: Inte cachelagrade: äldre texter ska inte tvingas läsas/OCR:as igen.
+    pdf_diagnostics: List[Dict[str, Any]] = field(default_factory=list)
     #: Dokumentets datum, valt enligt reglerna i find_document_date().
     doc_date: Optional[date] = None
     #: Varför just det datumet valdes: "fakturadatum", "brevhuvud",
@@ -1295,20 +1340,29 @@ def extract(path: Path, max_pages: int = 0, ocr_enabled: bool = True,
                        (_x_pdfminer, has_pdfminer())):
             if not ok:
                 continue
+            capture = _PdfDiagnosticCapture()
             try:
-                text, meta, pages, total = fn(path, max_pages)
-                if len(text) > len(res.text):
-                    res.text, res.metadata, res.pages_read = text, meta, pages
-                    res.page_count = total or res.page_count
-                    try:
-                        res.page_starts = json.loads(meta.pop("_page_starts", "[]"))
-                    except (TypeError, ValueError):
-                        res.page_starts = []
-                if len(res.text) >= MIN_TEXT_CHARS:
-                    res.error = ""
-                    break
+                with capture:
+                    text, meta, pages, total = fn(path, max_pages)
+                    if len(text) > len(res.text):
+                        res.text, res.metadata, res.pages_read = text, meta, pages
+                        res.page_count = total or res.page_count
+                        try:
+                            res.page_starts = json.loads(meta.pop("_page_starts", "[]"))
+                        except (TypeError, ValueError):
+                            res.page_starts = []
+                    if len(res.text) >= MIN_TEXT_CHARS:
+                        res.error = ""
+                        break
             except Exception as exc:
+                engine = fn.__name__.removeprefix("_x_")
+                res.pdf_diagnostics.append({
+                    "engine": engine, "level": "error",
+                    "message": f"{type(exc).__name__}: {exc}", "count": 1,
+                })
                 res.error = f"{type(exc).__name__}: {exc}"
+            finally:
+                res.pdf_diagnostics.extend(capture.rows())
 
         if len(res.text) < MIN_TEXT_CHARS and ocr_enabled and ocr_available():
             # Helt skannad sida - OCR:a allt

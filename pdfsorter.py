@@ -3210,6 +3210,49 @@ class SortEngine:
             pass
         with LogContext("tid", f"analys {path.name}"):
             ext = read_pdf(path, self.settings)
+            pdf_diagnostics = list(getattr(ext, "pdf_diagnostics", []) or [])
+            if pdf_diagnostics:
+                warning_count = sum(
+                    int(row.get("count", 1) or 1)
+                    for row in pdf_diagnostics if row.get("level") != "error")
+                motor_error_count = sum(
+                    int(row.get("count", 1) or 1)
+                    for row in pdf_diagnostics if row.get("level") == "error")
+                engines = ", ".join(sorted({
+                    str(row.get("engine", "PDF")) for row in pdf_diagnostics
+                }))
+                if ext.text:
+                    summary = (
+                        f"PDF-läsning {path.name}: text kunde ändå läsas; "
+                        f"{warning_count} varningar och {motor_error_count} "
+                        f"reservmotorfel ({engines}).")
+                    summary_level = "warn"
+                else:
+                    summary = (
+                        f"PDF-läsning misslyckades för {path.name}: "
+                        f"{warning_count} varningar, {motor_error_count} motorfel "
+                        f"({engines}). {ext.error or 'Ingen text kunde läsas.'}")
+                    summary_level = "err"
+                self.log(summary, summary_level)
+                for row in pdf_diagnostics[:8]:
+                    engine = str(row.get("engine", "PDF"))
+                    message = str(row.get("message", ""))
+                    count = max(1, int(row.get("count", 1) or 1))
+                    motor_failed = row.get("level") == "error"
+                    label = ("reservmotorfel" if ext.text else "motorfel") \
+                        if motor_failed else "återhämtningsbar varning"
+                    repeated = f" (upprepades {count} gånger)" if count > 1 else ""
+                    self.log(
+                        f"PDF-detalj · {path.name} · {engine} · {label}: "
+                        f"{message}{repeated}",
+                        "warn" if ext.text or not motor_failed else "err")
+                if len(pdf_diagnostics) > 8:
+                    self.log(
+                        f"PDF-detalj · {path.name}: "
+                        f"{len(pdf_diagnostics) - 8} ytterligare unika meddelanden "
+                        "hopslagna i sammanfattningen.", "info")
+                if hasattr(ext, "pdf_diagnostics"):
+                    ext.pdf_diagnostics.clear()
             if getattr(ext, "ocr_pages", None):
                 page_notes = []
                 for page in ext.ocr_pages:
