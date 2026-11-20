@@ -24,7 +24,9 @@ def test_category_mapping_has_top_selector_and_three_role_specific_columns():
     assert 'self.var_cat_select.trace_add(' in source
     assert '"write", lambda *_args: self._on_cat_select()' in source
     assert "self.default_keyword_combo = ttk.Combobox(" in source
-    assert 'cols = ("word", "kind", "weight", "whole", "hits")' in source
+    assert 'cols = ("word", "kind", "weight", "whole", "hits", "folder")' in source
+    assert '("folder", "MAPP", 12, "w", True)' in source
+    assert 'kw.get("hits", 0), keyword_folder_label(cat, kw["text"])' in source
     assert 'columns=("folder", "words"), show="headings"' in source
     assert 'text="KOPPLADE STÖDORD"' in source
     assert 'values=(folder, ", ".join(mapped) or "—")' in source
@@ -331,3 +333,60 @@ def test_folder_list_displays_which_saved_words_are_mapped_to_each_folder():
         ("Bank/Utbetalningar", "Utbetalningar"),
         ("Fakturor", "faktura"),
     ]
+
+
+def test_keyword_folder_label_shows_mapping_or_dash():
+    cat = {"subfolder_keyword_map": {"giro": "Kvitton"}}
+
+    assert P.keyword_folder_label(cat, "Giro") == "Kvitton"
+    assert P.keyword_folder_label(cat, "lön") == "–"
+    assert P.keyword_folder_label({}, "giro") == "–"
+    assert P.keyword_folder_label(None, "giro") == "–"
+    assert P.keyword_folder_label({"subfolder_keyword_map": ["fel"]}, "giro") == "–"
+
+
+def test_keyword_view_shows_folder_column_and_keeps_selection():
+    class Tree:
+        def __init__(self):
+            self.rows = {}
+            self.selected = ["lon"]
+
+        def get_children(self):
+            return list(self.rows)
+
+        def delete(self, row):
+            self.rows.pop(row, None)
+
+        def selection(self):
+            return list(self.selected)
+
+        def insert(self, _parent, _end, iid=None, tags=(), values=()):
+            self.rows[iid] = values
+
+        def exists(self, iid):
+            return iid in self.rows
+
+        def selection_add(self, iid):
+            if iid not in self.selected:
+                self.selected.append(iid)
+
+    class Rules:
+        def get(self, _name):
+            return {
+                "keywords": [{"text": "lon", "weight": 1.0},
+                             {"text": "giro", "weight": 2.0}],
+                "subfolder_keyword_map": {"giro": "Kvitton"},
+            }
+
+    app = object.__new__(P.App)
+    app.kw_tree = Tree()
+    app.rules = Rules()
+    app._selected_cat = lambda: "Bank"
+    app._kw_sort = ("word", False)
+
+    P.App._refresh_keyword_view(app)
+
+    assert app.kw_tree.rows["lon"][-1] == "–"
+    assert app.kw_tree.rows["giro"][-1] == "Kvitton"
+    assert len(app.kw_tree.rows["lon"]) == 6
+    assert app.kw_tree.selected == ["lon"]

@@ -2196,6 +2196,15 @@ def match_subfolder_keyword(rules: Rules, category: str,
     return (next(iter(matched_folders)), True) if len(matched_folders) == 1 else ("", True)
 
 
+def keyword_folder_label(cat: Optional[Dict[str, Any]], text: str) -> str:
+    """Mappkolumnens text för ett stödord: kopplad mapp eller –."""
+    mapping = (cat or {}).get("subfolder_keyword_map", {}) or {}
+    if not isinstance(mapping, dict):
+        return "–"
+    folder = str(mapping.get(normalize(text), "") or "").strip()
+    return folder if folder else "–"
+
+
 def resolve_automatic_subfolder(rules: Rules, category: str,
                                 extraction: Extraction) -> Tuple[str, str]:
     """Return (folder, error) for configured keyword/template/learned routing."""
@@ -11509,7 +11518,7 @@ class App:
         support = support_card.body
         support.columnconfigure(0, weight=1)
         support.rowconfigure(0, weight=1)
-        cols = ("word", "kind", "weight", "whole", "hits")
+        cols = ("word", "kind", "weight", "whole", "hits", "folder")
         self.kw_tree = ttk.Treeview(support, columns=cols, show="headings",
                                     selectmode="extended")
         T.fit_columns(self.kw_tree, (
@@ -11517,7 +11526,8 @@ class App:
             ("kind", "TYP", 18, "w", False),
             ("weight", "VIKT", 4, "center", False),
             ("whole", "HELT ORD", 4, "center", False),
-            ("hits", "TRÄFFAR", 5, "center", False)))
+            ("hits", "TRÄFFAR", 5, "center", False),
+            ("folder", "MAPP", 12, "w", True)))
         for col in cols:
             self.kw_tree.heading(col, command=lambda c=col: self._sort_keywords(c))
         self.kw_tree.grid(row=0, column=0, sticky="nsew", padx=(T.INNER, 0),
@@ -11907,6 +11917,7 @@ class App:
             self.lbl_subfolder_map_status.configure(
                 text="Välj en kategori i menyn ovan.")
             if hasattr(self, "kw_tree"):
+                self._refresh_keyword_view()
                 self._cat_map_show_selected_mapping()
             return
         mapping = cat.setdefault("subfolder_keyword_map", {})
@@ -11931,6 +11942,8 @@ class App:
             text=(f"{len(folders)} skapade mappar. Dra ett sparat stödord "
                   "från vänster eller markera ord och mapp och tryck Ctrl+M."))
         if hasattr(self, "kw_tree"):
+            # Mappkolumnen i stödordstabellen speglar alltid kopplingarna.
+            self._refresh_keyword_view()
             self._cat_map_show_selected_mapping()
 
     def _cat_map_set_row_highlight(self, state_attr: str, tree, row: str,
@@ -12351,6 +12364,10 @@ class App:
 
     def _refresh_keyword_view(self) -> None:
         """Rita om alla stödord i vald kategori med aktuell sortering."""
+        try:
+            selected = set(self.kw_tree.selection())
+        except Exception:
+            selected = set()
         for row in self.kw_tree.get_children():
             self.kw_tree.delete(row)
         name = self._selected_cat()
@@ -12367,6 +12384,7 @@ class App:
             "weight": lambda k: k["weight"],
             "whole": lambda k: k.get("whole_word", True),
             "hits": lambda k: k.get("hits", 0),
+            "folder": lambda k: keyword_folder_label(cat, k["text"]),
             "source": lambda k: k.get("source", ""),
         }.get(col, lambda k: k.get("hits", 0))
         words.sort(key=keyfn, reverse=desc)
@@ -12383,7 +12401,13 @@ class App:
             self.kw_tree.insert("", "end", iid=kw["text"], tags=tags, values=(
                 kw["text"], label, f"{kw['weight']:g}",
                 "ja" if kw.get("whole_word", True) else "nej",
-                kw.get("hits", 0)))
+                kw.get("hits", 0), keyword_folder_label(cat, kw["text"])))
+        for iid in selected:
+            try:
+                if self.kw_tree.exists(iid):
+                    self.kw_tree.selection_add(iid)
+            except Exception:
+                pass
 
         if hasattr(self, "lbl_kw_sum"):
             starka = sum(1 for k in cat["keywords"] if keyword_strength(k["text"]))
