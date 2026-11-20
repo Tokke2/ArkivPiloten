@@ -15149,13 +15149,19 @@ class App:
                     parent=self.root)
             return
         if steg == "aktuell":
+            bygge = str(info.get("local_commit") or "")[:12]
             self._h("uppdatering",
                     f"Ingen nyare version (kör {APP_VERSION}, "
-                    f"GitHub: {info.get('remote')})")
+                    f"GitHub: {info.get('remote')}"
+                    + (f", bygge {bygge}" if bygge else "") + ")")
             if manual:
-                self.messagebox.showinfo(
-                    APP_NAME, f"Du har den senaste versionen ({APP_VERSION}).",
-                    parent=self.root)
+                # Samma versionsnummer kan byggas om flera gånger: visa
+                # vilket bygge som är installerat så att det går att jämföra
+                # med "Paket byggt från ..." i releasen.
+                text = f"Du har den senaste versionen ({APP_VERSION})."
+                if bygge:
+                    text += f"\nBygge: {bygge}"
+                self.messagebox.showinfo(APP_NAME, text, parent=self.root)
             return
         if steg == "osaker":
             self._h("uppdatering",

@@ -758,3 +758,46 @@ def test_new_version_is_a_notice_when_autoupdate_is_off(tmp_path, monkeypatch):
     assert app.messagebox.fragor == [] and app.messagebox.varningar == []
     assert app.aviseringar and "9.9.9" in app.aviseringar[0]
     assert any("Ny version 9.9.9" in t for _n, t in app.handelser)
+
+
+def _prompt_app(monkeypatch):
+    monkeypatch.setattr(P, "save_settings", lambda settings: None)
+
+    class Box:
+        def __init__(self):
+            self.shown = []
+
+        def showinfo(self, _title, text, parent=None):
+            self.shown.append(text)
+
+    app = object.__new__(P.App)
+    app.settings = {}
+    app.messagebox = Box()
+    app.root = None
+    app._h = lambda *args, **kwargs: None
+    return app
+
+
+def test_up_to_date_dialog_shows_installed_build(monkeypatch):
+    app = _prompt_app(monkeypatch)
+
+    P.App._update_prompt(
+        app,
+        {"ok": True, "available": False, "remote": "1.4.14",
+         "local_commit": "822b3a126faa5f818429729f72a21d93e538137f"},
+        manual=True)
+
+    assert len(app.messagebox.shown) == 1
+    assert "1.4.14" in app.messagebox.shown[0]
+    assert "Bygge: 822b3a126faa" in app.messagebox.shown[0]
+
+
+def test_up_to_date_dialog_hides_build_when_unknown(monkeypatch):
+    app = _prompt_app(monkeypatch)
+
+    P.App._update_prompt(
+        app, {"ok": True, "available": False, "remote": "1.4.14",
+              "local_commit": ""},
+        manual=True)
+
+    assert "Bygge:" not in app.messagebox.shown[0]
