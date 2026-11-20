@@ -1963,6 +1963,24 @@ def validate_subfolder_override(value: str) -> Tuple[str, str]:
     return "/".join(parts), ""
 
 
+def preview_destination_path(base: Optional[Path], subfolder: str,
+                             filename: str) -> Optional[Path]:
+    """Förhandsvisning av målsökvägen i granskningsdialogen.
+
+    Speglar destination_for(): bas + validerade undermappsdelar + filnamn.
+    Rör inga filer. Returnerar None när basen saknas.
+    """
+    if base is None:
+        return None
+    dest = Path(base)
+    cleaned, _error = validate_subfolder_override(subfolder)
+    for part in cleaned.split("/"):
+        if part:
+            dest = dest / safe_folder_name(part)
+    name = str(filename or "").strip()
+    return dest / name if name else dest
+
+
 def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, List[str]]:
     """Return literal, whole-word support matches from PDF text by category.
 
@@ -4401,6 +4419,19 @@ def rules_transfer_dir(kind: str) -> Path:
     return folder
 
 
+def validate_rules_transfer(data: Any) -> Tuple[List[Dict[str, Any]], str]:
+    """Granska en importerad regelfil. Returnerar (kategorier, feltext)."""
+    if not isinstance(data, dict):
+        return [], "Filen är inte en giltig regelfil."
+    raw = data.get("categories")
+    if not isinstance(raw, list) or not raw:
+        return [], "Filen innehöll inga kategorier."
+    incoming = Rules(data)
+    if not incoming.categories:
+        return [], "Filen innehöll inga giltiga kategorier."
+    return incoming.categories, ""
+
+
 def _write_pdf_copy(destination: Path, write_to_temp: Callable[[Path], None]) -> Path:
     """Write a PDF beside its destination, then atomically publish the copy."""
     destination = Path(destination)
@@ -5479,6 +5510,9 @@ class ReviewDialog:
         self.subfolder_combo = ttk.Combobox(
             subrow, textvariable=self.var_subfolder, values=(), state="normal")
         self.subfolder_entry = self.subfolder_combo
+        # Målsökvägen uppdateras live medan användaren skriver/väljer.
+        self.var_subfolder.trace_add(
+            "write", lambda *_: self._update_destination_preview())
         self.subfolder_combo.grid(row=1, column=0, columnspan=3,
                                   sticky="ew", pady=(0, 5))
         subfolder_actions = [
@@ -5522,15 +5556,22 @@ class ReviewDialog:
         wrap_widgets.append(self.lbl_subfolder_hint)
         self.lbl_subfolder_hint.grid(
             row=5, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 5))
-        self._combo_hint_lbl.grid(row=6, column=0, columnspan=2, sticky="w",
+        # Hela målsökvägen syns innan användaren bekräftar flytten.
+        self.lbl_destination = ttk.Label(
+            catbox, text="", style="Card.TLabel",
+            wraplength=review_text_width(), justify="left")
+        wrap_widgets.append(self.lbl_destination)
+        self.lbl_destination.grid(
+            row=6, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 5))
+        self._combo_hint_lbl.grid(row=7, column=0, columnspan=2, sticky="w",
                                   padx=14, pady=(0, 6))
 
         ttk.Radiobutton(catbox, text="Skapa ny kategori:", value="new",
                         variable=self.mode, style="Card.TRadiobutton",
                         command=self._sync).grid(
-                            row=7, column=0, sticky="w", padx=14, pady=(0, 8))
+                            row=8, column=0, sticky="w", padx=14, pady=(0, 8))
         self.new_entry = ttk.Entry(catbox)
-        self.new_entry.grid(row=7, column=1, sticky="ew",
+        self.new_entry.grid(row=8, column=1, sticky="ew",
                             padx=(8, 14), pady=(0, 8))
         self.new_entry.bind("<KeyRelease>", self._new_name_changed)
         if self.guess_name:
@@ -5543,7 +5584,7 @@ class ReviewDialog:
                       text=f"🔎 Uppslag via org.nr: {suggested_sender}"
                            " - kontrollera namnet innan du sparar",
                       style="CardMuted.TLabel").grid(
-                          row=8, column=0, columnspan=2, sticky="w",
+                          row=9, column=0, columnspan=2, sticky="w",
                           padx=14, pady=(0, 6))
         # "Ny mapp"-fältet ska vara låst när "Befintlig" är förvalt.
         self._sync()
@@ -5551,7 +5592,7 @@ class ReviewDialog:
             catbox,
             text="Alla stödord du väljer sparas för framtida exakta matchningar.",
             style="CardMuted.TLabel").grid(
-                row=9, column=0, columnspan=2, sticky="w",
+                row=10, column=0, columnspan=2, sticky="w",
                 padx=14, pady=(4, 12))
         self._update_subfolder_hint()
 
@@ -6243,7 +6284,25 @@ class ReviewDialog:
         except Exception:
             pass
 
+    def _update_destination_preview(self) -> None:
+        """Visa hela målsökvägen (bas + undermapp + filnamn) före flytt."""
+        label = getattr(self, "lbl_destination", None)
+        if label is None:
+            return
+        category = self._category()
+        if not category:
+            label.configure(text="Välj en kategori för att se målsökvägen.")
+            return
+        dest = preview_destination_path(
+            self._subfolder_base(), self.var_subfolder.get(),
+            self.decision.path.name)
+        if dest is None:
+            label.configure(text="Välj en kategori för att se målsökvägen.")
+        else:
+            label.configure(text=f"Sparas till: {dest}")
+
     def _update_subfolder_hint(self) -> None:
+        self._update_destination_preview()
         label = getattr(self, "lbl_subfolder_hint", None)
         if label is None:
             return
@@ -7646,6 +7705,11 @@ def meny_spec() -> List[Dict[str, Any]]:
              "atgard": "_open_rules_import_dir"},
             {"id": "oppna_export", "text": "Öppna exportmappen",
              "atgard": "_open_rules_export_dir"},
+            {"typ": "avdelare"},
+            {"id": "exportera_regler", "text": "Exportera regler…",
+             "snabb": f"{c}+E", "atgard": "_export"},
+            {"id": "importera_regler", "text": "Importera regler…",
+             "snabb": f"{c}+I", "atgard": "_import"},
             {"typ": "avdelare"},
             {"id": "avsluta", "text": "Avsluta", "snabb": f"{c}+Q",
              "atgard": "quit_app"},
@@ -13259,9 +13323,14 @@ class App:
             filetypes=[("JSON", "*.json")])
         if not path:
             return
-        _write_json(Path(path), {"schema_version": SCHEMA_VERSION, "updated": now_iso(),
+        _write_json(Path(path), {"app_version": APP_VERSION,
+                                 "schema_version": SCHEMA_VERSION, "updated": now_iso(),
                                  "categories": self.rules.categories})
-        self.messagebox.showinfo(APP_NAME, f"Sparade till:\n{path}", parent=self.root)
+        count = sum(len(cat.get("keywords", [])) for cat in self.rules.categories)
+        self.messagebox.showinfo(
+            APP_NAME,
+            f"Exporterade {len(self.rules.categories)} kategorier och "
+            f"{count} stödord till:\n{path}", parent=self.root)
 
     def _import(self) -> None:
         try:
@@ -13274,30 +13343,66 @@ class App:
             filetypes=[("JSON", "*.json")])
         if not path:
             return
-        incoming = Rules(_read_json(Path(path), {}), self.rules.path)
-        if not incoming.categories:
-            self.messagebox.showwarning(APP_NAME, "Filen innehöll inga kategorier.", parent=self.root)
+        # Läs rått: _read_json() skulle döpa om en trasig importfil till
+        # .broken och är till för appens egna filer, inte användarens.
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, UnicodeDecodeError) as exc:
+            self.messagebox.showerror(
+                APP_NAME, f"Filen kunde inte läsas:\n{path}\n\n{exc}",
+                parent=self.root)
             return
+        except ValueError as exc:
+            self.messagebox.showerror(
+                APP_NAME, f"Filen är inte giltig JSON:\n{path}\n\n{exc}",
+                parent=self.root)
+            return
+        incoming, error = validate_rules_transfer(data)
+        if error:
+            self.messagebox.showwarning(APP_NAME, error, parent=self.root)
+            return
+        total_words = sum(len(cat.get("keywords", [])) for cat in incoming)
         merge = self.messagebox.askyesnocancel(
-            APP_NAME, f"{len(incoming.categories)} kategorier hittades.\n\n"
+            APP_NAME, f"{len(incoming)} kategorier och {total_words} stödord hittades.\n\n"
                       "Ja = slå ihop med befintliga\nNej = ersätt allt", parent=self.root)
         if merge is None:
             return
+        backup = None
         if merge:
-            for cat in incoming.categories:
-                target = self.rules.ensure_category(cat["name"], cat["folder"])
-                if cat.get("subfolder"):
-                    target["subfolder"] = cat["subfolder"]
-                if cat.get("subfolder_path"):
-                    target["subfolder_path"] = cat["subfolder_path"]
-                self.rules.add_keywords(cat["name"], [k["text"] for k in cat["keywords"]],
-                                        source="import")
+            counts = self.rules.merge_transfer_categories(incoming)
+            summary = (f"Importen är klar.\n\nNya kategorier: {counts['new_categories']}\n"
+                       f"Nya stödord: {counts['new_keywords']}\n"
+                       f"Befintliga kategorier som berörts: {counts['updated_categories']}\n\n"
+                       "Befintliga stödord, vikter och mappnamn är orörda.")
         else:
-            self.rules.categories = incoming.categories
+            rules_path = self.rules.path
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup = rules_path.with_name(
+                f"{rules_path.stem}.before-import-{timestamp}{rules_path.suffix}")
+            temporary = backup.with_name(backup.name + ".tmp")
+            try:
+                self.rules.save()
+                shutil.copy2(rules_path, temporary)
+                os.replace(temporary, backup)
+            except Exception as exc:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.messagebox.showerror(
+                    APP_NAME,
+                    f"Säkerhetskopian kunde inte skapas. Inget har ersatts.\n\n{exc}",
+                    parent=self.root)
+                return
+            self.rules.categories = incoming
+            summary = (f"Ersatte alla regler med {len(incoming)} kategorier och "
+                       f"{total_words} stödord.\n\nSäkerhetskopia: {backup}")
         self.rules.save()
         _PATTERN_CACHE.clear()
         self._warm_patterns()
         self._refresh_categories()
+        self.messagebox.showinfo(APP_NAME, summary, parent=self.root)
 
     # ======================================================================
     # Flik 2 - Granska

@@ -1071,6 +1071,89 @@ class Rules:
         self._rebuild_index()
         return cat
 
+    def merge_transfer_categories(
+            self, cats: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Slå ihop importerade kategorier med de befintliga.
+
+        Lokalt inlärda data vinner vid krock: befintliga stödord behålls
+        orörda (vikt, träffar), medan nya ord får med sig vikt,
+        helordsflagg och källa från filen men nollställda träffar - de har
+        aldrig matchat på den här datorn. Tomma lokala fält (standardord,
+        undermappar, mallar) fylls på från filen. Lokala mappnamn byts
+        aldrig ut av en import. Returnerar räknare för sammanfattningen.
+        """
+        counts = {"new_categories": 0, "new_keywords": 0,
+                  "updated_categories": 0}
+        for incoming in cats or []:
+            if not isinstance(incoming, dict):
+                continue
+            name = str(incoming.get("name", "")).strip()
+            if not name:
+                continue
+            target = self.get(name)
+            if target is None:
+                target = self.ensure_category(name, incoming.get("folder"))
+                counts["new_categories"] += 1
+            else:
+                counts["updated_categories"] += 1
+            existing = {kw["text"] for kw in target["keywords"]}
+            for kw in incoming.get("keywords", []):
+                if not isinstance(kw, dict):
+                    continue
+                text = normalize(kw.get("text", ""))
+                if not text or text in existing:
+                    continue
+                existing.add(text)
+                target["keywords"].append({
+                    "text": text,
+                    "weight": float(kw.get("weight", 1.0) or 1.0),
+                    "whole_word": bool(kw.get("whole_word", True)),
+                    "hits": 0,
+                    "added": now_iso(),
+                    "source": str(kw.get("source", "import") or "import"),
+                })
+                counts["new_keywords"] += 1
+            words = {kw["text"] for kw in target["keywords"]}
+            if not target.get("default_keyword"):
+                default = normalize(incoming.get("default_keyword", ""))
+                if default in words:
+                    target["default_keyword"] = default
+            mapping = target.get("subfolder_keyword_map")
+            if not isinstance(mapping, dict):
+                mapping = {}
+                target["subfolder_keyword_map"] = mapping
+            raw_map = incoming.get("subfolder_keyword_map", {})
+            if isinstance(raw_map, dict):
+                for word, folder in raw_map.items():
+                    word = normalize(word)
+                    folder = str(folder or "").strip()
+                    if word in words and folder and word not in mapping:
+                        mapping[word] = folder
+            for key in ("subfolder", "subfolder_path"):
+                if not str(target.get(key, "") or "").strip():
+                    value = str(incoming.get(key, "") or "").strip()
+                    if value:
+                        target[key] = value
+            templates = target.get("subfolder_templates")
+            if not isinstance(templates, list):
+                templates = []
+                target["subfolder_templates"] = templates
+            raw_templates = incoming.get("subfolder_templates", [])
+            if isinstance(raw_templates, list):
+                for template in raw_templates:
+                    if (isinstance(template, dict)
+                            and template not in templates):
+                        templates.append(dict(template))
+            if not target.get("min_keywords"):
+                try:
+                    minimum = int(incoming.get("min_keywords", 0) or 0)
+                except (TypeError, ValueError):
+                    minimum = 0
+                if minimum > 0:
+                    target["min_keywords"] = minimum
+        self._rebuild_index()
+        return counts
+
     def remove_keyword(self, name: str, word: str) -> bool:
         cat = self.get(name)
         if not cat:
