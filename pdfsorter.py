@@ -4763,6 +4763,51 @@ def _existing_subfolder_choices(base: Optional[Path]) -> List[str]:
         return []
 
 
+def _is_year_dir_name(name: str) -> bool:
+    """Är ett mappnamn under kategoriroten ett årsled (2025, Utan datum)?"""
+    text = str(name or "")
+    return text == "Utan datum" or (len(text) == 4 and text.isdigit())
+
+
+def _sibling_year_subfolder_choices(root: Optional[Path],
+                                    base: Optional[Path]) -> List[str]:
+    """Undermappsförslag från filens eget år plus alla andra år.
+
+    En undermapp som skapats under ett år ska föreslås även för filer
+    från andra år i samma kategori. Egets års val ligger först; övriga
+    år fyller på med sådant som saknas. Mappar som inte är årsled
+    (t.ex. äldre manuella mappar direkt under roten) genomsöks inte.
+    """
+    own = _existing_subfolder_choices(base)
+    if root is None or base is None:
+        return own
+    try:
+        rel = Path(base).relative_to(Path(root))
+    except (ValueError, OSError):
+        return own
+    if not rel.parts:
+        return own
+    current, rest = rel.parts[0], rel.parts[1:]
+    try:
+        siblings = sorted(Path(root).iterdir(),
+                          key=lambda item: item.name.casefold())
+    except OSError:
+        return own
+    seen = set(own)
+    extra: List[str] = []
+    for sibling in siblings:
+        if sibling.name == current or not _is_year_dir_name(sibling.name):
+            continue
+        if sibling.is_symlink() or not sibling.is_dir():
+            continue
+        candidate = sibling.joinpath(*rest) if rest else sibling
+        for choice in _existing_subfolder_choices(candidate):
+            if choice not in seen:
+                seen.add(choice)
+                extra.append(choice)
+    return own + sorted(extra, key=str.casefold)
+
+
 def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None:
     """Storleksanpassa och centrera ett fönster inom den synliga skärmen.
 
@@ -4994,6 +5039,7 @@ class ReviewDialog:
                  theme=None, preview: bool = False,
                  suggested_sender: str = "",
                  subfolder_base_resolver: Optional[Callable[[str], Path]] = None,
+                 subfolder_choices_resolver: Optional[Callable[[str], List[str]]] = None,
                  ui_language: str = "sv"):
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk, self.ttk, self.messagebox = tk, ttk, messagebox
@@ -5004,6 +5050,7 @@ class ReviewDialog:
         self.rules = rules
         self.candidates = candidates
         self.subfolder_base_resolver = subfolder_base_resolver
+        self.subfolder_choices_resolver = subfolder_choices_resolver
         self.ui_language = ui_language
         self.result: Optional[Dict[str, Any]] = None
 
@@ -6312,7 +6359,16 @@ class ReviewDialog:
         combo = getattr(self, "subfolder_combo", None)
         if combo is None:
             return
-        choices = _existing_subfolder_choices(self._subfolder_base())
+        choices: List[str] = []
+        resolver = getattr(self, "subfolder_choices_resolver", None)
+        if resolver is not None:
+            try:
+                resolved = resolver(self._category())
+                choices = list(resolved) if resolved else []
+            except Exception:
+                choices = []
+        if not choices:
+            choices = _existing_subfolder_choices(self._subfolder_base())
         variable = getattr(self, "var_subfolder", None)
         current = str(variable.get() if variable is not None else "").strip()
         if current and current not in choices:
@@ -6359,8 +6415,8 @@ class ReviewDialog:
             return
         label.configure(
             text=(f"Basplats: {base} · välj en befintlig undermapp i listan eller "
-                  "skriv en ny. Den skapas när du bekräftar flytten; tomt val "
-                  "använder standardplatsen."))
+                  "skriv en ny. Listan visar undermappar från alla år i kategorin; "
+                  "den skapas under det här årets mapp när du bekräftar flytten."))
 
     def _sync(self) -> None:
         # Rullgardinen är alltid skrivbar/sökbar; bara "Ny mapp"-fältet
@@ -13585,6 +13641,20 @@ class App:
                 base = base / safe_folder_name(part)
         return base
 
+    def _review_subfolder_choices(self, decision: Decision,
+                                  category: str) -> List[str]:
+        """Subfolder suggestions from the file's year plus all other years."""
+        cat = self.rules.get(category)
+        folder = cat["folder"] if cat else safe_folder_name(category)
+        root = Path(self.settings.get("output_dir") or ".") / safe_folder_name(folder)
+        try:
+            return _sibling_year_subfolder_choices(
+                root.resolve(), self._review_subfolder_base(
+                    decision, category).resolve())
+        except (OSError, ValueError):
+            return _existing_subfolder_choices(
+                self._review_subfolder_base(decision, category))
+
     def _process_queue(self, start: int = 0) -> None:
         """Visa högst en granskningsdialog/köprocessor åt gången.
 
@@ -13654,6 +13724,9 @@ class App:
                                    subfolder_base_resolver=(
                                        lambda category, d=decision:
                                        self._review_subfolder_base(d, category)),
+                                   subfolder_choices_resolver=(
+                                       lambda category, d=decision:
+                                       self._review_subfolder_choices(d, category)),
                                    ui_language=self.settings.get("ui_language", "sv"))
                 self._review_dialog = dlg
                 res = dlg.show()
