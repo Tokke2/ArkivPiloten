@@ -10,6 +10,7 @@ class _Window:
     def __init__(self, width: int, height: int):
         self.screen = (width, height)
         self.minimum = None
+        self.maximum = None
         self.request = None
 
     def winfo_screenwidth(self):
@@ -20,6 +21,9 @@ class _Window:
 
     def minsize(self, width: int, height: int):
         self.minimum = (width, height)
+
+    def maxsize(self, width: int, height: int):
+        self.maximum = (width, height)
 
     def geometry(self, value: str):
         self.request = value
@@ -46,6 +50,15 @@ def test_geometry_keeps_requested_size_when_display_is_large():
 
     assert window.request == "1280x880+320+100"
     assert window.minimum == (1060, 720)
+
+
+def test_window_cannot_be_resized_larger_than_the_screen():
+    window = _Window(1920, 1080)
+
+    P._fit_geometry(window, 1440, 960, 760, 600)
+
+    assert window.maximum == (1824, 1008)
+    assert window.maximum[0] <= 1920 and window.maximum[1] <= 1080
 
 
 class _MaximizableWindow(_Window):

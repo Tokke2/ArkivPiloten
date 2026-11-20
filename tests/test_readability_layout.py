@@ -48,7 +48,7 @@ def test_review_dialog_places_keywords_left_and_decision_controls_right():
     source = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
     assert "self._all.columnconfigure(0, weight=1, uniform=\"review-columns\")" in source
     assert "head.grid(row=0, column=1" in source
-    assert "box.grid(row=0, column=0, rowspan=row_box + 1" in source
+    assert "box.grid(row=0, column=0, rowspan=row_end" in source
     assert "catbox.grid(row=row_box, column=1" in source
     assert "_fit_geometry(self.win, 1440, 960, 760, 600)" in source
     assert "wide = self._outer.winfo_width() >= 760" in source

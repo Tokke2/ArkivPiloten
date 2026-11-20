@@ -4715,6 +4715,22 @@ def _review_preview_height(dialog_height: int) -> int:
     return max(160, min(440, int((height - 300) * 0.60)))
 
 
+def _preview_render_zoom(win) -> float:
+    """Rendera förhandsvisningen skarpare på HiDPI-skärmar.
+
+    Basen 1.4 (~100 dpi) räcker på vanliga skärmar; på tätare skärmar
+    skalas upp linjärt till högst dubbelt. Minnesgränsen sköts fortfarande
+    av _bounded_render_zoom vid själva renderingen.
+    """
+    try:
+        dpi = float(win.winfo_fpixels("1i"))
+    except Exception:
+        dpi = 96.0
+    if not dpi > 0:
+        dpi = 96.0
+    return 1.4 * min(2.0, max(1.0, dpi / 96.0))
+
+
 def _existing_subfolder_choices(base: Optional[Path]) -> List[str]:
     """Return safe existing subfolders up to two levels below ``base``."""
     if base is None:
@@ -4768,6 +4784,12 @@ def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None
     h = max(min_h_fit, min(max(1, want_h), avail_h))
     try:
         win.minsize(min_w_fit, min_h_fit)
+    except Exception:
+        pass
+    try:
+        # Användaren ska inte kunna dra fönstret större än skärmen:
+        # då hamnar knappraden utanför och går varken att se eller nå.
+        win.maxsize(avail_w, avail_h)
     except Exception:
         pass
     x = max(0, (sw - w) // 2)
@@ -5237,15 +5259,26 @@ class ReviewDialog:
                     padx=16, pady=(4, 10))
             next_row += 2
 
+        # Högerkolumnens ordning: filinfo, mappval, förhandsvisning.
+        # Mappvalet ("Befintlig ...", "Skapa ny ...", undermapp, målsökväg)
+        # ska synas utan rullning; förhandsvisningen ligger under och kan
+        # rullas fram vid behov.
+        row_box = 2
+        row_sep = 1
+        row_prev = -1
+        row_end = 3
+        if preview:
+            row_box, row_sep, row_prev = 1, 2, 3
+            row_end = 4
+
         self._review_separator = ttk.Separator(self._all)
-        self._review_separator.grid(row=1, column=1, sticky="ew", padx=14, pady=(10, 0))
+        self._review_separator.grid(row=row_sep, column=1, sticky="ew", padx=14, pady=(10, 0))
 
         # -- kompakt sidförhandsvisning och PDF-verktyg --------------------
-        row_box = 2
         prev = None
         if preview:
             prev = ttk.Frame(self._all, style="Card.TFrame")
-            prev.grid(row=2, column=1, sticky="ew", padx=14, pady=(10, 0))
+            prev.grid(row=row_prev, column=1, sticky="ew", padx=14, pady=(10, 0))
             prev.columnconfigure(0, weight=1)
             prev.rowconfigure(1, weight=1)
             self._prev_status = ttk.Label(
@@ -5336,13 +5369,12 @@ class ReviewDialog:
             preview_note.grid(row=4, column=0, columnspan=2,
                               sticky="w", padx=12, pady=(0, 8))
             self._start_preview_load()
-            row_box = 3
 
         # -- stödordslistan ------------------------------------------------
-        # Stödorden ligger kvar i vänsterkolumnen medan filinfo,
-        # förhandsvisning och mappval visas i högerkolumnen.
+        # Stödorden ligger kvar i vänsterkolumnen medan filinfo, mappval
+        # och förhandsvisning visas i högerkolumnen.
         box = ttk.Frame(self._all, style="Card.TFrame")
-        box.grid(row=0, column=0, rowspan=row_box + 1, sticky="nsew",
+        box.grid(row=0, column=0, rowspan=row_end, sticky="nsew",
                  padx=14, pady=(10, 10))
         box.columnconfigure(0, weight=1)
         box.rowconfigure(2, weight=1)
@@ -5612,29 +5644,29 @@ class ReviewDialog:
                 head.grid_configure(row=0, column=1, columnspan=1,
                                     sticky="ew", **pad)
                 self._review_separator.grid_configure(
-                    row=1, column=1, columnspan=1,
+                    row=row_sep, column=1, columnspan=1,
                     sticky="ew", padx=14, pady=(10, 0))
                 if prev is not None:
-                    prev.grid_configure(row=2, column=1, columnspan=1,
+                    prev.grid_configure(row=row_prev, column=1, columnspan=1,
                                         sticky="ew", padx=14, pady=(10, 0))
                 catbox.grid_configure(row=row_box, column=1, columnspan=1,
                                       sticky="ew", padx=14, pady=(12, 10))
-                box.grid_configure(row=0, column=0, rowspan=row_box + 1,
+                box.grid_configure(row=0, column=0, rowspan=row_end,
                                    columnspan=1, sticky="nsew",
                                    padx=14, pady=(10, 10))
             else:
-                self._all.rowconfigure(row_box + 1, weight=1)
+                self._all.rowconfigure(row_end, weight=1)
                 head.grid_configure(row=0, column=0, columnspan=2,
                                     sticky="ew", **pad)
                 self._review_separator.grid_configure(
-                    row=1, column=0, columnspan=2,
+                    row=row_sep, column=0, columnspan=2,
                     sticky="ew", padx=14, pady=(10, 0))
                 if prev is not None:
-                    prev.grid_configure(row=2, column=0, columnspan=2,
+                    prev.grid_configure(row=row_prev, column=0, columnspan=2,
                                         sticky="ew", padx=14, pady=(10, 0))
                 catbox.grid_configure(row=row_box, column=0, columnspan=2,
                                       sticky="ew", padx=14, pady=(12, 10))
-                box.grid_configure(row=row_box + 1, column=0, rowspan=1,
+                box.grid_configure(row=row_end, column=0, rowspan=1,
                                    columnspan=2, sticky="nsew",
                                    padx=14, pady=(10, 10))
             resize_wrapped_text()
@@ -5880,6 +5912,9 @@ class ReviewDialog:
                      "Inbäddad förhandsvisning kräver PyMuPDF.")
             return
         path = self.decision.path
+        # Räkna ut zoomen i huvudtråden: Tk-anrop är inte trådsäkra och
+        # load() körs i bakgrunden.
+        render_zoom = _preview_render_zoom(self.win)
 
         def load():
             bilder = []
@@ -5890,7 +5925,7 @@ class ReviewDialog:
                 with pymupdf.open(str(path)) as doc:
                     for i in range(min(3, len(doc))):
                         page = doc[i]
-                        preview_zoom = _bounded_render_zoom(page.rect, 1.4)
+                        preview_zoom = _bounded_render_zoom(page.rect, render_zoom)
                         pix = page.get_pixmap(
                             matrix=pymupdf.Matrix(preview_zoom, preview_zoom),
                             alpha=False)
@@ -6030,7 +6065,7 @@ class ReviewDialog:
             if not self._prev_pil or not (0 <= i < len(self._prev_pil)):
                 return
             self._prev_page = i
-            from PIL import ImageTk
+            from PIL import Image, ImageTk
             pil = self._prev_pil[i].copy()
             rotation = int(getattr(self, "_prev_rotation", 0)) % 360
             if rotation:
@@ -6039,8 +6074,11 @@ class ReviewDialog:
             thumb_width = (content_width // 2 - 100
                            if getattr(self, "_review_two_columns", False)
                            else content_width - 80)
+            # LANCZOS i stället för förvald NEAREST: texten i bilden blir
+            # tydligt skarpare, särskilt på HiDPI-skärmar.
             pil.thumbnail((max(160, min(760, thumb_width)),
-                           getattr(self, "_preview_max_height", 160)))
+                           getattr(self, "_preview_max_height", 160)),
+                          resample=Image.LANCZOS)
             foto = ImageTk.PhotoImage(pil)
             self._prev_pages[:] = [foto]       # behåll bara aktuell sida
             self._prev_display_size = pil.size
