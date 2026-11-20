@@ -2205,6 +2205,52 @@ def keyword_folder_label(cat: Optional[Dict[str, Any]], text: str) -> str:
     return folder if folder else "–"
 
 
+#: Standardordningen på stödordstabellens kolumner. Användaren kan dra
+#: rubrikerna till en egen ordning; den sparas i inställningen
+#: kw_column_order och läses tillbaka vid start.
+KW_COLUMNS = ("word", "kind", "weight", "whole", "hits", "folder")
+
+
+def normalize_column_order(saved: Any,
+                           columns: tuple = KW_COLUMNS) -> List[str]:
+    """Granska en sparad kolumnordning; falla tillbaka på standarden."""
+    cols = list(columns)
+    if (isinstance(saved, (list, tuple)) and len(saved) == len(cols)
+            and {str(c) for c in saved} == set(cols)):
+        return [str(c) for c in saved]
+    return cols
+
+
+def drop_column_at(order: List[str], col: str, widths: List[int],
+                   x: int) -> List[str]:
+    """Flytta kolumnen ``col`` till skarven närmast bildpunkten ``x``.
+
+    ``widths`` är de visade kolumnernas bredder i samma ordning som
+    ``order``. Ogiltig indata lämnar ordningen orörd.
+    """
+    items = list(order or [])
+    if col not in items or len(widths) != len(items):
+        return items
+    try:
+        pos = float(x)
+    except (TypeError, ValueError):
+        return items
+    edges = [0.0]
+    for width in widths:
+        try:
+            number = float(width)
+        except (TypeError, ValueError):
+            number = 0.0
+        edges.append(edges[-1] + max(0.0, number))
+    gap = min(range(len(edges)), key=lambda i: (abs(pos - edges[i]), i))
+    from_index = items.index(col)
+    items.pop(from_index)
+    if from_index < gap:
+        gap -= 1
+    items.insert(max(0, min(len(items), gap)), col)
+    return items
+
+
 def resolve_automatic_subfolder(rules: Rules, category: str,
                                 extraction: Extraction) -> Tuple[str, str]:
     """Return (folder, error) for configured keyword/template/learned routing."""
@@ -11530,6 +11576,7 @@ class App:
             ("folder", "MAPP", 12, "w", True)))
         for col in cols:
             self.kw_tree.heading(col, command=lambda c=col: self._sort_keywords(c))
+        self._apply_kw_column_order(self.settings.get("kw_column_order", ()))
         self.kw_tree.grid(row=0, column=0, sticky="nsew", padx=(T.INNER, 0),
                           pady=(T.INNER, 4))
         self.theme.zebra(self.kw_tree)
@@ -11559,7 +11606,8 @@ class App:
         hint = ttk.Label(
             support, style="CardMuted.TLabel", justify="left",
             text="Dubbelklicka ändrar ordet  ·  högerklick ger fler val  ·  "
-                 "Delete tar bort  ·  klicka på en rubrik för att sortera")
+                 "Delete tar bort  ·  klicka på en rubrik för att sortera  ·  "
+                 "dra en rubrik i sidled för att flytta kolumnen")
         hint.grid(row=2, column=0, columnspan=2, sticky="w",
                   padx=T.INNER, pady=(2, 0))
         self.kw_hint = hint
@@ -11713,6 +11761,9 @@ class App:
         self.kw_tree.bind("<ButtonPress-1>", self._cat_map_drag_start, add="+")
         self.kw_tree.bind("<B1-Motion>", self._cat_map_drag_motion, add="+")
         self.kw_tree.bind("<ButtonRelease-1>", self._cat_map_drag_release, add="+")
+        self.kw_tree.bind("<ButtonPress-1>", self._kw_column_drag_start, add="+")
+        self.kw_tree.bind("<B1-Motion>", self._kw_column_drag_motion, add="+")
+        self.kw_tree.bind("<ButtonRelease-1>", self._kw_column_drag_release, add="+")
         self.subfolder_map_tree.bind(
             "<<TreeviewSelect>>",
             lambda event: self._cat_map_folder_selected(self.subfolder_map_tree),
@@ -11847,9 +11898,89 @@ class App:
         return name or None
 
     def _sort_keywords(self, col: str) -> None:
+        # Ett avslutat kolumndrag släpper också rubrikens klick: sortera
+        # inte då, flytten är redan gjord.
+        if getattr(self, "_kw_col_moved", False):
+            self._kw_col_moved = False
+            return
         current, desc = self._kw_sort
         self._kw_sort = (col, not desc if col == current else True)
         self._refresh_keyword_view()
+
+    def _kw_display_columns(self) -> List[str]:
+        """Stödordstabellens visade kolumnordning (aldrig tom)."""
+        try:
+            display = list(self.kw_tree["displaycolumns"] or ())
+        except Exception:
+            display = []
+        if not display or {str(c) for c in display} != set(KW_COLUMNS):
+            display = list(KW_COLUMNS)
+        return [str(c) for c in display]
+
+    def _apply_kw_column_order(self, order: Any, save: bool = False) -> None:
+        """Visa stödordskolumnerna i en ordning; spara den vid behov."""
+        order = normalize_column_order(order)
+        try:
+            self.kw_tree["displaycolumns"] = order
+        except Exception:
+            return
+        if save:
+            try:
+                self.settings["kw_column_order"] = order
+                save_settings(self.settings)
+            except Exception:
+                pass
+
+    def _kw_column_drag_start(self, event) -> None:
+        """Börja flytta en kolumn när draget startar på en rubrik."""
+        tree = self.kw_tree
+        try:
+            region = tree.identify_region(event.x, event.y)
+        except Exception:
+            return
+        if region != "heading":
+            return
+        display = self._kw_display_columns()
+        try:
+            index = int(str(tree.identify_column(event.x))[1:]) - 1
+        except (TypeError, ValueError):
+            return
+        if not 0 <= index < len(display):
+            return
+        self._kw_col_drag = {"col": display[index], "x": event.x,
+                             "moved": False}
+        try:
+            tree.configure(cursor="fleur")
+        except Exception:
+            pass
+
+    def _kw_column_drag_motion(self, event) -> None:
+        drag = getattr(self, "_kw_col_drag", None)
+        if not drag:
+            return
+        if abs(event.x - drag["x"]) > 6:
+            drag["moved"] = True
+
+    def _kw_column_drag_release(self, event) -> None:
+        drag = getattr(self, "_kw_col_drag", None)
+        self._kw_col_drag = None
+        try:
+            self.kw_tree.configure(cursor="")
+        except Exception:
+            pass
+        if not drag or not drag["moved"]:
+            return
+        # Rubrikkommandot (sortering) körs efter den här bindningen:
+        # flaggan gör att draget inte också råkar sortera om.
+        self._kw_col_moved = True
+        display = self._kw_display_columns()
+        try:
+            widths = [int(self.kw_tree.column(c, "width")) for c in display]
+        except Exception:
+            return
+        order = drop_column_at(display, drag["col"], widths, event.x)
+        if order != display:
+            self._apply_kw_column_order(order, save=True)
 
     def _on_cat_select(self, _event=None) -> None:
         name = self._selected_cat()

@@ -728,6 +728,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "review_preview_migrated_v1": False,
     "ui_text_size": "normal",   # normal | large
     "contrast": "normal",        # normal | high (högkontrast, tema rond 3)
+    "kw_column_order": [],       # tom = standardordning på stödordstabellen
 }
 
 
