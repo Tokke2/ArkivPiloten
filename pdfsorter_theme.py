@@ -393,6 +393,9 @@ class Theme:
         kinds = ("start", "review", "categories", "settings",
                  "history", "help", "advanced")
         refs = []
+        # Följ typsnittsskalan så att ikonerna inte blir pyttesmå i
+        # förhållande till texten på HiDPI-skärmar.
+        icon_size = max(16, min(40, int(round(20 * self.ui_scale))))
 
         def visit(widget):
             try:
@@ -400,7 +403,8 @@ class Theme:
                     tabs = widget.tabs()
                     if len(tabs) == len(kinds):
                         for tab, kind in zip(tabs, kinds):
-                            image = navigation_icon_image(kind, self.c, size=20)
+                            image = navigation_icon_image(
+                                kind, self.c, size=icon_size)
                             if image is not None:
                                 photo = ImageTk.PhotoImage(image, master=self.root)
                                 widget.tab(tab, image=photo, compound="left")

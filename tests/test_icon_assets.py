@@ -91,10 +91,15 @@ def test_windows_app_id_is_set_with_a_unicode_argument(monkeypatch):
 def test_brand_window_sets_both_window_and_default_icons_on_windows(
         monkeypatch, tmp_path):
     monkeypatch.setattr(S.sys, "platform", "win32")
-    photo = object()
+    requested = []
+
+    def fake_photoimage(size):
+        requested.append(size)
+        return f"photo-{size}"
+
     icon_path = tmp_path / "arkivpiloten.ico"
     icon_path.write_bytes(b"ico")
-    monkeypatch.setattr(S, "icon_photoimage", lambda size: photo)
+    monkeypatch.setattr(S, "icon_photoimage", fake_photoimage)
     monkeypatch.setattr(S, "ensure_icon_file", lambda: icon_path)
 
     class FakeWindow:
@@ -108,8 +113,10 @@ def test_brand_window_sets_both_window_and_default_icons_on_windows(
             self.calls.append(("iconbitmap", args, kwargs))
 
     window = FakeWindow()
-    assert S.brand_window(window) is photo
-    assert window._arkivpiloten_icon_ref is photo
-    assert ("iconphoto", (True, photo)) in window.calls
+    expected = tuple(f"photo-{side}" for side in S.WINDOW_ICON_SIZES)
+    assert S.brand_window(window) == expected
+    assert window._arkivpiloten_icon_ref == expected
+    assert requested == list(S.WINDOW_ICON_SIZES)
+    assert ("iconphoto", (True, *expected)) in window.calls
     assert ("iconbitmap", (str(icon_path),), {}) in window.calls
     assert ("iconbitmap", (), {"default": str(icon_path)}) in window.calls

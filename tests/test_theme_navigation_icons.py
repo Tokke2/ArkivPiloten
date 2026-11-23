@@ -19,3 +19,13 @@ def test_navigation_icons_are_drawn_in_each_theme(palette):
 def test_navigation_icon_rejects_unknown_names():
     pytest.importorskip("PIL")
     assert navigation_icon_image("unknown", COLORS) is None
+
+
+def test_navigation_icon_size_follows_ui_scale():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "pdfsorter_theme.py").read_text(
+        encoding="utf-8")
+
+    assert "20 * self.ui_scale" in source
+    assert "size=icon_size" in source

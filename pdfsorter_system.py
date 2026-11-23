@@ -751,26 +751,41 @@ def set_app_user_model_id(app_id: str = APP_USER_MODEL_ID) -> None:
         pass
 
 
+#: Ikonstorlekar som sätts på varje fönster. Tk väljer själv den storlek
+#: som passar titelrad, aktivitetsfält och Alt+Tab i stället för att skala
+#: om en enda bild (skarpare, särskilt på HiDPI-skärmar).
+WINDOW_ICON_SIZES = (16, 32, 48, 64)
+
+
 def brand_window(root: Any, size: int = 64) -> Any:
     """Sätt appikonen på ett Tk-fönster - och på ALLA framtida fönster.
 
     `iconphoto(True, ...)` gäller som standard för varje nytt toplevel
     (dialoger, felrutor m.m.), och på Windows sätts dessutom iconbitmap
     med `default=`, vilket är det aktivitetsfältet/titelraden faktiskt
-    ritar. Returnerar PhotoImage så att anroparen kan hålla kvar
-    referensen (annars skräpsamlas ikonen och titelraden blir tom).
+    ritar. Returnerar en tuppel med PhotoImage-bilder så att anroparen
+    kan hålla kvar referensen (annars skräpsamlas ikonen och titelraden
+    blir tom).
     """
-    photo = None
+    photos: list = []
     try:
-        photo = icon_photoimage(size)
-        if photo is not None:
+        for side in WINDOW_ICON_SIZES:
+            photo = icon_photoimage(side)
+            if photo is not None:
+                photos.append(photo)
+        if not photos:
+            fallback = icon_photoimage(size)
+            if fallback is not None:
+                photos.append(fallback)
+        if photos:
             # Keep a reference on the actual Tk object. Several utility
             # windows call this function without a Python-side owner; letting
             # PhotoImage be collected clears the WM icon on Windows.
-            setattr(root, "_arkivpiloten_icon_ref", photo)
-            root.iconphoto(True, photo)
+            refs = tuple(photos)
+            setattr(root, "_arkivpiloten_icon_ref", refs)
+            root.iconphoto(True, *refs)
     except Exception:
-        photo = None
+        photos = []
     if sys.platform.startswith("win"):
         try:
             ico = ensure_icon_file()
@@ -783,7 +798,7 @@ def brand_window(root: Any, size: int = 64) -> Any:
                 root.iconbitmap(default=str(ico))
         except Exception:
             pass
-    return photo
+    return tuple(photos) or None
 
 
 # --------------------------------------------------------------------------
