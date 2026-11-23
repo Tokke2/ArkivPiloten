@@ -4101,6 +4101,7 @@ try:
     mark_error_code_resolved = _sys_mod.mark_error_code_resolved
     list_error_codes = _sys_mod.list_error_codes
     purge_resolved_error_codes = _sys_mod.purge_resolved_error_codes
+    auto_resolve_stale_codes = _sys_mod.auto_resolve_stale_codes
     install_excepthooks = _sys_mod.install_excepthooks
     close_session = _sys_mod.close_session
     set_process_dpi_aware = _sys_mod.set_process_dpi_aware
@@ -4240,6 +4241,9 @@ except Exception as _sys_err:                       # noqa: BLE001
 
     def purge_resolved_error_codes():
         return {"koder": [], "block": 0, "samlat": 0}
+
+    def auto_resolve_stale_codes(_days=0):
+        return []
 
     def install_excepthooks() -> None:
         return None
@@ -7611,6 +7615,16 @@ _UI_EN = {
     "Exportera årsarkiv…": "Export year archive…",
     "Granska alla…": "Review all…", "Ångra valda": "Undo selected",
     "Sök efter uppdateringar…": "Check for updates…",
+    "Åtgärda automatiskt fel som inte återkommit på":
+        "Automatically resolve errors that have not recurred in",
+    "dagar (0 = av)": "days (0 = off)",
+    "Markera de fel du har åtgärdat. Deras poster rensas då ur felloggen "
+    "automatiskt och de försvinner ur AI-rapporten direkt. Fel som inte "
+    "återkommit på länge åtgärdas automatiskt.":
+        "Mark fixed errors. Their entries are then cleaned from the error "
+        "log automatically and they disappear from the AI report immediately. "
+        "Errors that have not recurred in a long time are resolved "
+        "automatically.",
     "Rensa åtgärdade fel från loggen…": "Clean up fixed errors from the log…",
     "Rensa åtgärdade fel från loggen": "Clean up fixed errors from the log",
     "Markera valda som åtgärdade": "Mark selected as fixed",
@@ -8396,6 +8410,9 @@ class App:
         # Kontrollera dygnsintervallet när GUI:t hunnit visas, och därefter
         # en gång i timmen så en app som står öppen också rensar dagligen.
         self.root.after(3000, self._cache_cleanup_tick)
+        # Samma rytm för felloggen: fel som inte återkommit åtgärdas och
+        # rensas automatiskt - användaren ska inte behöva tänka på den.
+        self.root.after(3000, self._error_autofix_tick)
 
         # Självläkande autostart (bättre autostart): OS-posten och
         # inställningen synkas vid varje start - och resultatet loggas,
@@ -9839,6 +9856,21 @@ class App:
         self.lbl_cache_cleanup.pack(side="left", fill="x", expand=True)
         ttk.Button(cacherad, text="Rensa cache nu",
                    command=self._rensa_cache).pack(side="right")
+        # Fellogg: fel som inte återkommit på N dagar åtgärdas och rensas
+        # automatiskt. 0 = av (helt manuell hantering i Hjälp-menyn).
+        self.var_error_autofix_days = tk.StringVar(
+            value=str(max(0, int(self.settings.get(
+                "error_autofix_days", 7) or 0))))
+        felrad = ttk.Frame(cacheb, style="CardInner.TFrame")
+        felrad.grid(row=5, column=0, columnspan=2, sticky="ew",
+                    padx=8, pady=(2, 6))
+        ttk.Label(felrad, text="Åtgärda automatiskt fel som inte återkommit på",
+                  style="Card.TLabel").pack(side="left")
+        ttk.Spinbox(felrad, from_=0, to=90, width=4,
+                    textvariable=self.var_error_autofix_days).pack(
+                        side="left", padx=6)
+        ttk.Label(felrad, text="dagar (0 = av)",
+                  style="Card.TLabel").pack(side="left")
 
     def _update_stats(self, sorted_n: Optional[int] = None,
                       errors: Optional[int] = None) -> None:
@@ -10956,6 +10988,7 @@ class App:
             "silent_restart": bool(self.var_tystomstart.get()),
             "cache_cleanup_enabled": bool(self.var_cache_cleanup.get()),
             "low_memory_mode": bool(self.var_low_memory_mode.get()),
+            "error_autofix_days": max(0, int(num(self.var_error_autofix_days, 7))),
         })
         if hasattr(self, "var_lang"):
             self.settings.update({
@@ -15058,6 +15091,21 @@ class App:
         ttk.Button(win, text="Stäng", command=win.destroy).grid(
             row=2, column=2, sticky="e", padx=10, pady=10)
 
+    def _error_autofix_tick(self) -> None:
+        """Åtgärda automatiskt fel som slutat återkomma (även vid lång drift)."""
+        try:
+            if not self._quitting:
+                auto_resolve_stale_codes(
+                    self.settings.get("error_autofix_days", 7))
+        except Exception as exc:
+            self._h("logg", f"Kunde inte underhålla felloggen: {exc}",
+                    "warn")
+        if not self._quitting:
+            try:
+                self.root.after(3600000, self._error_autofix_tick)
+            except Exception:
+                pass
+
     def _cache_cleanup_tick(self) -> None:
         """Starta max en smart rensning per 24 timmar även vid lång drift."""
         try:
@@ -16188,7 +16236,8 @@ class App:
                 win, style="Card.TLabel",
                 text="Markera de fel du har åtgärdat. Deras poster rensas "
                      "då ur felloggen automatiskt och de försvinner ur "
-                     "AI-rapporten direkt.",
+                     "AI-rapporten direkt. Fel som inte återkommit på länge "
+                     "åtgärdas automatiskt.",
                 wraplength=820, justify="left")
             info.grid(row=0, column=0, columnspan=2, sticky="ew",
                       padx=14, pady=(12, 8))

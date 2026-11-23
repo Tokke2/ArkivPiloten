@@ -722,6 +722,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "date_prefer_label": True,   # låt "Fakturadatum:" styra
     # -- rapport --
     "report_days": 10,           # hur många dagar matchningsrapporten täcker
+    # -- fellogg --
+    # 2026-11-23: felkoder som inte återkommit på så här många dagar
+    # åtgärdas och rensas automatiskt. 0 = av (helt manuellt).
+    "error_autofix_days": 7,
     # -- framskjutet --
     "preview_in_dialog": True,   # sidförhandsvisning med rotationsverktyg i granskningen
     "review_auto_advance": True,  # fortsätt till nästa granskning efter bekräftat val

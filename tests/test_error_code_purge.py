@@ -281,3 +281,116 @@ def test_startup_purges_leftover_resolved_entries(tmp_path, monkeypatch):
     assert f"FELKOD:{fast} [ÖPPEN]" not in kvar
     assert f"FELKOD:{fast} [ÅTGÄRDAD] fixad" in kvar
     assert f"FELKOD:{oppen} [ÖPPEN]" in kvar
+
+
+# -- helautomatik: fel som slutat återkomma --------------------------------
+def test_auto_resolve_marks_only_stale_codes(tmp_path, monkeypatch):
+    import datetime as dt
+
+    logs = _setup(tmp_path, monkeypatch)
+    gammal = D.fingerprint("gammalt fel", "")
+    färsk = D.fingerprint("färskt fel", "")
+    nu = dt.datetime.now()
+    (logs / "felkoder.log").write_text(
+        _felkod(gammal, "ÖPPEN", "sortering gammalt fel",
+                ts=(nu - dt.timedelta(days=30)).isoformat(timespec="seconds")) +
+        _felkod(färsk, "ÖPPEN", "sortering färskt fel",
+                ts=nu.isoformat(timespec="seconds")),
+        encoding="utf-8")
+
+    assert S.auto_resolve_stale_codes(7) == [gammal]
+
+    kvar = (logs / "felkoder.log").read_text(encoding="utf-8")
+    assert f"FELKOD:{gammal} [ÖPPEN]" not in kvar
+    assert f"FELKOD:{gammal} [ÅTGÄRDAD] Automatiskt" in kvar
+    assert f"FELKOD:{färsk} [ÖPPEN]" in kvar
+    assert D.parse_error_code_states(kvar)[gammal]["status"] == "ÅTGÄRDAD"
+
+
+def test_auto_resolve_zero_or_invalid_disables(tmp_path, monkeypatch):
+    logs = _setup(tmp_path, monkeypatch)
+    kod = D.fingerprint("gammalt fel", "")
+    fore = _felkod(kod, "ÖPPEN", "sortering gammalt fel",
+                   ts="2020-01-01T00:00:00")
+    (logs / "felkoder.log").write_text(fore, encoding="utf-8")
+
+    assert S.auto_resolve_stale_codes(0) == []
+    assert S.auto_resolve_stale_codes("inte-ett-tal") == []
+    assert S.auto_resolve_stale_codes(None) == []
+    assert (logs / "felkoder.log").read_text(encoding="utf-8") == fore
+
+
+def test_auto_resolve_ignores_codes_with_unknown_age(tmp_path, monkeypatch):
+    logs = _setup(tmp_path, monkeypatch)
+    kod = D.fingerprint("odemärkt fel", "")
+    fore = f"FELKOD:{kod} [ÖPPEN] sortering odemärkt fel\n"
+    (logs / "felkoder.log").write_text(fore, encoding="utf-8")
+
+    assert S.auto_resolve_stale_codes(7) == []
+    assert (logs / "felkoder.log").read_text(encoding="utf-8") == fore
+
+
+def test_error_autofix_days_defaults_to_seven():
+    import pdfsorter_data as DD
+
+    assert DD.DEFAULT_SETTINGS["error_autofix_days"] == 7
+
+
+def test_autofix_tick_uses_the_setting_and_reschedules(monkeypatch):
+    app = object.__new__(P.App)
+    app.settings = {"error_autofix_days": 3}
+    app._quitting = False
+    schemalagt = []
+    app.root = SimpleNamespace(after=lambda ms, fn: schemalagt.append(ms))
+    synliga = []
+    monkeypatch.setattr(
+        P, "auto_resolve_stale_codes",
+        lambda dagar: synliga.append(dagar) or [])
+
+    P.App._error_autofix_tick(app)
+
+    assert synliga == [3]
+    assert schemalagt == [3600000]
+
+
+def test_autofix_tick_is_silent_while_quitting(monkeypatch):
+    app = object.__new__(P.App)
+    app.settings = {}
+    app._quitting = True
+    rop = []
+    app.root = SimpleNamespace(after=lambda *a: rop.append(a))
+    monkeypatch.setattr(P, "auto_resolve_stale_codes",
+                        lambda dagar: rop.append(("resolve", dagar)))
+
+    P.App._error_autofix_tick(app)
+
+    assert rop == []
+
+
+def _app_metoder():
+    import ast
+
+    kalla = ast.parse((ROOT / "pdfsorter.py").read_text(encoding="utf-8"))
+    app = next(n for n in kalla.body
+               if isinstance(n, ast.ClassDef) and n.name == "App")
+    return {n.name: ast.unparse(n) for n in app.body
+            if isinstance(n, ast.FunctionDef)}
+
+
+def test_startup_schedules_the_autofix_tick():
+    assert "_error_autofix_tick" in _app_metoder()["__init__"]
+
+
+def test_settings_tab_exposes_autofix_days_and_saves_it():
+    metoder = _app_metoder()
+    assert "var_error_autofix_days" in metoder["_build_sort_tab"]
+    assert ("Åtgärda automatiskt fel som inte återkommit på"
+            in metoder["_build_sort_tab"])
+    collect = metoder["_collect_settings"]
+    assert "error_autofix_days" in collect
+    assert "var_error_autofix_days" in collect
+
+
+def test_autofix_labels_are_translated():
+    assert "Åtgärda automatiskt fel som inte återkommit på" in P._UI_EN
+    assert "dagar (0 = av)" in P._UI_EN

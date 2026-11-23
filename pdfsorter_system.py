@@ -3291,6 +3291,75 @@ def _purge_samlat(fil: Path, nycklar: set) -> int:
     return borttagna
 
 
+def _felkod_tid(rubrik: Optional[str]) -> Optional[Any]:
+    """Tolka tidsrubriken i ett felkod-block; None när den saknas/ogiltig."""
+    text = (rubrik or "").strip("= \t\n")
+    if not text:
+        return None
+    try:
+        ts = _dt.fromisoformat(text)
+    except ValueError:
+        try:
+            ts = _dt.fromisoformat(text.split()[0])
+        except (ValueError, IndexError):
+            return None
+    if ts.tzinfo is not None:
+        try:
+            ts = ts.astimezone().replace(tzinfo=None)
+        except Exception:
+            return None
+    return ts
+
+
+def auto_resolve_stale_codes(days: Any) -> List[str]:
+    """Åtgärda automatiskt felkoder som inte återkommit på `days` dagar.
+
+    Ett fel som slutat dyka upp är antingen fixat eller inaktuellt - båda
+    fallen ska bort ur felloggen utan att användaren lyfter ett finger.
+    Varje kod markeras via mark_error_code_resolved (kvittot behålls, så
+    ett återkommande fel syns som ÖPPEN igen). 0, negativt eller ogiltigt
+    värde stänger av automatiken. Koder med okänd ålder rörs aldrig.
+
+    Returnerar koderna som åtgärdades.
+    """
+    try:
+        gräns = max(0, int(float(days)))
+    except (TypeError, ValueError):
+        return []
+    if gräns <= 0:
+        return []
+    try:
+        text = (session_dir() / "felkoder.log").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    status: Dict[str, str] = {}
+    senaste: Dict[str, Any] = {}
+    for post in _felkod_block(text):
+        if not post["kod"]:
+            continue
+        status[post["kod"]] = post["status"]
+        ts = _felkod_tid(post["rubrik"])
+        if ts is not None and (post["kod"] not in senaste
+                               or ts > senaste[post["kod"]]):
+            senaste[post["kod"]] = ts
+    nu = _dt.now()
+    klara: List[str] = []
+    for kod, st in status.items():
+        if st != "ÖPPEN" or kod not in senaste:
+            continue
+        try:
+            gammal = (nu - senaste[kod]).total_seconds() > gräns * 86400
+        except TypeError:
+            continue
+        if gammal and mark_error_code_resolved(
+                kod, f"Automatiskt: ej återkommit på {gräns} dagar"):
+            klara.append(kod)
+    if klara:
+        session_log("logg", f"Automatiskt åtgärdade: {len(klara)} felkod(er) "
+                    f"har inte återkommit på {gräns} dagar")
+    return klara
+
+
 def latest_session_log() -> Optional[Path]:
     """Nyaste sessionsloggen över alla månader (för support/urklipp).
 
