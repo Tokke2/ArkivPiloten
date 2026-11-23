@@ -2930,6 +2930,8 @@ def start_session(banner_lines: Optional[List[str]] = None) -> Optional[Path]:
 
     Returnerar sökvägen (None om filen inte kan öppnas - loggning får
     aldrig sänka appen). Varje efterföljande session_log() hamnar i filen.
+    Avslutar med samma hushållning som alltid: poster för redan åtgärdade
+    felkoder rensas bort automatiskt.
     """
     global SESSION_ID, _SESSION_FH, _SESSION_PATH, _SESSION_PART, _SESSION_BASE
     global _LAST_LOG_ARCHIVE_DATE
@@ -2960,6 +2962,12 @@ def start_session(banner_lines: Optional[List[str]] = None) -> Optional[Path]:
     rader.append(bar)
     for r in rader:
         session_log("start", r)
+    try:
+        # Kvarlämnade poster för åtgärdade koder (markerade av en äldre
+        # version, eller medan loggfilen var låst) städas här.
+        purge_resolved_error_codes()
+    except Exception:
+        pass
     return path
 
 
@@ -3092,7 +3100,12 @@ def session_path() -> Optional[Path]:
 
 
 def mark_error_code_resolved(code: str, note: str = "") -> bool:
-    """Markera en felkod som åtgärdad utan att radera dess logghistorik."""
+    """Markera en felkod som åtgärdad och rensa dess poster automatiskt.
+
+    ÅTGÄRDAD-kvittot skrivs till felkoder.log och kodens ÖPPEN-block tas
+    sedan bort direkt (samma sak som purge_resolved_error_codes gör).
+    Sessionsloggarna behålls alltid som revisionsspår.
+    """
     value = str(code or "").strip().casefold()
     if not re.fullmatch(r"[0-9a-f]{8}", value):
         return False
@@ -3103,6 +3116,12 @@ def mark_error_code_resolved(code: str, note: str = "") -> bool:
             fh.write(f"\n===== {_dt.now().isoformat(timespec='seconds')} =====\n")
             fh.write(f"FELKOD:{value} [ÅTGÄRDAD] {str(note).strip()}\n")
         session_log("logg", f"Felkod {value} markerad åtgärdad; historiken bevaras")
+        try:
+            purge_resolved_error_codes()
+        except Exception:
+            # Rensningen får aldrig få markeringen att misslyckas - kvar
+            # lämnade poster tas vid nästa appstart i stället.
+            pass
         return True
     except OSError as exc:
         session_log("logg", f"Kunde inte markera felkod {value} som åtgärdad: {exc}",
@@ -3193,6 +3212,9 @@ def purge_resolved_error_codes() -> Dict[str, Any]:
 
     Returnerar ``{"koder", "block", "samlat"}`` med antal rensade koder,
     borttagna ÖPPEN-block respektive borttagna samlat-poster.
+
+    Körs automatiskt när en kod markeras åtgärdad och vid varje appstart;
+    den manuella knappen/flaggan finns kvar för att rensa i efterhand.
     """
     resultat: Dict[str, Any] = {"koder": [], "block": 0, "samlat": 0}
     try:

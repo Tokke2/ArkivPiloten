@@ -237,3 +237,47 @@ def test_help_menu_opens_the_error_code_dialog():
     post = next(p for p in poster if p.get("id") == "rensa_felkoder")
     assert post["atgard"] == "_open_error_code_dialog"
     assert callable(getattr(P.App, "_open_error_code_dialog", None))
+
+
+# -- automatisk rensning ---------------------------------------------------
+def test_marking_a_code_purges_its_entries_automatically(tmp_path, monkeypatch):
+    logs = _setup(tmp_path, monkeypatch)
+    oppen, fast = _skriv_felkoder(logs)
+    (logs / "fel-samlat.log").write_text(
+        f"10:00:00.000  FEL   sortering  {MEDDELANDE}\n"
+        f"                      {SPAR}\n",
+        encoding="utf-8")
+
+    assert S.mark_error_code_resolved(fast, "fixad nu") is True
+
+    kvar = (logs / "felkoder.log").read_text(encoding="utf-8")
+    assert f"FELKOD:{fast} [ÖPPEN]" not in kvar
+    assert f"FELKOD:{fast} [ÅTGÄRDAD]" in kvar
+    assert f"FELKOD:{oppen} [ÖPPEN]" in kvar
+    assert MEDDELANDE not in (logs / "fel-samlat.log").read_text(
+        encoding="utf-8")
+
+
+def test_marking_an_unknown_code_still_writes_its_receipt(tmp_path, monkeypatch):
+    logs = _setup(tmp_path, monkeypatch)
+
+    assert S.mark_error_code_resolved("12345678", "finns ej") is True
+
+    kvar = (logs / "felkoder.log").read_text(encoding="utf-8")
+    assert "FELKOD:12345678 [ÅTGÄRDAD] finns ej" in kvar
+
+
+def test_startup_purges_leftover_resolved_entries(tmp_path, monkeypatch):
+    logs = _setup(tmp_path, monkeypatch)
+    oppen, fast = _skriv_felkoder(logs)
+    monkeypatch.setattr(S, "migrate_legacy_logs", lambda: None)
+    monkeypatch.setattr(S, "archive_old_logs", lambda days=1: 0)
+    try:
+        assert S.start_session() is not None
+    finally:
+        S.close_session()
+
+    kvar = (logs / "felkoder.log").read_text(encoding="utf-8")
+    assert f"FELKOD:{fast} [ÖPPEN]" not in kvar
+    assert f"FELKOD:{fast} [ÅTGÄRDAD] fixad" in kvar
+    assert f"FELKOD:{oppen} [ÖPPEN]" in kvar

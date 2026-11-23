@@ -373,7 +373,7 @@ def test_error_code_log_keeps_stable_open_codes_out_of_daily_archive(monkeypatch
     assert code_log.exists() and "[ÖPPEN]" in code_log.read_text(encoding="utf-8")
 
 
-def test_error_code_stays_open_until_marked_fixed_and_history_is_kept(
+def test_error_code_stays_open_until_marked_fixed_then_auto_purged(
         monkeypatch, tmp_path):
     from pdfsorter_diag import parse_error_code_log
 
@@ -390,7 +390,7 @@ def test_error_code_stays_open_until_marked_fixed_and_history_is_kept(
 
     assert S.mark_error_code_resolved(code, "åtgärdad i ny version")
     contents = path.read_text(encoding="utf-8")
-    assert "[ÖPPEN]" in contents and "[ÅTGÄRDAD]" in contents
+    assert "[ÖPPEN]" not in contents and "[ÅTGÄRDAD]" in contents
     assert parse_error_code_log(contents) == []
 
 

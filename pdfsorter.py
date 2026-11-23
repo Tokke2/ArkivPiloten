@@ -16169,8 +16169,9 @@ class App:
         """Markera felkoder som åtgärdade och rensa dem ur felloggen.
 
         Listan visar varje felkods senaste status. Markera de fel du har
-        fixat - de försvinner då ur AI-rapporten - och rensa sedan bort
-        deras poster ur felkoder.log och fel-samlat.log. Sessionsloggarna
+        fixat - deras poster rensas då ur felkoder.log och fel-samlat.log
+        automatiskt och de försvinner ur AI-rapporten. Rensa-knappen finns
+        kvar för eventuella kvarlämnade poster. Sessionsloggarna
         (app_*.log) behålls alltid som revisionsspår.
         """
         self._ui("Rensa åtgärdade fel från loggen")
@@ -16185,9 +16186,9 @@ class App:
             win.rowconfigure(1, weight=1)
             info = self.ttk.Label(
                 win, style="Card.TLabel",
-                text="Markera de fel du har åtgärdat. De försvinner ur "
-                     "AI-rapporten direkt, och med Rensa-knappen tas deras "
-                     "poster bort ur felloggen.",
+                text="Markera de fel du har åtgärdat. Deras poster rensas "
+                     "då ur felloggen automatiskt och de försvinner ur "
+                     "AI-rapporten direkt.",
                 wraplength=820, justify="left")
             info.grid(row=0, column=0, columnspan=2, sticky="ew",
                       padx=14, pady=(12, 8))
@@ -17095,7 +17096,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.mark_felkod_atgardad:
         ok = mark_error_code_resolved(args.mark_felkod_atgardad)
-        print(("Felkoden markerades som åtgärdad; historiken finns kvar i logs/felkoder.log."
+        print(("Felkoden markerades som åtgärdad och rensades ur felloggen."
                if ok else "Ogiltig felkod eller kunde inte skriva logs/felkoder.log."))
         return 0 if ok else 2
 
