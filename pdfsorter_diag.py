@@ -422,6 +422,44 @@ def parse_error_code_log(text: str, område: str = "felkoder.log") -> List[Dict[
     return list(states.values())
 
 
+def parse_error_code_states(text: str) -> Dict[str, Dict[str, Any]]:
+    """Alla felkoders SENASTE status: kod -> status, kategori, meddelande.
+
+    Till skillnad från :func:`parse_error_code_log` (som bara ger öppna
+    koder) behålls även åtgärdade koder - de behövs för att dölja redan
+    fixade fel i rapporten och för att kunna rensa dem från loggen.
+    """
+    states: Dict[str, Dict[str, Any]] = {}
+    ts = ""
+    for line in text.splitlines():
+        block = _RE_BLOCK.match(line)
+        if block:
+            ts = block.group("ts")
+            continue
+        match = re.match(
+            r"FELKOD:([0-9a-f]{8}) \[(ÖPPEN|ÅTGÄRDAD)\](?:\s+(.*))?", line)
+        if not match:
+            continue
+        code, status, detail = match.groups()
+        post = states.get(code)
+        if post is None:
+            post = states[code] = {
+                "kod": code, "status": status, "kategori": "",
+                "meddelande": "", "antal": 0, "först": ts, "senast": ts,
+            }
+        post["status"] = status
+        post["antal"] += 1
+        post["senast"] = ts
+        if status == "ÖPPEN":
+            category, _, message = (detail or "app okänt fel").partition(" ")
+            post["kategori"] = category
+            post["meddelande"] = message or (detail or "")
+        elif not post["meddelande"] and detail:
+            # Bara ett kvitto kvar (ÖPPEN-blocken redan rensade): visa noteringen.
+            post["meddelande"] = detail
+    return states
+
+
 def _nya_filer(logs_dir: Path, max_files: int) -> List[Path]:
     """De nyaste loggfilerna: sessionsloggar, errors.log, krasch.log."""
     kandidater: List[Path] = []
@@ -491,12 +529,15 @@ def collect(logs_dir: Optional[Path] = None, max_files: int = DEFAULT_MAX_FILES,
     läsas helt. ``djup`` läser hela filer upp till ``HARD_READ_MAX``.
 
     Returnerar ``{"fel", "varningar", "lästa", "ofullständiga", "byte",
-    "filer", "sekunder"}``.
+    "filer", "sekunder", "dolda_atgardade"}``. Koder markerade ÅTGÄRDAD i
+    ``felkoder.log`` döljs ur resultatet - även när samma fel också står
+    kvar i sessionsloggarna - så att fixade fel inte spökar i rapporten.
     """
     start = time.perf_counter()
     lästa: List[Dict[str, Any]] = []
     ofullständiga: List[Dict[str, Any]] = []
     läst_byte = 0
+    atgardade: set = set()
     logs_dir = Path(logs_dir) if logs_dir else _State.logs_dir
 
     with _State.lock:
@@ -522,6 +563,9 @@ def collect(logs_dir: Optional[Path] = None, max_files: int = DEFAULT_MAX_FILES,
             lower_name = p.name.lower()
             if lower_name.startswith("felkoder"):
                 poster = parse_error_code_log(text, p.name)
+                for kod, st in parse_error_code_states(text).items():
+                    if st["status"] == "ÅTGÄRDAD":
+                        atgardade.add(kod)
             elif lower_name.startswith(("errors", "krasch")):
                 poster = parse_error_blocks(text, p.name)
             else:
@@ -549,6 +593,11 @@ def collect(logs_dir: Optional[Path] = None, max_files: int = DEFAULT_MAX_FILES,
                     if len(post.get("spårning", "")) > len(sedd.get("spårning", "")):
                         sedd["spårning"] = post["spårning"]
 
+    dolda = 0
+    for fp in [nyckel for nyckel in samlade if nyckel in atgardade]:
+        del samlade[fp]
+        dolda += 1
+
     def sortera(items: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return sorted(items, key=lambda p: (-int(p.get("antal", 1)),
                                             str(p.get("senast", ""))))
@@ -563,6 +612,7 @@ def collect(logs_dir: Optional[Path] = None, max_files: int = DEFAULT_MAX_FILES,
         "byte": läst_byte,
         "filer": len(lästa),
         "sekunder": time.perf_counter() - start,
+        "dolda_atgardade": dolda,
     }
 
 
@@ -656,6 +706,10 @@ def build_ai_report(logs_dir: Optional[Path] = None, *,
     rader.append(f"Läste {data['filer']} loggfil(er), {data['byte'] / 1024:.0f} kB, "
                  f"på {data['sekunder']:.3f} s"
                  + (f"  ·  {logs_dir}" if logs_dir else ""))
+    dolda = int(data.get("dolda_atgardade", 0))
+    if dolda:
+        rader.append(f"Dolda: {_antal(dolda, 'åtgärdat fel', 'åtgärdade fel')} "
+                     "(redan fixade - rensa dem från loggen via Hjälp-menyn)")
 
     # Ärligheten först: har någon fil bara lästs delvis måste det stå -
     # annars kan "inga fel" läsas som "inga fel alls".

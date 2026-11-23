@@ -4099,6 +4099,8 @@ try:
     session_dir = _sys_mod.session_dir
     latest_session_log = _sys_mod.latest_session_log
     mark_error_code_resolved = _sys_mod.mark_error_code_resolved
+    list_error_codes = _sys_mod.list_error_codes
+    purge_resolved_error_codes = _sys_mod.purge_resolved_error_codes
     install_excepthooks = _sys_mod.install_excepthooks
     close_session = _sys_mod.close_session
     set_process_dpi_aware = _sys_mod.set_process_dpi_aware
@@ -4232,6 +4234,12 @@ except Exception as _sys_err:                       # noqa: BLE001
 
     def mark_error_code_resolved(_code, _note=""):
         return False
+
+    def list_error_codes():
+        return []
+
+    def purge_resolved_error_codes():
+        return {"koder": [], "block": 0, "samlat": 0}
 
     def install_excepthooks() -> None:
         return None
@@ -5571,7 +5579,9 @@ class ReviewDialog:
         if hasattr(self, "var_use_subfolder_templates"):
             self.combo.bind("<<ComboboxSelected>>",
                             self._sync_subfolder_template_toggle, add="+")
-            self._sync_subfolder_template_toggle()
+            # Själva synken körs först efter att new_entry finns (längre
+            # ned) - _category() läser det fältet i "new"-läget och
+            # dialogen kraschade här för filer utan kategoriträff.
         # Sökbar rullgardin: skriv några tecken -> listan filtreras och
         # visar bara matchande kategorier (början på namnet först).
         # Enter väljer första/unika träffen, Escape återställer listan.
@@ -5722,6 +5732,8 @@ class ReviewDialog:
                           padx=14, pady=(0, 6))
         # "Ny mapp"-fältet ska vara låst när "Befintlig" är förvalt.
         self._sync()
+        if hasattr(self, "var_use_subfolder_templates"):
+            self._sync_subfolder_template_toggle()
         ttk.Label(
             catbox,
             text="Alla stödord du väljer sparas för framtida exakta matchningar.",
@@ -6477,7 +6489,9 @@ class ReviewDialog:
         # Rullgardinen är alltid skrivbar/sökbar; bara "Ny mapp"-fältet
         # växlas mellan aktivt och inaktivt.
         is_new = self.mode.get() == "new"
-        self.new_entry.configure(state="normal" if is_new else "disabled")
+        entry = getattr(self, "new_entry", None)
+        if entry is not None:
+            entry.configure(state="normal" if is_new else "disabled")
         update_hint = getattr(self, "_update_subfolder_hint", None)
         if update_hint is not None:
             update_hint()
@@ -7163,7 +7177,12 @@ class ReviewDialog:
 
     def _category(self) -> str:
         if self.mode.get() == "new":
-            return self.new_entry.get().strip()
+            # new_entry skapas sent i __init__ - svara tomt i stället för
+            # att krascha om någon synk råkar fråga för tidigt.
+            entry = getattr(self, "new_entry", None)
+            if entry is None:
+                return ""
+            return entry.get().strip()
         # Skrivet sökord kan vara en ofullständig träff: använd den bara
         # när den pekar ut exakt en kategori, aldrig som nytt mappnamn.
         return _resolve_category_name(self.combo.get(), self._all_categories)
@@ -7592,6 +7611,10 @@ _UI_EN = {
     "Exportera årsarkiv…": "Export year archive…",
     "Granska alla…": "Review all…", "Ångra valda": "Undo selected",
     "Sök efter uppdateringar…": "Check for updates…",
+    "Rensa åtgärdade fel från loggen…": "Clean up fixed errors from the log…",
+    "Rensa åtgärdade fel från loggen": "Clean up fixed errors from the log",
+    "Markera valda som åtgärdade": "Mark selected as fixed",
+    "Rensa åtgärdade från loggen": "Clean up fixed errors from the log",
     "Sök och uppdatera": "Check and update",
     "Kontrollera uppdateringar": "Check updates",
     "Installera Python-paket": "Install Python packages",
@@ -7915,6 +7938,8 @@ def meny_spec() -> List[Dict[str, Any]]:
              "snabb": f"{c}+Shift+A", "atgard": "_copy_ai_report"},
             {"id": "diagnostik", "text": "Kopiera diagnostik för support",
              "atgard": "_copy_support_log"},
+            {"id": "rensa_felkoder", "text": "Rensa åtgärdade fel från loggen…",
+             "atgard": "_open_error_code_dialog"},
             {"typ": "avdelare"},
             {"id": "sok_uppdatering", "text": "Sök efter uppdateringar…",
              "atgard": "_meny_sok_uppdatering"},
@@ -16140,6 +16165,134 @@ class App:
             f"Klistra in den i felanmälan - mottagaren ser direkt vad "
             f"som hände.\n\nLogfilen: {fil}", parent=self.root)
 
+    def _open_error_code_dialog(self) -> None:
+        """Markera felkoder som åtgärdade och rensa dem ur felloggen.
+
+        Listan visar varje felkods senaste status. Markera de fel du har
+        fixat - de försvinner då ur AI-rapporten - och rensa sedan bort
+        deras poster ur felkoder.log och fel-samlat.log. Sessionsloggarna
+        (app_*.log) behålls alltid som revisionsspår.
+        """
+        self._ui("Rensa åtgärdade fel från loggen")
+        try:
+            win = self.tk.Toplevel(self.root)
+            brand_window(win)
+            win.title("Rensa åtgärdade fel från loggen")
+            win.transient(self.root)
+            win.configure(background=self.C["bg"])
+            _fit_geometry(win, 860, 520, 560, 360)
+            win.columnconfigure(0, weight=1)
+            win.rowconfigure(1, weight=1)
+            info = self.ttk.Label(
+                win, style="Card.TLabel",
+                text="Markera de fel du har åtgärdat. De försvinner ur "
+                     "AI-rapporten direkt, och med Rensa-knappen tas deras "
+                     "poster bort ur felloggen.",
+                wraplength=820, justify="left")
+            info.grid(row=0, column=0, columnspan=2, sticky="ew",
+                      padx=14, pady=(12, 8))
+            kolumner = ("kod", "status", "kategori", "antal", "meddelande")
+            tree = self.ttk.Treeview(win, columns=kolumner, show="headings",
+                                     selectmode="extended", height=12)
+            for kol, rubrik, bredd in (
+                    ("kod", "Kod", 90), ("status", "Status", 100),
+                    ("kategori", "Kategori", 110), ("antal", "Antal", 60),
+                    ("meddelande", "Meddelande", 460)):
+                tree.heading(kol, text=rubrik)
+                tree.column(kol, width=bredd, stretch=(kol == "meddelande"))
+            tree.grid(row=1, column=0, sticky="nsew", padx=(14, 0), pady=4)
+            scroll = self.ttk.Scrollbar(win, orient="vertical",
+                                        command=tree.yview)
+            scroll.grid(row=1, column=1, sticky="ns", padx=(0, 14), pady=4)
+            tree.configure(yscrollcommand=scroll.set)
+            status = self.ttk.Label(win, style="CardMuted.TLabel", text="")
+            status.grid(row=2, column=0, columnspan=2, sticky="w",
+                        padx=14, pady=(2, 0))
+            rad = self.ttk.Frame(win, style="Card.TFrame")
+            rad.grid(row=3, column=0, columnspan=2, sticky="ew",
+                     padx=14, pady=12)
+            rad.columnconfigure(0, weight=1)
+
+            def las_om() -> None:
+                for item in tree.get_children():
+                    tree.delete(item)
+                try:
+                    koder = list_error_codes()
+                except Exception:
+                    koder = []
+                for post in koder:
+                    tree.insert("", "end", iid=post["kod"], values=(
+                        post["kod"], post["status"], post.get("kategori", ""),
+                        post.get("antal", 1),
+                        str(post.get("meddelande", ""))[:160]))
+                oppna = sum(1 for p in koder if p["status"] == "ÖPPEN")
+                klara = len(koder) - oppna
+                status.configure(
+                    text=f"{oppna} öppna, {klara} åtgärdade felkoder.")
+
+            def markera_valda() -> None:
+                valda = [k for k in tree.selection()
+                         if tree.set(k, "status") == "ÖPPEN"]
+                if not valda:
+                    self.messagebox.showinfo(
+                        APP_NAME, "Markera en eller flera öppna felkoder "
+                        "i listan först.", parent=win)
+                    return
+                gjorda = sum(1 for k in valda
+                             if mark_error_code_resolved(k, "via loggrensning"))
+                self._h("logg", f"Markerade {gjorda} felkod(er) som åtgärdade")
+                self._log(f"Markerade {gjorda} felkod(er) som åtgärdade: "
+                          f"{', '.join(valda[:8])}", "ok")
+                las_om()
+
+            def rensa() -> None:
+                try:
+                    antal = sum(1 for p in list_error_codes()
+                                if p["status"] == "ÅTGÄRDAD")
+                except Exception:
+                    antal = 0
+                if not antal:
+                    self.messagebox.showinfo(
+                        APP_NAME, "Inga åtgärdade felkoder att rensa. "
+                        "Markera först de fel du har fixat.",
+                        parent=win)
+                    return
+                if not self.messagebox.askyesno(
+                        APP_NAME,
+                        f"Rensa {antal} åtgärdade felkod(er) ur felloggen?\n\n"
+                        "Deras poster tas bort ur felkoder.log och "
+                        "fel-samlat.log. Sessionsloggarna behålls.",
+                        parent=win):
+                    return
+                resultat = purge_resolved_error_codes()
+                self._h("logg",
+                        f"Rensade {resultat['block']} felpost(er) för "
+                        f"{len(resultat['koder'])} åtgärdade felkod(er)")
+                self._log(f"Rensade {resultat['block']} felpost(er) för "
+                          f"{len(resultat['koder'])} åtgärdade felkod(er) "
+                          f"({resultat['samlat']} poster i fel-samlat.log)",
+                          "ok")
+                las_om()
+                self.messagebox.showinfo(
+                    APP_NAME,
+                    f"Klart: {resultat['block']} felpost(er) för "
+                    f"{len(resultat['koder'])} åtgärdade felkod(er) togs bort "
+                    f"ur felloggen.", parent=win)
+
+            self.ttk.Button(rad, text="Markera valda som åtgärdade",
+                            command=markera_valda).grid(
+                                row=0, column=1, padx=(0, 8))
+            self.ttk.Button(rad, text="Rensa åtgärdade från loggen",
+                            command=rensa).grid(row=0, column=2, padx=(0, 8))
+            self.ttk.Button(rad, text="Stäng",
+                            command=win.destroy).grid(row=0, column=3)
+            win.bind("<Escape>", lambda _event: win.destroy())
+            las_om()
+            win.transient(self.root)
+            win.grab_set()
+        except Exception as exc:
+            self._fel(exc, "rensa åtgärdade fel")
+
     def _open_log_dir(self) -> None:
         self._ui("Öppna log-mappen")
         try:
@@ -16899,6 +17052,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Skriv ut ett komplett diagnostikpaket för support")
     p.add_argument("--mark-felkod-atgardad", metavar="KOD",
                    help="Markera en felkod som åtgärdad (8 hextecken); historiken sparas")
+    p.add_argument("--rensa-atgardade-felkoder", action="store_true",
+                   help="Rensa åtgärdade felkoders poster ur felkoder.log och "
+                        "fel-samlat.log; sessionsloggarna behålls")
     p.add_argument("--ai-rapport", action="store_true",
                    help="Skriv ut ALLA fel samlade i ett block - klart att "
                         "klistra in i en AI-chatt eller felanmälan")
@@ -16942,6 +17098,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(("Felkoden markerades som åtgärdad; historiken finns kvar i logs/felkoder.log."
                if ok else "Ogiltig felkod eller kunde inte skriva logs/felkoder.log."))
         return 0 if ok else 2
+
+    if getattr(args, "rensa_atgardade_felkoder", False):
+        resultat = purge_resolved_error_codes()
+        print(f"Rensade {resultat['block']} felpost(er) för "
+              f"{len(resultat['koder'])} åtgärdade felkod(er) ur felloggen "
+              f"({resultat['samlat']} poster i fel-samlat.log).")
+        return 0
 
     if getattr(args, "ai_rapport", False):
         rapport = build_ai_report(djup=bool(getattr(args, "djup", False)))

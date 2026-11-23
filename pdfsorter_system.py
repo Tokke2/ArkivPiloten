@@ -3110,6 +3110,165 @@ def mark_error_code_resolved(code: str, note: str = "") -> bool:
         return False
 
 
+#: Ett block i felkoder.log: tidsrubrik + FELKOD-rad. Rader som inte
+#: matchar bevaras alltid vid rensning - hellre för mycket kvar än att
+#: råka radera något okänt.
+_RE_FELKOD = re.compile(
+    r"^FELKOD:([0-9a-f]{8}) \[(ÖPPEN|ÅTGÄRDAD)\](?:\s+(.*))?$")
+_RE_FELKOD_RUBRIK = re.compile(r"^=+.*=+\s*$")
+
+
+def _felkod_block(text: str) -> List[Dict[str, Any]]:
+    """Dela felkoder.log i block: främmande rader blir egna \"okända\" block."""
+    block: List[Dict[str, Any]] = []
+    rubrik: Optional[str] = None
+    for rad in str(text or "").splitlines(keepends=True):
+        if _RE_FELKOD_RUBRIK.match(rad):
+            rubrik = rad
+            continue
+        match = _RE_FELKOD.match(rad.rstrip("\n"))
+        if match:
+            kod, status, detalj = match.groups()
+            block.append({"rubrik": rubrik, "rad": rad, "kod": kod,
+                          "status": status, "detalj": detalj or ""})
+            rubrik = None
+        else:
+            # Tomrad före en rubrik hör till nästa block, inte till ett eget.
+            if rad.strip():
+                block.append({"rubrik": rubrik, "rad": rad, "kod": None,
+                              "status": "", "detalj": ""})
+                rubrik = None
+            elif rubrik is not None:
+                block.append({"rubrik": None, "rad": rad, "kod": None,
+                              "status": "", "detalj": ""})
+    return block
+
+
+def list_error_codes() -> List[Dict[str, Any]]:
+    """Alla felkoder med senaste status - öppna först, nyaste först.
+
+    Returnerar ``[{"kod", "status", "kategori", "meddelande", "antal",
+    "senast"}]``. Tom lista när loggen saknas (inga fel har loggats än).
+    """
+    try:
+        text = (session_dir() / "felkoder.log").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    samlat: Dict[str, Dict[str, Any]] = {}
+    for post in _felkod_block(text):
+        if not post["kod"]:
+            continue
+        kod = post["kod"]
+        info = samlat.get(kod)
+        if info is None:
+            info = samlat[kod] = {"kod": kod, "status": post["status"],
+                                  "kategori": "", "meddelande": "",
+                                  "antal": 0, "senast": ""}
+        info["status"] = post["status"]
+        info["antal"] += 1
+        if post["status"] == "ÖPPEN":
+            kategori, _, meddelande = post["detalj"].partition(" ")
+            info["kategori"] = kategori
+            info["meddelande"] = meddelande or post["detalj"]
+        elif not info["meddelande"] and post["detalj"]:
+            info["meddelande"] = post["detalj"]
+        rubrik = (post["rubrik"] or "").strip("= \n")
+        if rubrik:
+            info["senast"] = rubrik
+    oppna = sorted((p for p in samlat.values() if p["status"] == "ÖPPEN"),
+                   key=lambda p: str(p.get("senast", "")), reverse=True)
+    klara = sorted((p for p in samlat.values() if p["status"] != "ÖPPEN"),
+                   key=lambda p: str(p.get("senast", "")), reverse=True)
+    return oppna + klara
+
+
+def purge_resolved_error_codes() -> Dict[str, Any]:
+    """Rensa åtgärdade felkoder ur felloggarna.
+
+    Tar bort ÖPPEN-blocken för koder markerade ÅTGÄRDAD ur
+    ``felkoder.log`` (själva ÅTGÄRDAD-kvittot behålls, så att rapporten
+    vet att felet är fixat) samt matchande felposter ur
+    ``fel-samlat.log``. Sessionsloggarna (``app_*.log``) rörs inte - de
+    är revisionsspåret och roterar bort av sig själva.
+
+    Returnerar ``{"koder", "block", "samlat"}`` med antal rensade koder,
+    borttagna ÖPPEN-block respektive borttagna samlat-poster.
+    """
+    resultat: Dict[str, Any] = {"koder": [], "block": 0, "samlat": 0}
+    try:
+        mapp = session_dir()
+        kodfil = mapp / "felkoder.log"
+        try:
+            text = kodfil.read_text(encoding="utf-8")
+        except OSError:
+            return resultat
+        block = _felkod_block(text)
+        status: Dict[str, str] = {}
+        for post in block:
+            if post["kod"]:
+                status[post["kod"]] = post["status"]
+        atgardade = {k for k, s in status.items() if s == "ÅTGÄRDAD"}
+        if not atgardade:
+            return resultat
+        # (kategori, meddelande) ur de ÖPPEN-block som ska bort - nyckeln
+        # för att hitta samma felposter i fel-samlat.log.
+        nycklar = set()
+        kvar: List[str] = []
+        for post in block:
+            if post["kod"] in atgardade and post["status"] == "ÖPPEN":
+                kategori, _, meddelande = post["detalj"].partition(" ")
+                if kategori and meddelande:
+                    nycklar.add((kategori, meddelande))
+                resultat["block"] += 1
+                continue
+            if post["rubrik"]:
+                kvar.append(post["rubrik"])
+            kvar.append(post["rad"])
+        kodfil.write_text("".join(kvar), encoding="utf-8")
+        resultat["koder"] = sorted(atgardade)
+        if nycklar:
+            resultat["samlat"] = _purge_samlat(mapp / "fel-samlat.log",
+                                               nycklar)
+        session_log("logg",
+                    f"Rensade {resultat['block']} felpost(er) för "
+                    f"{len(resultat['koder'])} åtgärdade felkod(er) ur loggen")
+    except OSError as exc:
+        session_log("logg", f"Kunde inte rensa åtgärdade felkoder: {exc}",
+                    "warn")
+    return resultat
+
+
+#: En felpost i fel-samlat.log: rubrikrad + indragna fortsättningsrader.
+_RE_SAMLAT_FEL = re.compile(
+    r"^\d{2}:\d{2}:\d{2}\.\d{3}\s{1,3}FEL\s+(\S+)\s+(.*)$")
+_RE_SAMLAT_FORTS = re.compile(r"^ {20,}")
+
+
+def _purge_samlat(fil: Path, nycklar: set) -> int:
+    """Ta bort felposter ur fel-samlat.log som matchar åtgärdade koder."""
+    try:
+        rader = fil.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return 0
+    kvar: List[str] = []
+    borttagna = 0
+    hoppa_fortsättning = False
+    for rad in rader:
+        if hoppa_fortsättning:
+            if _RE_SAMLAT_FORTS.match(rad):
+                continue
+            hoppa_fortsättning = False
+        match = _RE_SAMLAT_FEL.match(rad.rstrip("\n"))
+        if match and (match.group(1), match.group(2)) in nycklar:
+            borttagna += 1
+            hoppa_fortsättning = True
+            continue
+        kvar.append(rad)
+    if borttagna:
+        fil.write_text("".join(kvar), encoding="utf-8")
+    return borttagna
+
+
 def latest_session_log() -> Optional[Path]:
     """Nyaste sessionsloggen över alla månader (för support/urklipp).
 
