@@ -24,7 +24,8 @@ def test_category_mapping_has_top_selector_and_three_role_specific_columns():
     assert 'self.var_cat_select.trace_add(' in source
     assert '"write", lambda *_args: self._on_cat_select()' in source
     assert "self.default_keyword_combo = ttk.Combobox(" in source
-    assert 'cols = ("word", "kind", "weight", "whole", "hits", "folder")' in source
+    assert 'cols = ("word", "kind", "weight", "whole", "hits", "folder", "std")' in source
+    assert '"★" if is_default else ""' in source
     assert '("folder", "MAPP", 12, "w", True)' in source
     assert 'kw.get("hits", 0), keyword_folder_label(cat, kw["text"])' in source
     assert 'columns=("folder", "words"), show="headings"' in source
@@ -386,7 +387,8 @@ def test_keyword_view_shows_folder_column_and_keeps_selection():
 
     P.App._refresh_keyword_view(app)
 
-    assert app.kw_tree.rows["lon"][-1] == "–"
-    assert app.kw_tree.rows["giro"][-1] == "Kvitton"
-    assert len(app.kw_tree.rows["lon"]) == 6
+    assert app.kw_tree.rows["lon"][-2] == "–"
+    assert app.kw_tree.rows["giro"][-2] == "Kvitton"
+    assert app.kw_tree.rows["lon"][-1] == ""
+    assert len(app.kw_tree.rows["lon"]) == 7
     assert app.kw_tree.selected == ["lon"]

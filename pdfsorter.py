@@ -2205,19 +2205,34 @@ def keyword_folder_label(cat: Optional[Dict[str, Any]], text: str) -> str:
     return folder if folder else "–"
 
 
+def keyword_is_linked(cat: Optional[Dict[str, Any]], text: str) -> bool:
+    """True när stödordet redan är kopplat till en mapp."""
+    return keyword_folder_label(cat, text) != "–"
+
+
 #: Standardordningen på stödordstabellens kolumner. Användaren kan dra
 #: rubrikerna till en egen ordning; den sparas i inställningen
 #: kw_column_order och läses tillbaka vid start.
-KW_COLUMNS = ("word", "kind", "weight", "whole", "hits", "folder")
+KW_COLUMNS = ("word", "kind", "weight", "whole", "hits", "folder", "std")
 
 
 def normalize_column_order(saved: Any,
                            columns: tuple = KW_COLUMNS) -> List[str]:
-    """Granska en sparad kolumnordning; falla tillbaka på standarden."""
+    """Granska en sparad kolumnordning; falla tillbaka på standarden.
+
+    Framtidssäker: en äldre sparad ordning (utan nytillkomna kolumner)
+    behålls som den är och de nya kolumnerna läggs sist - användarens
+    dragordning överlever nya appversioner.
+    """
     cols = list(columns)
-    if (isinstance(saved, (list, tuple)) and len(saved) == len(cols)
-            and {str(c) for c in saved} == set(cols)):
-        return [str(c) for c in saved]
+    if isinstance(saved, (list, tuple)):
+        wanted: List[str] = []
+        for entry in saved:
+            name = str(entry)
+            if name in cols and name not in wanted:
+                wanted.append(name)
+        if wanted:
+            return wanted + [c for c in cols if c not in wanted]
     return cols
 
 
@@ -7580,6 +7595,7 @@ _UI_EN = {
     "STÖDORD": "SUPPORT WORDS", "UNDERMAPPAR": "SUBFOLDERS",
     "KOPPLING": "MAPPING", "KOPPLADE STÖDORD": "LINKED SUPPORT WORDS",
     "Använd markerat som standardord": "Use selected as the default word",
+    "Dölj kopplade ord": "Hide linked words",
     "+ Lägg till undermapp…": "+ Add subfolder…",
     "Koppla loss markerat": "Unlink selected", "Klart": "Done",
     "PDF-sortering, enkelt och säkert": "PDF sorting, simply and safely",
@@ -11611,10 +11627,17 @@ class App:
         self.lbl_kwcount.grid(row=0, column=0, sticky="w", padx=T.INNER)
         ttk.Separator(bar, orient="vertical").grid(row=0, column=1, sticky="ns",
                                                    pady=10)
+        self.var_kw_hide_linked = tk.BooleanVar(
+            value=bool(self.settings.get("kw_hide_linked", False)))
+        ttk.Checkbutton(bar, text="Dölj kopplade ord",
+                        style="Card.TCheckbutton",
+                        variable=self.var_kw_hide_linked,
+                        command=self._toggle_kw_hide_linked).grid(
+                            row=0, column=2, padx=(12, 0))
         ttk.Button(bar, text="Exportera…", style="CardLink.TButton",
-                   command=self._export).grid(row=0, column=2, padx=(12, 0))
+                   command=self._export).grid(row=0, column=3, padx=(12, 0))
         ttk.Button(bar, text="Importera…", style="CardLink.TButton",
-                   command=self._import).grid(row=0, column=3, padx=(4, T.INNER))
+                   command=self._import).grid(row=0, column=4, padx=(4, T.INNER))
 
         support_card = T.card(f, "Sparade stödord")
         support_card.grid(row=2, column=0, sticky="nsew",
@@ -11622,7 +11645,7 @@ class App:
         support = support_card.body
         support.columnconfigure(0, weight=1)
         support.rowconfigure(0, weight=1)
-        cols = ("word", "kind", "weight", "whole", "hits", "folder")
+        cols = ("word", "kind", "weight", "whole", "hits", "folder", "std")
         self.kw_tree = ttk.Treeview(support, columns=cols, show="headings",
                                     selectmode="extended")
         T.fit_columns(self.kw_tree, (
@@ -11631,7 +11654,8 @@ class App:
             ("weight", "VIKT", 4, "center", False),
             ("whole", "HELT ORD", 4, "center", False),
             ("hits", "TRÄFFAR", 5, "center", False),
-            ("folder", "MAPP", 12, "w", True)))
+            ("folder", "MAPP", 12, "w", True),
+            ("std", "★", 2, "center", False)))
         for col in cols:
             self.kw_tree.heading(col, command=lambda c=col: self._sort_keywords(c))
         self._apply_kw_column_order(self.settings.get("kw_column_order", ()))
@@ -11954,6 +11978,16 @@ class App:
     def _selected_cat(self) -> Optional[str]:
         name = self.var_cat_select.get().strip()
         return name or None
+
+    def _toggle_kw_hide_linked(self) -> None:
+        """Visa/dölj redan mappkopplade stödord i listan (sparas)."""
+        try:
+            self.settings["kw_hide_linked"] = bool(
+                self.var_kw_hide_linked.get())
+            save_settings(self.settings)
+        except Exception:
+            pass
+        self._refresh_keyword_view()
 
     def _sort_keywords(self, col: str) -> None:
         # Ett avslutat kolumndrag släpper också rubrikens klick: sortera
@@ -12361,6 +12395,7 @@ class App:
         cat["default_keyword"] = word
         self.rules.save()
         self._refresh_subfolder_map()
+        self._refresh_keyword_view()
         self.lbl_subfolder_map_status.configure(
             text=(f"{word} är standardstödord för {cat['name']}. "
                   "Inställningen är separat för varje kategori."
@@ -12565,6 +12600,17 @@ class App:
             return
 
         words = list(cat["keywords"])
+        default_word = normalize(cat.get("default_keyword", ""))
+        hide_linked = False
+        hide_var = getattr(self, "var_kw_hide_linked", None)
+        if hide_var is not None:
+            try:
+                hide_linked = bool(hide_var.get())
+            except Exception:
+                hide_linked = False
+        if hide_linked:
+            words = [k for k in words
+                     if not keyword_is_linked(cat, k.get("text", ""))]
 
         col, desc = self._kw_sort
         keyfn = {
@@ -12574,6 +12620,7 @@ class App:
             "whole": lambda k: k.get("whole_word", True),
             "hits": lambda k: k.get("hits", 0),
             "folder": lambda k: keyword_folder_label(cat, k["text"]),
+            "std": lambda k: normalize(k["text"]) == default_word,
             "source": lambda k: k.get("source", ""),
         }.get(col, lambda k: k.get("hits", 0))
         words.sort(key=keyfn, reverse=desc)
@@ -12587,10 +12634,13 @@ class App:
                 tags.append("strong")
             elif not kw.get("hits", 0):
                 tags.append("weak")
+            is_default = bool(default_word) and \
+                normalize(kw["text"]) == default_word
             self.kw_tree.insert("", "end", iid=kw["text"], tags=tags, values=(
                 kw["text"], label, f"{kw['weight']:g}",
                 "ja" if kw.get("whole_word", True) else "nej",
-                kw.get("hits", 0), keyword_folder_label(cat, kw["text"])))
+                kw.get("hits", 0), keyword_folder_label(cat, kw["text"]),
+                "★" if is_default else ""))
         for iid in selected:
             try:
                 if self.kw_tree.exists(iid):
@@ -12606,6 +12656,9 @@ class App:
             if oanvända:
                 delar.append(f"{oanvända} har aldrig träffat")
             delar.append(f"auto kräver {behov} exakta stödord")
+            if hide_linked:
+                delar.append(f"visar {len(words)} av {len(cat['keywords'])} "
+                             "(kopplade dolda)")
             self.lbl_kw_sum.configure(text="   ·   ".join(delar))
 
 

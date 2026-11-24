@@ -733,6 +733,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "ui_text_size": "normal",   # normal | large
     "contrast": "normal",        # normal | high (högkontrast, tema rond 3)
     "kw_column_order": [],       # tom = standardordning på stödordstabellen
+    "kw_hide_linked": False,     # dölj redan mappkopplade stödord i listan
 }
 
 

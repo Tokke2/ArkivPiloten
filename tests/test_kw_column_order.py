@@ -7,11 +7,16 @@ import pdfsorter_data as D
 
 
 def test_normalize_column_order_keeps_valid_and_repairs_broken():
-    saved = ["hits", "word", "folder", "kind", "weight", "whole"]
+    saved = ["hits", "word", "folder", "kind", "weight", "whole", "std"]
 
     assert P.normalize_column_order(saved) == saved
+    # Äldre sparad ordning utan nya kolumner: behålls, nytt läggs sist.
+    assert P.normalize_column_order(["hits", "word"]) == [
+        "hits", "word", "kind", "weight", "whole", "folder", "std"]
+    # Dubbletter och okända namn rensas bort.
+    assert P.normalize_column_order(["word", "word", "okänd"]) == [
+        "word", "kind", "weight", "whole", "hits", "folder", "std"]
     assert P.normalize_column_order([]) == list(P.KW_COLUMNS)
-    assert P.normalize_column_order(["word", "hits"]) == list(P.KW_COLUMNS)
     assert P.normalize_column_order("word") == list(P.KW_COLUMNS)
     assert P.normalize_column_order(None) == list(P.KW_COLUMNS)
     assert D.DEFAULT_SETTINGS["kw_column_order"] == []
