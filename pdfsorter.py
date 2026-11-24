@@ -949,19 +949,32 @@ class TextZones:
         header = _header_zone(text)
         pagehead = _trim_prose(page_header)
         pagefoot = normalize(page_footer)
-        # Även de avbrusade runorna blir tokens, så att förfiltret
-        # kan_finnas() släpper igenom ett OCR-skadat org.nr.
+
+        def _alt(s: str) -> str:
+            if not s:
+                return ""
+            d = denoise_numbers(s)
+            return d if d != s else ""
+
+        full_d = _alt(full)
+        # Även de avbrusade runorna blir tokens (bara när de skiljer sig),
+        # så att förfiltret kan_finnas() släpper igenom OCR-skadat org.nr
+        # utan att dubbla RAM-förbrukningen på rena text-PDF:er.
+        toks = set(_TOKEN_RE.findall(full))
+        if namn:
+            toks.update(_TOKEN_RE.findall(namn))
+        if full_d:
+            toks.update(_TOKEN_RE.findall(full_d))
         return cls(
-            full=full, full_d=denoise_numbers(full),
-            filename=namn, filename_d=denoise_numbers(namn),
-            sender=sender, sender_d=denoise_numbers(sender),
-            header=header, header_d=denoise_numbers(header),
-            identity=identity, identity_d=denoise_numbers(identity),
-            recipient=recipient, recipient_d=denoise_numbers(recipient),
-            pagehead=pagehead, pagehead_d=denoise_numbers(pagehead),
-            pagefoot=pagefoot, pagefoot_d=denoise_numbers(pagefoot),
-            tokens=frozenset(_TOKEN_RE.findall(
-                full + " " + namn + " " + denoise_numbers(full))),
+            full=full, full_d=full_d,
+            filename=namn, filename_d=_alt(namn),
+            sender=sender, sender_d=_alt(sender),
+            header=header, header_d=_alt(header),
+            identity=identity, identity_d=_alt(identity),
+            recipient=recipient, recipient_d=_alt(recipient),
+            pagehead=pagehead, pagehead_d=_alt(pagehead),
+            pagefoot=pagefoot, pagefoot_d=_alt(pagefoot),
+            tokens=frozenset(toks),
         )
 
     def kan_finnas(self, kw: Dict[str, Any]) -> bool:
@@ -1049,21 +1062,26 @@ class TextZones:
 #: Zoncache: samma dokument beslutas ibland flera gånger (kö + omskanning
 #: + omskanning efter inlärning). Att bygga om zonerna (normalisering,
 #: zonregex) är det dyraste steget i matchningen - cacha per innehåll.
-_ZONES_CACHE: "OrderedDict[str, TextZones]" = OrderedDict()
+_ZONES_CACHE: "OrderedDict[bytes, TextZones]" = OrderedDict()
+_ZONES_CACHE_LIMIT = 200
 
 
 def _zones_for(text: str, filename: str, page_header: str,
                page_footer: str) -> TextZones:
     import hashlib
-    key = hashlib.sha1(
-        (text + "\x00" + filename + "\x00" + page_header + "\x00" + page_footer)
-        .encode("utf-8", "ignore")).hexdigest()
+    h = hashlib.blake2b(digest_size=16)
+    for part in (text, filename, page_header, page_footer):
+        h.update(part.encode("utf-8", "ignore"))
+        h.update(b"\x00")
+    key = h.digest()
     z = _ZONES_CACHE.get(key)
     if z is None:
         z = TextZones.build(text, filename, page_header, page_footer)
         _ZONES_CACHE[key] = z
-        while len(_ZONES_CACHE) > 200:
+        while len(_ZONES_CACHE) > _ZONES_CACHE_LIMIT:
             _ZONES_CACHE.popitem(last=False)
+    else:
+        _ZONES_CACHE.move_to_end(key)
     return z
 
 
@@ -1118,7 +1136,7 @@ def score_text(rules: Rules, text: str, filename: str = "",
     utan att ensam lyfta en kategori över auto-gränsen.
     """
     zones = _zones_for(text, filename, page_header, page_footer)
-    norm_body = normalize(body) if body else ""
+    norm_body: Optional[str] = None
     out: List[CategoryScore] = []
 
     for cat in rules.categories:
@@ -1148,9 +1166,11 @@ def score_text(rules: Rules, text: str, filename: str = "",
             # Namn och kropp överens (matchningsrundan 2026-10-05): ett
             # stödord som står i FILNAMNET och ÄVEN i själva brödtexten
             # är starkare bevis än namnet ensamt - liten bonus.
-            if zone == "filename" and norm_body \
-                    and _cached_pattern(kw).search(norm_body):
-                total += 0.1
+            if zone == "filename" and body:
+                if norm_body is None:
+                    norm_body = normalize(body)
+                if norm_body and _cached_pattern(kw).search(norm_body):
+                    total += 0.1
             # Flersidigt bevis: ordet (alla dess delar) återkommer på
             # minst två sidor - typiskt firmamnet i brevhuvud/sidfot.
             if token_pages:
@@ -2646,30 +2666,56 @@ def list_pdfs(folder: Path, recursive: bool = False,
     # ligger inuti en skanningsmapp (t.ex. Arkiv/ under inmappen).
     exc = [os.path.normcase(os.path.abspath(str(e))) for e in excludes if e]
 
-    def _excluded(p: Path) -> bool:
-        pc = os.path.normcase(os.path.abspath(str(p)))
+    def _excluded_str(raw_path: str) -> bool:
+        pc = os.path.normcase(os.path.abspath(raw_path))
         return any(pc == e or pc.startswith(e + os.sep) for e in exc)
 
-    if recursive:
-        it = folder.rglob("*")
-    else:
+    def _keep_name(name: str) -> bool:
+        low = name.lower()
+        return (low.endswith(".pdf")
+                and not name.startswith(IGNORE_PREFIX)
+                and not low.endswith(IGNORE_SUFFIX))
+
+    out: List[Path] = []
+    if not recursive:
         # os.scandir är märkbart snabbare än glob på Windows och
         # nätverksdiskar (en systemanropssvit i stället för många stat).
         try:
             with os.scandir(folder) as sc:
-                it = [Path(e.path) for e in sc]
+                for entry in sc:
+                    try:
+                        if not _keep_name(entry.name):
+                            continue
+                        if exc and _excluded_str(entry.path):
+                            continue
+                        if entry.is_file():
+                            out.append(Path(entry.path))
+                    except OSError:
+                        continue
         except OSError:
             return []
-    out = []
-    for p in it:
+        return sorted(out)
+
+    # Rekursiv os.scandir-traversering: undantagna mappar beskärs INNAN vi
+    # går ned i dem, så tusentals arkiverade PDF:er aldrig ens stat:as.
+    stack = [os.fspath(folder)]
+    while stack:
+        current = stack.pop()
         try:
-            if exc and _excluded(p):
-                continue
-            if not p.is_file() or p.suffix.lower() != ".pdf":
-                continue
-            if p.name.startswith(IGNORE_PREFIX) or p.name.lower().endswith(IGNORE_SUFFIX):
-                continue
-            out.append(p)
+            with os.scandir(current) as sc:
+                for entry in sc:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if exc and _excluded_str(entry.path):
+                                continue
+                            stack.append(entry.path)
+                        elif _keep_name(entry.name):
+                            if exc and _excluded_str(entry.path):
+                                continue
+                            if entry.is_file():
+                                out.append(Path(entry.path))
+                    except OSError:
+                        continue
         except OSError:
             continue
     return sorted(out)
@@ -2827,10 +2873,30 @@ class TextCache:
 
     def __init__(self) -> None:
         self._data: "OrderedDict[Tuple[str, int, int], Extraction]" = OrderedDict()
+        self._by_path: Dict[str, Tuple[str, int, int]] = {}
         self._bytes = 0
         self._lock = threading.RLock()
         self.hits = 0
         self.misses = 0
+
+    def configure_limits(self, low_memory: bool = False) -> None:
+        """Anpassa minnestak för RAM-cachen och zoncachen efter läget."""
+        global _ZONES_CACHE_LIMIT
+        with self._lock:
+            self.MAX_ENTRIES = 200 if low_memory else 800
+            self.MAX_BYTES = (8 if low_memory else 24) * 1024 * 1024
+            _ZONES_CACHE_LIMIT = 32 if low_memory else 200
+            self._trim_locked()
+        while len(_ZONES_CACHE) > _ZONES_CACHE_LIMIT:
+            _ZONES_CACHE.popitem(last=False)
+
+    def _trim_locked(self) -> None:
+        while (len(self._data) > self.MAX_ENTRIES
+               or self._bytes > self.MAX_BYTES):
+            old_key, popped = self._data.popitem(last=False)
+            self._bytes -= len(popped.text)
+            if self._by_path.get(old_key[0]) == old_key:
+                self._by_path.pop(old_key[0], None)
 
     @staticmethod
     def _key(path: Path) -> Optional[Tuple[str, int, int]]:
@@ -2863,28 +2929,41 @@ class TextCache:
             gammal = self._data.get(key)
             if gammal is not None:
                 self._bytes -= len(gammal.text)
+            prev_key = self._by_path.get(key[0])
+            if prev_key is not None and prev_key != key:
+                old_ext = self._data.pop(prev_key, None)
+                if old_ext is not None:
+                    self._bytes -= len(old_ext.text)
             self._data[key] = extraction
+            self._by_path[key[0]] = key
             self._data.move_to_end(key)
             self._bytes += len(extraction.text)
-            while (len(self._data) > self.MAX_ENTRIES
-                   or self._bytes > self.MAX_BYTES):
-                _, popped = self._data.popitem(last=False)
-                self._bytes -= len(popped.text)
+            self._trim_locked()
 
     def forget(self, path: Path) -> None:
-        """Släng en enskild fil, t.ex. sedan den flyttats."""
+        """Släng en enskild fil, t.ex. sedan den flyttats från disken."""
         key = self._key(path)
         with self._lock:
+            if key is None:
+                try:
+                    resolved = str(Path(path).resolve())
+                except OSError:
+                    resolved = str(path)
+                key = self._by_path.pop(resolved, None)
             if key is not None:
                 popped = self._data.pop(key, None)
                 if popped is not None:
                     self._bytes -= len(popped.text)
+                if self._by_path.get(key[0]) == key:
+                    self._by_path.pop(key[0], None)
 
     def clear(self) -> None:
         with self._lock:
             self._data.clear()
+            self._by_path.clear()
             self._bytes = 0
             self.hits = self.misses = 0
+        _ZONES_CACHE.clear()
 
     def stats(self) -> str:
         with self._lock:
@@ -2939,6 +3018,7 @@ class DiskTextCache:
         cache_file = self.dir / (kh + ".json")
         with self._lock:
             try:
+                st_mtime = cache_file.stat().st_mtime
                 with open(cache_file, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 try:
@@ -2954,13 +3034,13 @@ class DiskTextCache:
                     TypeError, ValueError, KeyError):
                 self._discard(cache_file)
                 return None
-            # mtime används som senaste-aktivitet i smartfiltret. En cache
-            # som faktiskt träffar ska inte rensas bara för att den skrevs
-            # för länge sedan.
-            try:
-                os.utime(cache_file, None)
-            except OSError:
-                pass
+            # mtime används som senaste-aktivitet i smartfiltret; undvik
+            # onödiga diskskrivningar om tiden redan uppdaterades nyligen.
+            if time.time() - st_mtime >= 3600:
+                try:
+                    os.utime(cache_file, None)
+                except OSError:
+                    pass
             return extraction
 
     def put(self, path: Path, ext: Extraction) -> None:
@@ -2971,7 +3051,8 @@ class DiskTextCache:
             try:
                 self.dir.mkdir(parents=True, exist_ok=True)
                 with open(self.dir / (kh + ".json"), "w", encoding="utf-8") as fh:
-                    json.dump(ext.to_cache_dict(), fh, ensure_ascii=False)
+                    json.dump(ext.to_cache_dict(), fh, ensure_ascii=False,
+                              separators=(",", ":"))
             except OSError:
                 return
             # Kapaciteten hålls även mellan de dagliga rensningarna.
@@ -2996,27 +3077,31 @@ class DiskTextCache:
             entries = []
             try:
                 self.dir.mkdir(parents=True, exist_ok=True)
-                for path in self.dir.iterdir():
-                    if not path.is_file() or not self._KEY_RE.fullmatch(path.name):
-                        continue
-                    try:
-                        stat = path.stat()
-                        if stat.st_mtime < cutoff:
-                            try:
-                                path.unlink()
-                                removed_age += 1
-                                removed_bytes += stat.st_size
-                            except FileNotFoundError:
+                with os.scandir(self.dir) as sc:
+                    for entry in sc:
+                        if not self._KEY_RE.fullmatch(entry.name):
+                            continue
+                        try:
+                            if not entry.is_file():
                                 continue
-                            except OSError:
-                                errors += 1
+                            stat = entry.stat()
+                            path = Path(entry.path)
+                            if stat.st_mtime < cutoff:
+                                try:
+                                    path.unlink()
+                                    removed_age += 1
+                                    removed_bytes += stat.st_size
+                                except FileNotFoundError:
+                                    continue
+                                except OSError:
+                                    errors += 1
+                                    entries.append((path, stat.st_mtime, stat.st_size))
+                            else:
                                 entries.append((path, stat.st_mtime, stat.st_size))
-                        else:
-                            entries.append((path, stat.st_mtime, stat.st_size))
-                    except FileNotFoundError:
-                        continue
-                    except OSError:
-                        errors += 1
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            errors += 1
             except OSError:
                 return {"removed_age": 0, "removed_limit": 0,
                         "removed_bytes": 0, "remaining": 0,
@@ -3943,6 +4028,8 @@ class FolderWatcher:
         self._seen: Dict[str, Tuple[int, float]] = {}
         self._waiting: Counter = Counter()   # filer som ännu inte är hela
         self._dir_sig: Optional[Tuple[int, int]] = None
+        self._dir_tree_sigs: Dict[str, Tuple[int, int]] = {}
+        self._scan_ticks = 0
 
     @property
     def running(self) -> bool:
@@ -3966,33 +4053,78 @@ class FolderWatcher:
         self._seen.pop(str(path), None)
         self._waiting.pop(str(path), None)
 
+    def _collect_dir_tree_sigs(self) -> Optional[Dict[str, Tuple[int, int]]]:
+        """Samla lättviktig signatur över mappar (snabbt via os.scandir)."""
+        if not self.folder.is_dir():
+            return None
+        exc = [os.path.normcase(os.path.abspath(str(e)))
+               for e in self.excludes if e]
+        sigs: Dict[str, Tuple[int, int]] = {}
+        stack = [os.fspath(self.folder)]
+        while stack:
+            if self._stop.is_set():
+                return None
+            cur = stack.pop()
+            try:
+                st_d = os.stat(cur)
+                sigs[cur] = (st_d.st_mtime_ns, st_d.st_size)
+                with os.scandir(cur) as sc:
+                    for entry in sc:
+                        try:
+                            if not entry.is_dir(follow_symlinks=False):
+                                continue
+                            if exc:
+                                pc = os.path.normcase(os.path.abspath(entry.path))
+                                if any(pc == e or pc.startswith(e + os.sep)
+                                       for e in exc):
+                                    continue
+                            stack.append(entry.path)
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return sigs
+
     def _loop(self) -> None:
         while not self._stop.is_set():
-            # Snabbväg (snabbare): oförändrad mapp (icke-rekursivt) och inga
-            # halvfärdiga filer som väntar -> hoppa över glob denna rond.
-            # Nya filer ändrar mappens mtime, så inget kan missas.
+            self._scan_ticks += 1
+            # Snabbväg (snabbare & energisnålare): oförändrad mappstruktur
+            # och inga halvfärdiga filer som väntar -> hoppa över fil-stat
+            # denna rond. Var 10:e rond kontrollerar ändå djupt för säkerhet.
             try:
-                if not self.recursive and not self._waiting:
-                    st_d = self.folder.stat()
-                    sig = (st_d.st_mtime_ns, st_d.st_size)
-                    if sig == self._dir_sig:
-                        self._stop.wait(self.interval)
-                        continue
-                    self._dir_sig = sig
+                if not self._waiting:
+                    if not self.recursive:
+                        st_d = self.folder.stat()
+                        sig = (st_d.st_mtime_ns, st_d.st_size)
+                        if sig == self._dir_sig:
+                            self._stop.wait(self.interval)
+                            continue
+                        self._dir_sig = sig
+                    elif self._scan_ticks % 10 != 0:
+                        sigs = self._collect_dir_tree_sigs()
+                        if sigs is not None and sigs == self._dir_tree_sigs:
+                            self._stop.wait(self.interval)
+                            continue
+                        if sigs is not None:
+                            self._dir_tree_sigs = sigs
             except OSError:
                 pass
             try:
+                current_keys = set()
+                completed = True
                 for pdf in list_pdfs(self.folder, self.recursive, self.excludes):
                     if self._stop.is_set():
+                        completed = False
                         break
+                    key = str(pdf)
+                    current_keys.add(key)
                     try:
                         st = pdf.stat()
                     except OSError:
                         continue
                     sig = (st.st_size, st.st_mtime)
-                    if self._seen.get(str(pdf)) == sig:
+                    if self._seen.get(key) == sig:
                         continue
-                    key = str(pdf)
                     if not is_stable(pdf, self.stable_seconds):
                         # Skrivs fortfarande, eller saknar %%EOF. Vänta.
                         # Efter 10 svep behandlas den ändå (trasig men stilla fil),
@@ -4007,6 +4139,11 @@ class FolderWatcher:
                         self.on_file(pdf)
                     except Exception:
                         pass
+                if completed and len(self._seen) > len(current_keys):
+                    # Rensa bort flyttade/raderade sökvägar ur minnet.
+                    for stale in [k for k in self._seen if k not in current_keys]:
+                        self._seen.pop(stale, None)
+                        self._waiting.pop(stale, None)
             except Exception:
                 pass
             self._stop.wait(self.interval)
@@ -4893,22 +5030,31 @@ def _sibling_year_subfolder_choices(root: Optional[Path],
 def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None:
     """Storleksanpassa och centrera ett fönster inom den synliga skärmen.
 
-    Minsta mått anpassas också till små skärmar. Innehåll som inte ryms ska
-    i första hand kunna rullas eller visas med radbrytning, inte klippas bort.
+    Skalar önskade mått mjukt på riktiga HiDPI-skärmar och klipper alltid
+    tillgängligt utrymme så att innehåll och knappar ryms på små skärmar.
     """
     try:
         sw = max(320, int(win.winfo_screenwidth()))
         sh = max(320, int(win.winfo_screenheight()))
     except Exception:
         sw, sh = max(320, want_w + 80), max(320, want_h + 120)
+    try:
+        dpi = float(win.winfo_fpixels("1i"))
+    except Exception:
+        dpi = 96.0
+    scale = (min(1.85, max(1.0, dpi / 96.0)) if dpi > 105.0 else 1.0)
+    want_w = max(1, int(round(want_w * scale)))
+    want_h = max(1, int(round(want_h * scale)))
+    min_w = max(1, int(round(min_w * scale)))
+    min_h = max(1, int(round(min_h * scale)))
     margin_x = min(48, max(8, sw // 40))
     margin_y = min(72, max(8, sh // 30))
     avail_w = max(1, sw - 2 * margin_x)
     avail_h = max(1, sh - 2 * margin_y)
-    min_w_fit = min(max(1, min_w), avail_w)
-    min_h_fit = min(max(1, min_h), avail_h)
-    w = max(min_w_fit, min(max(1, want_w), avail_w))
-    h = max(min_h_fit, min(max(1, want_h), avail_h))
+    min_w_fit = min(min_w, avail_w)
+    min_h_fit = min(min_h, avail_h)
+    w = max(min_w_fit, min(want_w, avail_w))
+    h = max(min_h_fit, min(want_h, avail_h))
     try:
         win.minsize(min_w_fit, min_h_fit)
     except Exception:
@@ -4924,6 +5070,31 @@ def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None
     win.geometry(f"{w}x{h}+{x}+{y}")
     session_log("fönster", f"Geometri: skärm {sw}x{sh}, fönster {w}x{h}+{x}+{y} "
                 f"(önskat {want_w}x{want_h}, min {min_w_fit}x{min_h_fit})")
+
+
+def _bind_responsive_wrap(label, container=None, *, pad: int = 36,
+                          min_w: int = 180, max_w: int = 960) -> None:
+    """Anpassa en etiketts radbrytning (wraplength) efter aktuell bredd."""
+    target = container if container is not None else getattr(label, "master", None)
+    if target is None:
+        return
+
+    def _update(_event=None) -> None:
+        try:
+            width = int(target.winfo_width())
+            if width <= 1:
+                return
+            wrap = max(min_w, min(max_w, width - pad))
+            if int(label.cget("wraplength") or 0) != wrap:
+                label.configure(wraplength=wrap)
+        except Exception:
+            pass
+
+    try:
+        target.bind("<Configure>", _update, add="+")
+        target.after_idle(_update)
+    except Exception:
+        pass
 
 
 def _maximize_window(win) -> bool:
@@ -6062,20 +6233,37 @@ class ReviewDialog:
                         pix = page.get_pixmap(
                             matrix=pymupdf.Matrix(preview_zoom, preview_zoom),
                             alpha=False)
-                        bilder.append(_PILImage.open(
-                            _io.BytesIO(pix.tobytes("png"))))
+                        samples = getattr(pix, "samples", None)
+                        if samples is not None and getattr(pix, "n", 0) == 3:
+                            im = _PILImage.frombytes(
+                                "RGB", (pix.width, pix.height), samples)
+                        else:
+                            im = _PILImage.open(_io.BytesIO(pix.tobytes("png")))
+                        bilder.append(im)
+                        del pix
             except Exception:
                 bilder = []
             try:
                 self.win.after(0, lambda b=bilder: self._preview_loaded(b))
             except Exception:
-                pass
+                for im in bilder:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
 
         threading.Thread(target=load, daemon=True,
                          name="pdfsorter-preview").start()
 
     def _preview_loaded(self, bilder: List[Any]) -> None:
         try:
+            if not self.win.winfo_exists():
+                for im in bilder:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
+                return
             if not bilder:
                 self._prev_status.configure(
                     text="Kunde inte förhandsvisa den här filen.")
@@ -6194,24 +6382,41 @@ class ReviewDialog:
     def _prev_show(self, i: int) -> None:
         """Visa sida i (0-baserat). PhotoImage skapas i huvudtråden och
         referensen sparas så att den inte sopas bort."""
+        pil = None
+        rotated = None
         try:
             if not self._prev_pil or not (0 <= i < len(self._prev_pil)):
                 return
             self._prev_page = i
-            from PIL import Image, ImageTk
+            from PIL import Image, ImageFilter, ImageTk
             pil = self._prev_pil[i].copy()
             rotation = int(getattr(self, "_prev_rotation", 0)) % 360
             if rotation:
-                pil = pil.rotate(rotation, expand=True, fillcolor="white")
+                rotated = pil.rotate(rotation, expand=True, fillcolor="white")
+                pil.close()
+                pil = rotated
+                rotated = None
+            try:
+                dpi = float(self.win.winfo_fpixels("1i"))
+            except Exception:
+                dpi = 96.0
+            dpi_factor = max(1.0, min(2.0, dpi / 96.0))
             content_width = max(1, self._all.winfo_width())
             thumb_width = (content_width // 2 - 100
                            if getattr(self, "_review_two_columns", False)
                            else content_width - 80)
-            # LANCZOS i stället för förvald NEAREST: texten i bilden blir
-            # tydligt skarpare, särskilt på HiDPI-skärmar.
-            pil.thumbnail((max(160, min(760, thumb_width)),
-                           getattr(self, "_preview_max_height", 160)),
+            max_w = max(160, min(int(round(760 * dpi_factor)), thumb_width))
+            # LANCZOS i stället för förvald NEAREST + lätt skärpning: texten
+            # i bilden blir tydligt skarpare, särskilt på HiDPI-skärmar.
+            pil.thumbnail((max_w, getattr(self, "_preview_max_height", 160)),
                           resample=Image.LANCZOS)
+            try:
+                sharpened = pil.filter(
+                    ImageFilter.UnsharpMask(radius=0.55, percent=50, threshold=3))
+                pil.close()
+                pil = sharpened
+            except Exception:
+                pass
             foto = ImageTk.PhotoImage(pil)
             self._prev_pages[:] = [foto]       # behåll bara aktuell sida
             self._prev_display_size = pil.size
@@ -6223,6 +6428,13 @@ class ReviewDialog:
                 text=f"Sida {i + 1}/{len(self._prev_pil)} · {rotation}°")
         except Exception:
             pass
+        finally:
+            for im in (rotated, pil):
+                if im is not None:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
 
     def _sync_subfolder_template_toggle(self, _event=None) -> None:
         variable = getattr(self, "var_use_subfolder_templates", None)
@@ -7265,6 +7477,12 @@ class ReviewDialog:
         # Släpp förhandsvisningsbilderna direkt (minne, rond 5).
         if hasattr(self, "_prev_pages"):
             self._prev_pages.clear()
+        for im in getattr(self, "_prev_pil", ()):
+            try:
+                im.close()
+            except Exception:
+                pass
+        if hasattr(self, "_prev_pil"):
             self._prev_pil.clear()
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             try:
@@ -7473,7 +7691,9 @@ class ConflictDialog:
             details, wrap="word", width=text_cols, height=text_rows,
             borderwidth=0, padx=8, pady=7, state="disabled", cursor="arrow",
             takefocus=False, background=self.colors["surface"],
-            foreground=self.colors["text"], highlightthickness=0)
+            foreground=self.colors["text"],
+            font=getattr(getattr(app, "theme", None), "f_base", None),
+            highlightthickness=0)
         body.grid(row=0, column=0, sticky="nsew")
         body_scroll = ttk.Scrollbar(details, orient="vertical", command=body.yview)
         body_scroll.grid(row=0, column=1, sticky="ns")
@@ -8230,6 +8450,7 @@ class App:
             set_tesseract_path(self.settings.get("tesseract_path", ""))
         except Exception:
             pass
+        TEXT_CACHE.configure_limits(bool(self.settings.get("low_memory_mode", False)))
         self._warm_patterns()
         # Flera sorteringstrådar kan hitta låsta filer samtidigt; varningarna
         # visas en i taget på Tk-tråden.
@@ -8343,29 +8564,35 @@ class App:
 
         # Gemensam, luftig varumärkesrad gör att appens olika arbetsflikar
         # känns som en sammanhållen produkt och ger en tydlig hjälpväg.
+        T = self.theme
         header = ttk.Frame(self.root, style="Topbar.TFrame")
-        header.pack(fill="x", padx=12, pady=(10, 4))
+        self.header_frame = header
+        header.pack(fill="x", padx=T.PAD, pady=(T.GAP, T.GAP // 2))
         header.columnconfigure(1, weight=1)
-        self._brand_small_ref = icon_photoimage(36)
+        icon_side = T.px(36)
+        self._brand_small_ref = icon_photoimage(icon_side)
+        self._brand_icon_label = None
         if self._brand_small_ref is not None:
-            ttk.Label(header, image=self._brand_small_ref,
-                      background=self.C["surface"]).grid(
-                          row=0, column=0, rowspan=2,
-                          padx=(12, 10), pady=7, sticky="w")
+            self._brand_icon_label = ttk.Label(
+                header, image=self._brand_small_ref,
+                background=self.C["surface"])
+            self._brand_icon_label.grid(
+                row=0, column=0, rowspan=2,
+                padx=(T.INNER, T.INNER), pady=T.px(7), sticky="w")
         brand_title = ttk.Label(header, text=APP_NAME,
                                 style="BrandTitle.TLabel")
-        brand_title.grid(row=0, column=1, sticky="sw", pady=(7, 0))
+        brand_title.grid(row=0, column=1, sticky="sw", pady=(T.px(7), 0))
         brand_sub = ttk.Label(
             header, text="PDF-sortering, enkelt och säkert",
             style="BrandSub.TLabel")
-        brand_sub.grid(row=1, column=1, sticky="nw", pady=(0, 7))
+        brand_sub.grid(row=1, column=1, sticky="nw", pady=(0, T.px(7)))
         ttk.Button(
             header, text="Hjälp", style="Link.TButton",
             command=lambda: self.nb.select(self.tab_help)).grid(
-                row=0, column=2, rowspan=2, padx=12, sticky="e")
+                row=0, column=2, rowspan=2, padx=T.INNER, sticky="e")
 
         self.nb = ttk.Notebook(self.root)
-        self.nb.pack(fill="both", expand=True, padx=12, pady=(10, 0))
+        self.nb.pack(fill="both", expand=True, padx=T.PAD, pady=(T.GAP, 0))
         #: (canvas, namn) för varje rullbar flik - mushjulet letar här.
         self._scroll_canvases: List[Any] = []
         self.tab_sort = ttk.Frame(self.nb)
@@ -8389,6 +8616,7 @@ class App:
         self._build_hist_tab()
         self._build_json_tab()
         self._build_help_tab()
+        self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed, add="+")
         # Efter alla flikar: mushjulet ska rulla inställningarna.
         self._install_tab_wheel()
         # Sist: menyraden (behöver flikarna och deras variabler).
@@ -8546,16 +8774,25 @@ class App:
                 # här är omöjligt att felsöka i efterhand.
                 session_error("ui-puls", exc)
         # Har någon försökt starta appen en andra gång? Då vill de åt
-        # fönstret. Kollas var åttonde puls, alltså ungefär en gång per
-        # sekund - tillräckligt snabbt utan att belasta disken.
-        self._pump_varv = getattr(self, "_pump_varv", 0) + 1
-        if self._pump_varv % 8 == 0:
+        # fönstret. Kollas ungefär en gång per sekund oavsett adaptivt
+        # pulsintervall - tillräckligt snabbt utan att belasta disken.
+        now = time.monotonic()
+        if now - getattr(self, "_last_show_check", 0.0) >= 1.0:
+            self._last_show_check = now
             try:
                 if consume_show_request():
                     self.show_window("en andra instans begärde fönstret")
             except Exception as exc:
                 session_error("fönster", exc)
-        self.root.after(120, self._pump)
+        active = bool(calls or getattr(self, "_busy", False)
+                      or self._review_is_open())
+        if active:
+            delay = 120
+        elif getattr(self, "visible", False):
+            delay = 280
+        else:
+            delay = 750
+        self.root.after(delay, self._pump)
 
     def _log_threadsafe(self, msg: str, level: str = "info") -> None:
         # Sessionsloggen skrivs direkt (trådsäker) - GUI-texten postas.
@@ -9245,59 +9482,66 @@ class App:
 
         self._action_compact = None
         def layout_actions(_event=None):
-            compact = actcard.winfo_width() < 860
-            if compact == self._action_compact:
-                return
-            self._action_compact = compact
-            if compact:
-                self.btn_sort.grid_configure(row=0, column=0, padx=(T.INNER, 6))
-                self.btn_cancel_sort.grid_configure(row=0, column=1, padx=6)
-                self.btn_watch.grid_configure(row=0, column=2, padx=6)
-                watch_status.grid_configure(row=1, column=0, columnspan=3,
-                                            sticky="ew", padx=T.INNER,
-                                            pady=(0, 4))
-                # Keep the three counters on their own full-width row. The
-                # progress bar used to share their row and could cover the
-                # rightmost "fel" counter in a compact window.
-                stats.grid_configure(row=2, column=0, columnspan=3,
-                                     sticky="w", padx=T.INNER)
-                self.progress.grid_configure(row=3, column=0, columnspan=3,
-                                             sticky="ew", padx=T.INNER,
-                                             pady=(6, 0))
-                self.progress.configure(length=200)
-                self.lbl_progress.configure(width=0, anchor="w")
-                self.lbl_progress.grid_configure(row=4, column=0,
-                                                 columnspan=2, sticky="w",
-                                                 padx=T.INNER, pady=(2, 0))
-                self.pill_dry.grid_configure(row=4, column=2, sticky="e",
-                                             padx=T.INNER)
-                for col in range(3):
-                    actcard.columnconfigure(col, weight=1)
-                actcard.columnconfigure(3, weight=0)
-            else:
-                self.btn_sort.grid_configure(row=0, column=0,
-                                             padx=(T.INNER, 8))
-                self.btn_cancel_sort.grid_configure(row=0, column=1, padx=6)
-                self.btn_watch.grid_configure(row=0, column=2, padx=6)
-                watch_status.grid_configure(row=0, column=3, columnspan=1,
-                                            sticky="w", padx=14, pady=0)
-                # Keep counters on a dedicated row at every width; the
-                # progress indicator must never compete for the "fel" cell.
-                stats.grid_configure(row=1, column=0, columnspan=4,
-                                     sticky="w", padx=T.INNER)
-                self.progress.grid_configure(row=2, column=0, columnspan=2,
-                                             padx=(T.INNER, 0), pady=0,
-                                             sticky="ew")
-                self.progress.configure(length=170)
-                self.lbl_progress.configure(width=16, anchor="e")
-                self.lbl_progress.grid_configure(row=2, column=2,
-                                                 padx=(6, 8), sticky="e")
-                self.pill_dry.grid_configure(row=2, column=3,
-                                             padx=(6, T.INNER), sticky="w")
-                actcard.columnconfigure(0, weight=0)
-                actcard.columnconfigure(1, weight=0)
-                actcard.columnconfigure(2, weight=0)
-                actcard.columnconfigure(3, weight=1)
+            width = max(1, actcard.winfo_width())
+            compact = width < 860
+            if compact != self._action_compact:
+                self._action_compact = compact
+                if compact:
+                    self.btn_sort.grid_configure(row=0, column=0, padx=(T.INNER, 6))
+                    self.btn_cancel_sort.grid_configure(row=0, column=1, padx=6)
+                    self.btn_watch.grid_configure(row=0, column=2, padx=6)
+                    watch_status.grid_configure(row=1, column=0, columnspan=3,
+                                                sticky="ew", padx=T.INNER,
+                                                pady=(0, 4))
+                    # Keep the three counters on their own full-width row. The
+                    # progress bar used to share their row and could cover the
+                    # rightmost "fel" counter in a compact window.
+                    stats.grid_configure(row=2, column=0, columnspan=3,
+                                         sticky="w", padx=T.INNER)
+                    self.progress.grid_configure(row=3, column=0, columnspan=3,
+                                                 sticky="ew", padx=T.INNER,
+                                                 pady=(6, 0))
+                    self.progress.configure(length=200)
+                    self.lbl_progress.configure(width=0, anchor="w")
+                    self.lbl_progress.grid_configure(row=4, column=0,
+                                                     columnspan=2, sticky="w",
+                                                     padx=T.INNER, pady=(2, 0))
+                    self.pill_dry.grid_configure(row=4, column=2, sticky="e",
+                                                 padx=T.INNER)
+                    for col in range(3):
+                        actcard.columnconfigure(col, weight=1)
+                    actcard.columnconfigure(3, weight=0)
+                else:
+                    self.btn_sort.grid_configure(row=0, column=0,
+                                                 padx=(T.INNER, 8))
+                    self.btn_cancel_sort.grid_configure(row=0, column=1, padx=6)
+                    self.btn_watch.grid_configure(row=0, column=2, padx=6)
+                    watch_status.grid_configure(row=0, column=3, columnspan=1,
+                                                sticky="w", padx=14, pady=0)
+                    # Keep counters on a dedicated row at every width; the
+                    # progress indicator must never compete for the "fel" cell.
+                    stats.grid_configure(row=1, column=0, columnspan=4,
+                                         sticky="w", padx=T.INNER)
+                    self.progress.grid_configure(row=2, column=0, columnspan=2,
+                                                 padx=(T.INNER, 0), pady=0,
+                                                 sticky="ew")
+                    self.progress.configure(length=170)
+                    self.lbl_progress.configure(width=16, anchor="e")
+                    self.lbl_progress.grid_configure(row=2, column=2,
+                                                     padx=(6, 8), sticky="e")
+                    self.pill_dry.grid_configure(row=2, column=3,
+                                                 padx=(6, T.INNER), sticky="w")
+                    actcard.columnconfigure(0, weight=0)
+                    actcard.columnconfigure(1, weight=0)
+                    actcard.columnconfigure(2, weight=0)
+                    actcard.columnconfigure(3, weight=1)
+            wrap = (max(240, width - T.INNER * 2 - 16)
+                    if compact else max(220, min(640, width - 480)))
+            try:
+                if int(self.lbl_watch_activity.cget("wraplength") or 0) != wrap:
+                    self.lbl_watch_activity.configure(wraplength=wrap)
+            except Exception:
+                pass
 
         actcard.bind("<Configure>", layout_actions, add="+")
         self.root.after_idle(layout_actions)
@@ -9357,14 +9601,16 @@ class App:
         confirm_all.grid(row=0, column=2, columnspan=2,
                          sticky="w", padx=8, pady=(6, 2))
         confirm_all.state(["disabled"])
-        ttk.Label(
+        opt_hint = ttk.Label(
             opt,
             text=("Stödordsförslag sparas först när du väljer dem. En kategori "
                   "behöver 100 manuella bekräftelser och två exklusiva exakta "
                   "stödord. Dokumenttyper lärs från dina undermappsval; vid "
                   "osäkerhet lämnas filen för granskning."),
             style="CardMuted.TLabel", wraplength=460, justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
+        )
+        opt_hint.grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
+        _bind_responsive_wrap(opt, opt_hint, reserve=420, minimum=260, maximum=760)
         ocr_cb = ttk.Checkbutton(opt, text="OCR för skannade PDF:er",
                                  style="Card.TCheckbutton", variable=self.var_ocr)
         ocr_cb.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=2)
@@ -9415,13 +9661,15 @@ class App:
                    command=self._reset_learned).pack(side="left", padx=6)
         ttk.Button(learning_actions, text="Hantera per kategori…",
                    command=self._manage_learned).pack(side="left", padx=6)
-        ttk.Label(
+        opt_learn_hint = ttk.Label(
             opt,
             text=("Manuella val och rättelser förbättrar framtida förslag. "
                   "Inlärda poäng kan aldrig flytta en fil; bara en exakt "
                   "stödordsträff kan göra det."),
             style="CardMuted.TLabel", wraplength=720, justify="left",
-        ).grid(row=5, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 4))
+        )
+        opt_learn_hint.grid(row=5, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 4))
+        _bind_responsive_wrap(opt, opt_learn_hint, reserve=48, minimum=280, maximum=1100)
 
         adv = ttk.Frame(opt, style="CardInner.TFrame")
         adv.grid(row=6, column=0, columnspan=4, sticky="w",
@@ -9456,6 +9704,8 @@ class App:
                                     wraplength=760, justify="left")
         self.lbl_strict.grid(row=1, column=0, columnspan=3, sticky="w",
                              padx=T.INNER, pady=(2, 6))
+        _bind_responsive_wrap(strict, self.lbl_strict, reserve=48,
+                              minimum=280, maximum=1100)
 
         self.strict_detail = ttk.Frame(strict, style="CardInner.TFrame")
         self.strict_detail.grid(row=2, column=0, columnspan=3, sticky="w",
@@ -9570,11 +9820,16 @@ class App:
                                    activestyle="none", borderwidth=0,
                                    background=self.C["surface"],
                                    foreground=self.C["text"],
+                                   selectbackground=self.C["accent_light"],
+                                   selectforeground=self.C["accent_dark"],
                                    highlightthickness=0, font=T.f_base)
         self.exc_list.grid(row=0, column=0, sticky="nsew",
                            padx=(T.INNER, 0), pady=T.INNER)
+        exsb = ttk.Scrollbar(exb, orient="vertical", command=self.exc_list.yview)
+        exsb.grid(row=0, column=1, sticky="ns", pady=T.INNER)
+        self.exc_list.configure(yscrollcommand=exsb.set)
         exbtn = ttk.Frame(exb, style="CardInner.TFrame")
-        exbtn.grid(row=0, column=1, sticky="n", padx=T.INNER, pady=T.INNER)
+        exbtn.grid(row=0, column=2, sticky="n", padx=T.INNER, pady=T.INNER)
         ttk.Button(exbtn, text="Lägg till…", width=12,
                    command=self._add_exclude_dir).pack(fill="x")
         ttk.Button(exbtn, text="Ta bort", width=12,
@@ -9594,20 +9849,41 @@ class App:
                   ).grid(row=0, column=0, sticky="w", padx=(T.INNER, 0), pady=(T.INNER, 0))
         ttk.Label(igb, text="Filnamnsmönster", style="CardMuted.TLabel"
                   ).grid(row=0, column=1, sticky="w", padx=(T.GAP, 0), pady=(T.INNER, 0))
-        self.ign_word_list = tk.Listbox(igb, height=3, exportselection=False,
+        ign_w_box = ttk.Frame(igb, style="CardInner.TFrame")
+        ign_w_box.grid(row=1, column=0, sticky="nsew",
+                       padx=(T.INNER, T.GAP // 2), pady=(2, T.INNER))
+        ign_w_box.columnconfigure(0, weight=1)
+        ign_w_box.rowconfigure(0, weight=1)
+        self.ign_word_list = tk.Listbox(ign_w_box, height=3, exportselection=False,
                                         activestyle="none", borderwidth=0,
                                         background=self.C["surface"],
                                         foreground=self.C["text"],
+                                        selectbackground=self.C["accent_light"],
+                                        selectforeground=self.C["accent_dark"],
                                         highlightthickness=0, font=T.f_base)
-        self.ign_word_list.grid(row=1, column=0, sticky="nsew",
-                                padx=(T.INNER, T.GAP // 2), pady=(2, T.INNER))
-        self.ign_glob_list = tk.Listbox(igb, height=3, exportselection=False,
+        self.ign_word_list.grid(row=0, column=0, sticky="nsew")
+        ign_w_sb = ttk.Scrollbar(ign_w_box, orient="vertical",
+                                 command=self.ign_word_list.yview)
+        ign_w_sb.grid(row=0, column=1, sticky="ns")
+        self.ign_word_list.configure(yscrollcommand=ign_w_sb.set)
+
+        ign_g_box = ttk.Frame(igb, style="CardInner.TFrame")
+        ign_g_box.grid(row=1, column=1, sticky="nsew",
+                       padx=(T.GAP // 2, T.INNER), pady=(2, T.INNER))
+        ign_g_box.columnconfigure(0, weight=1)
+        ign_g_box.rowconfigure(0, weight=1)
+        self.ign_glob_list = tk.Listbox(ign_g_box, height=3, exportselection=False,
                                         activestyle="none", borderwidth=0,
                                         background=self.C["surface"],
                                         foreground=self.C["text"],
+                                        selectbackground=self.C["accent_light"],
+                                        selectforeground=self.C["accent_dark"],
                                         highlightthickness=0, font=T.f_base)
-        self.ign_glob_list.grid(row=1, column=1, sticky="nsew",
-                                padx=(T.GAP // 2, T.INNER), pady=(2, T.INNER))
+        self.ign_glob_list.grid(row=0, column=0, sticky="nsew")
+        ign_g_sb = ttk.Scrollbar(ign_g_box, orient="vertical",
+                                 command=self.ign_glob_list.yview)
+        ign_g_sb.grid(row=0, column=1, sticky="ns")
+        self.ign_glob_list.configure(yscrollcommand=ign_g_sb.set)
         ignbtn = ttk.Frame(igb, style="CardInner.TFrame")
         ignbtn.grid(row=2, column=0, columnspan=2, sticky="w",
                     padx=T.INNER, pady=(0, T.INNER))
@@ -9624,13 +9900,23 @@ class App:
         ttk.Label(igb, text="Individuellt ignorerade filer (känns igen på innehållet)",
                   style="CardMuted.TLabel").grid(row=3, column=0, columnspan=2,
                   sticky="w", padx=(T.INNER, 0), pady=(4, 0))
-        self.ign_file_list = tk.Listbox(igb, height=3, exportselection=False,
+        ign_f_box = ttk.Frame(igb, style="CardInner.TFrame")
+        ign_f_box.grid(row=4, column=0, columnspan=2, sticky="ew",
+                       padx=(T.INNER, T.INNER), pady=(2, 2))
+        ign_f_box.columnconfigure(0, weight=1)
+        ign_f_box.rowconfigure(0, weight=1)
+        self.ign_file_list = tk.Listbox(ign_f_box, height=3, exportselection=False,
                                         activestyle="none", borderwidth=0,
                                         background=self.C["surface"],
                                         foreground=self.C["text"],
+                                        selectbackground=self.C["accent_light"],
+                                        selectforeground=self.C["accent_dark"],
                                         highlightthickness=0, font=T.f_base)
-        self.ign_file_list.grid(row=4, column=0, columnspan=2, sticky="ew",
-                                padx=(T.INNER, T.INNER), pady=(2, 2))
+        self.ign_file_list.grid(row=0, column=0, sticky="ew")
+        ign_f_sb = ttk.Scrollbar(ign_f_box, orient="vertical",
+                                 command=self.ign_file_list.yview)
+        ign_f_sb.grid(row=0, column=1, sticky="ns")
+        self.ign_file_list.configure(yscrollcommand=ign_f_sb.set)
         igb2 = ttk.Frame(igb, style="CardInner.TFrame")
         igb2.grid(row=5, column=0, columnspan=2, sticky="w",
                   padx=T.INNER, pady=(0, T.INNER))
@@ -9849,20 +10135,26 @@ class App:
             style="Card.TCheckbutton", variable=self.var_low_memory_mode,
             command=self._toggle_low_memory_mode).grid(
                 row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 2))
-        ttk.Label(
+        low_mem_hint = ttk.Label(
             cacheb,
             text="Bearbetar i små omgångar och läser högst två PDF-filer parallellt "
                  "i stället för upp till åtta. Kan minska minnestrycket; "
                  "stora körningar kan ta längre tid.",
-            style="CardMuted.TLabel", wraplength=760, justify="left").grid(
-                row=2, column=0, columnspan=2, sticky="w", padx=8, pady=2)
-        ttk.Label(
+            style="CardMuted.TLabel", wraplength=760, justify="left")
+        low_mem_hint.grid(
+            row=2, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+        _bind_responsive_wrap(cacheb, low_mem_hint, reserve=32,
+                              minimum=280, maximum=1100)
+        cache_filter_hint = ttk.Label(
             cacheb,
             text="Smartfilter: tar bort cache som inte använts på 30 dagar, "
                  "skadade poster vid läsning och äldsta poster över "
                  "1 500 filer / 512 MB.",
-            style="CardMuted.TLabel", wraplength=760, justify="left").grid(
-                row=3, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+            style="CardMuted.TLabel", wraplength=760, justify="left")
+        cache_filter_hint.grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+        _bind_responsive_wrap(cacheb, cache_filter_hint, reserve=32,
+                              minimum=280, maximum=1100)
         cacherad = ttk.Frame(cacheb, style="CardInner.TFrame")
         cacherad.grid(row=4, column=0, columnspan=2, sticky="ew",
                       padx=8, pady=(4, 6))
@@ -10025,11 +10317,45 @@ class App:
         self.C = self.theme.c
         self._retint_raw()
         self._replace_raw_fonts(old_theme, self.theme)
+        self._refit_tree_columns()
         self._update_pills()
+        self._update_stats()
         self.root.after(60, lambda: dark_titlebar(self.root, bool(dark)))
         self._log(f"Tema: {'mörkt' if dark else 'ljust'}, "
                   f"kontrast: {contrast}, text: "
                   f"{'större' if text_size == 'large' else 'normal'}.", "info")
+
+    def _refit_tree_columns(self) -> None:
+        """Anpassa tabellkolumner när textstorlek eller DPI ändras."""
+        specs = {
+            "kw_tree": (
+                ("word", "STÖDORD", 20, "w", True),
+                ("kind", "TYP", 18, "w", False),
+                ("weight", "VIKT", 4, "center", False),
+                ("whole", "HELT ORD", 4, "center", False),
+                ("hits", "TRÄFFAR", 5, "center", False),
+                ("folder", "MAPP", 12, "w", True),
+                ("std", "★", 2, "center", False)),
+            "q_tree": (
+                ("file", "FIL", 26, "w", False),
+                ("reason", "VARFÖR OSÄKER", 34, "w", True),
+                ("guess", "GISSNING", 16, "w", False),
+                ("ocr", "LÄST VIA", 9, "w", False)),
+            "h_tree": (
+                ("time", "TID", 17, "w", False),
+                ("file", "FIL", 24, "w", False),
+                ("category", "KATEGORI", 15, "w", False),
+                ("score", "POÄNG", 5, "center", False),
+                ("by", "BESLUT", 7, "w", False),
+                ("matched", "MATCHADE ORD", 24, "w", True)),
+        }
+        for attr, cols in specs.items():
+            tree = getattr(self, attr, None)
+            if tree is not None:
+                try:
+                    self.theme.fit_columns(tree, cols)
+                except Exception:
+                    pass
 
     def _replace_raw_fonts(self, old_theme, new_theme) -> None:
         """Behåll råa Tk-widgetars typografiska nivå när textstorleken ändras."""
@@ -10069,17 +10395,39 @@ class App:
                 self.help_text.tag_configure(tag, font=getattr(new_theme, attr))
             except Exception:
                 pass
+        for tree_attr, tag in (("subfolder_map_tree", "_map_drop_target"),
+                               ("kw_tree", "_map_drag_source")):
+            try:
+                getattr(self, tree_attr).tag_configure(tag, font=new_theme.f_bold)
+            except Exception:
+                pass
 
     def _retint_raw(self) -> None:
         """Färglägg om råa Tk-widgets efter temabyte (de följer inte ttk)."""
         c = self.C
-        try:
-            self.in_list.configure(
-                background=c["surface"], foreground=c["text"],
-                selectbackground=c["accent_light"],
-                selectforeground=c["accent_dark"])
-        except Exception:
-            pass
+        for attr in ("in_list", "exc_list", "ign_word_list",
+                     "ign_glob_list", "ign_file_list"):
+            lb = getattr(self, attr, None)
+            if lb is None:
+                continue
+            try:
+                lb.configure(
+                    background=c["surface"], foreground=c["text"],
+                    selectbackground=c["accent_light"],
+                    selectforeground=c["accent_dark"])
+            except Exception:
+                pass
+        for canvas, _name in getattr(self, "_scroll_canvases", []):
+            try:
+                canvas.configure(background=c["bg"])
+            except Exception:
+                pass
+        brand_lbl = getattr(self, "_brand_icon_label", None)
+        if brand_lbl is not None:
+            try:
+                brand_lbl.configure(background=c["surface"])
+            except Exception:
+                pass
         try:
             self.logbox.configure(background=c["surface"],
                                   foreground=c["text"],
@@ -10108,11 +10456,23 @@ class App:
             t.tag_configure("note", foreground=c["text_muted"])
         except Exception:
             pass
-        for tree in ("kw_tree", "q_tree", "h_tree"):
+        for tree in ("kw_tree", "selected_keyword_map_tree",
+                     "subfolder_map_tree", "q_tree", "h_tree"):
             try:
                 self.theme.zebra(getattr(self, tree))
             except Exception:
                 pass
+        try:
+            self.subfolder_map_tree.tag_configure(
+                "_map_drop_target",
+                background=c["accent_light"],
+                foreground=c["accent_dark"])
+            self.kw_tree.tag_configure(
+                "_map_drag_source",
+                background=c["accent_light"],
+                foreground=c["accent_dark"])
+        except Exception:
+            pass
 
     def _warm_patterns(self) -> None:
         """Förkompilera alla stödordsmönster en gång (snabbhet, rond 5):
@@ -10457,8 +10817,12 @@ class App:
         win.title(text_for("Arkivkontroll · läsrapport",
                            "Archive check · read-only report"))
         win.transient(self.root)
-        win.geometry("1050x650")
-        win.minsize(700, 440)
+        _fit_geometry(win, 1050, 650, 700, 440)
+        try:
+            win.configure(background=self.C["bg"])
+            win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
+        except Exception:
+            pass
         win.columnconfigure(0, weight=1)
         win.rowconfigure(1, weight=1)
         header = ttk.Frame(win, style="CardInner.TFrame")
@@ -10473,6 +10837,8 @@ class App:
                 "Read-only check: no files are moved or changed."),
             style="CardMuted.TLabel", wraplength=680, justify="right")
         status.grid(row=0, column=1, sticky="e", padx=(12, 0))
+        _bind_responsive_wrap(header, status, reserve=260,
+                              minimum=220, maximum=900)
         frame = ttk.Frame(win, style="Card.TFrame")
         frame.grid(row=1, column=0, sticky="nsew", padx=14, pady=10)
         frame.columnconfigure(0, weight=1)
@@ -10485,12 +10851,15 @@ class App:
                 ("path", text_for("FIL / PLATS", "FILE / LOCATION"), 330),
                 ("details", text_for("DETALJER", "DETAILS"), 430)):
             tree.heading(col, text=heading)
-            tree.column(col, width=width, minwidth=90,
+            tree.column(col, width=self.theme.px(width), minwidth=self.theme.px(90),
                         stretch=(col in {"path", "details"}))
-        tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+        tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=(8, 0))
+        self.theme.zebra(tree)
         scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=8)
-        tree.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=(8, 0))
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        xscroll.grid(row=1, column=0, sticky="ew", padx=(8, 0), pady=(0, 8))
+        tree.configure(yscrollcommand=scroll.set, xscrollcommand=xscroll.set)
         tree.tag_configure("error", foreground=self.C["err"])
         tree.tag_configure("warning", foreground=self.C["warn"])
         tree.tag_configure("info", foreground=self.C["text_muted"])
@@ -10585,25 +10954,32 @@ class App:
         english = self.settings.get("ui_language", "sv") == "en"
         text_for = lambda sv, en: en if english else sv
         win = tk.Toplevel(self.root)
-        self._archive_search_window = win
         win._icon_ref = brand_window(win)
+        self._archive_search_window = win
         win.title(text_for("Sök och jämför i arkivet", "Search and compare in archive"))
         win.transient(self.root)
-        win.geometry("1040x690")
-        win.minsize(720, 470)
+        _fit_geometry(win, 1040, 690, 720, 470)
+        try:
+            win.configure(background=self.C["bg"])
+            win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
+        except Exception:
+            pass
         win.columnconfigure(0, weight=1)
         ttk.Label(win, text=text_for("Sök i ditt PDF-arkiv",
                                       "Search your PDF archive"),
                   style="CardTitle.TLabel").grid(
                       row=0, column=0, sticky="w", padx=16, pady=(14, 4))
-        ttk.Label(win,
-                  text=text_for(
-                      "Sökningen är lokal och ändrar inte dokumenten. "
-                      "Träffar visar sida och textutdrag.",
-                      "Search runs locally and does not change documents. "
-                      "Results show the page and a text excerpt."),
-                  style="CardMuted.TLabel", wraplength=950).grid(
-                      row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+        search_desc = ttk.Label(
+            win,
+            text=text_for(
+                "Sökningen är lokal och ändrar inte dokumenten. "
+                "Träffar visar sida och textutdrag.",
+                "Search runs locally and does not change documents. "
+                "Results show the page and a text excerpt."),
+            style="CardMuted.TLabel", wraplength=950, justify="left")
+        search_desc.grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+        _bind_responsive_wrap(win, search_desc, reserve=40,
+                              minimum=260, maximum=1150)
 
         query_bar = ttk.Frame(win, style="Card.TFrame")
         query_bar.grid(row=2, column=0, sticky="new", padx=14, pady=(0, 8))
@@ -10630,13 +11006,19 @@ class App:
         tree.heading("file", text="PDF")
         tree.heading("page", text=text_for("Sida", "Page"))
         tree.heading("snippet", text=text_for("Textutdrag", "Text excerpt"))
-        tree.column("file", width=280, minwidth=130, stretch=False)
-        tree.column("page", width=65, minwidth=55, anchor="center", stretch=False)
-        tree.column("snippet", width=600, minwidth=180, stretch=True)
-        tree.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        tree.column("file", width=self.theme.px(280), minwidth=self.theme.px(130),
+                    stretch=False)
+        tree.column("page", width=self.theme.px(65), minwidth=self.theme.px(55),
+                    anchor="center", stretch=False)
+        tree.column("snippet", width=self.theme.px(600), minwidth=self.theme.px(180),
+                    stretch=True)
+        tree.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=(10, 0))
+        self.theme.zebra(tree)
         scroll = ttk.Scrollbar(table_box, orient="vertical", command=tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=10)
-        tree.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=(10, 0))
+        xscroll = ttk.Scrollbar(table_box, orient="horizontal", command=tree.xview)
+        xscroll.grid(row=1, column=0, sticky="ew", padx=(10, 0), pady=(0, 10))
+        tree.configure(yscrollcommand=scroll.set, xscrollcommand=xscroll.set)
         buttons = ttk.Frame(win, style="CardInner.TFrame")
         buttons.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 12))
         buttons.columnconfigure(0, weight=1)
@@ -10777,13 +11159,21 @@ class App:
             report.title(text_for("Jämför PDF-dokument", "Compare PDF documents"))
             report.transient(win)
             _fit_geometry(report, 900, 680, 600, 400)
+            try:
+                report.configure(background=self.C["bg"])
+                report.after(80, lambda: dark_titlebar(
+                    report, bool(self.theme.dark)))
+            except Exception:
+                pass
             report.columnconfigure(0, weight=1)
             report.rowconfigure(1, weight=1)
             heading = ttk.Label(
                 report, text=text_for("Jämför text per sida…",
                                       "Comparing text page by page…"),
-                style="CardTitle.TLabel", wraplength=820)
+                style="CardTitle.TLabel", wraplength=820, justify="left")
             heading.grid(row=0, column=0, sticky="w", padx=14, pady=12)
+            _bind_responsive_wrap(report, heading, reserve=32,
+                                  minimum=260, maximum=1100)
             body = ttk.Frame(report, style="Card.TFrame")
             body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 10))
             body.columnconfigure(0, weight=1)
@@ -10855,6 +11245,14 @@ class App:
                                  f"Page overview · {path.name}"))
             sheet.transient(win)
             _fit_geometry(sheet, 1080, 760, 640, 440)
+            try:
+                sheet.configure(background=self.C["bg"])
+                sheet.after(80, lambda: dark_titlebar(
+                    sheet, bool(self.theme.dark)))
+                thumb_dpi = float(sheet.winfo_fpixels("1i"))
+            except Exception:
+                thumb_dpi = 96.0
+            thumb_scale = max(1.0, min(2.0, thumb_dpi / 96.0))
             sheet.columnconfigure(0, weight=1)
             sheet.rowconfigure(1, weight=1)
             note = ttk.Label(sheet, text="Skapar sidöversikt…",
@@ -10875,8 +11273,20 @@ class App:
             inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
             inner.bind("<Configure>", lambda _e: canvas.configure(
                 scrollregion=canvas.bbox("all")))
-            canvas.bind("<Configure>", lambda e: canvas.itemconfigure(
-                inner_id, width=e.width))
+            cells: List[Any] = []
+            sheet_state = {"cols": 0, "cell_w": max(180, int(round(220 * thumb_scale)))}
+
+            def reflow_sheet(_e=None) -> None:
+                width = max(1, canvas.winfo_width())
+                canvas.itemconfigure(inner_id, width=width)
+                cols = max(1, min(6, width // max(140, sheet_state["cell_w"])))
+                if cols == sheet_state["cols"] or not cells:
+                    return
+                sheet_state["cols"] = cols
+                for idx, cell in enumerate(cells):
+                    cell.grid_configure(row=idx // cols, column=idx % cols)
+
+            canvas.bind("<Configure>", reflow_sheet)
 
             def render_worker() -> None:
                 try:
@@ -10887,10 +11297,12 @@ class App:
                         count = min(total, 120)
                         for page_index in range(count):
                             page = doc[page_index]
-                            zoom = _bounded_render_zoom(page.rect, 0.28)
+                            zoom = _bounded_render_zoom(
+                                page.rect, 0.28 * thumb_scale)
                             pix = page.get_pixmap(
                                 matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
                             thumbnails.append((page_index + 1, pix.tobytes("png")))
+                            del pix
                     self._post(lambda: paint_contact_sheet(
                         thumbnails, total, ""))
                 except Exception as exc:
@@ -10907,17 +11319,27 @@ class App:
                     return
                 import base64
                 refs = []
+                max_w = 0
                 for index, (page_number, png) in enumerate(thumbnails):
                     photo = tk.PhotoImage(
                         data=base64.b64encode(png).decode("ascii"))
                     refs.append(photo)
+                    try:
+                        max_w = max(max_w, int(photo.width()) + 28)
+                    except Exception:
+                        pass
                     cell = ttk.Frame(inner, style="CardInner.TFrame")
                     cell.grid(row=index // 4, column=index % 4,
                               padx=10, pady=10, sticky="n")
                     ttk.Label(cell, image=photo).pack()
                     ttk.Label(cell, text=f"Sida {page_number}",
                               style="CardMuted.TLabel").pack(pady=(4, 0))
+                    cells.append(cell)
+                if max_w:
+                    sheet_state["cell_w"] = max_w
                 sheet._contact_sheet_images = refs
+                sheet_state["cols"] = 0
+                reflow_sheet()
                 note.configure(text=(f"Visar {len(thumbnails)} av {total} sidor. "
                                      "Originalfilen har inte ändrats."))
 
@@ -11678,23 +12100,30 @@ class App:
         self.kw_tree.bind("<Button-3>", self._kw_context)
         self.kw_tree.bind("<Button-2>", self._kw_context)
         ksb = ttk.Scrollbar(support, orient="vertical", command=self.kw_tree.yview)
-        ksb.grid(row=0, column=1, sticky="ns", pady=(T.INNER, 4),
+        ksb.grid(row=0, column=1, sticky="ns", pady=(T.INNER, 0),
                  padx=(0, T.INNER))
-        self.kw_tree.configure(yscrollcommand=ksb.set)
+        ksbx = ttk.Scrollbar(support, orient="horizontal", command=self.kw_tree.xview)
+        ksbx.grid(row=1, column=0, sticky="ew", padx=(T.INNER, 0), pady=(0, 4))
+        self.kw_tree.configure(yscrollcommand=ksb.set, xscrollcommand=ksbx.set)
         self.kw_scrollbar = ksb
+        self.kw_xscrollbar = ksbx
         self.lbl_kw_sum = ttk.Label(support, style="CardMuted.TLabel", justify="left")
-        self.lbl_kw_sum.grid(row=1, column=0, columnspan=2, sticky="w",
+        self.lbl_kw_sum.grid(row=2, column=0, columnspan=2, sticky="w",
                              padx=T.INNER, pady=(4, 0))
+        _bind_responsive_wrap(support, self.lbl_kw_sum, reserve=28,
+                              minimum=180, maximum=900)
         hint = ttk.Label(
             support, style="CardMuted.TLabel", justify="left",
             text="Dubbelklicka ändrar ordet  ·  högerklick ger fler val  ·  "
                  "Delete tar bort  ·  klicka på en rubrik för att sortera  ·  "
                  "dra en rubrik i sidled för att flytta kolumnen")
-        hint.grid(row=2, column=0, columnspan=2, sticky="w",
+        hint.grid(row=3, column=0, columnspan=2, sticky="w",
                   padx=T.INNER, pady=(2, 0))
+        _bind_responsive_wrap(support, hint, reserve=28,
+                              minimum=180, maximum=900)
         self.kw_hint = hint
         kbtn = ttk.Frame(support, style="CardInner.TFrame")
-        kbtn.grid(row=3, column=0, columnspan=2, sticky="ew",
+        kbtn.grid(row=4, column=0, columnspan=2, sticky="ew",
                   padx=T.INNER, pady=(8, T.INNER))
         for index, (label, command, style) in enumerate((
                 ("+ Lägg till ord", self._kw_add, "Accent.TButton"),
@@ -11718,6 +12147,8 @@ class App:
             self.empty_cat_panel, text="", style="CardMuted.TLabel",
             justify="center", anchor="center", wraplength=580)
         self.lbl_cat_empty.grid(row=0, column=0, sticky="ew", padx=12, pady=(24, 14))
+        _bind_responsive_wrap(self.empty_cat_panel, self.lbl_cat_empty,
+                              reserve=28, minimum=180, maximum=720)
         empty_actions = ttk.Frame(self.empty_cat_panel, style="CardInner.TFrame")
         empty_actions.grid(row=1, column=0, pady=(0, 24))
         ttk.Button(empty_actions, text="+ Skapa kategori", style="Accent.TButton",
@@ -11732,12 +12163,15 @@ class App:
         linked_body = linked_card.body
         linked_body.columnconfigure(0, weight=1)
         linked_body.rowconfigure(1, weight=1)
-        ttk.Label(
+        linked_hint = ttk.Label(
             linked_body,
             text="Välj stödord för att se dess mappkoppling här.",
             style="CardMuted.TLabel", wraplength=360, justify="left",
-        ).grid(row=0, column=0, sticky="ew", padx=T.INNER,
-               pady=(T.INNER, 8))
+        )
+        linked_hint.grid(row=0, column=0, sticky="ew", padx=T.INNER,
+                         pady=(T.INNER, 8))
+        _bind_responsive_wrap(linked_body, linked_hint, reserve=28,
+                              minimum=140, maximum=640)
         linked_view = ttk.Frame(linked_body, style="CardInner.TFrame")
         linked_view.grid(row=1, column=0, sticky="nsew", padx=T.INNER, pady=2)
         linked_view.columnconfigure(0, weight=1)
@@ -11748,9 +12182,9 @@ class App:
         self.selected_keyword_map_tree.heading("word", text="STÖDORD")
         self.selected_keyword_map_tree.heading("folder", text="KOPPLAD MAPP")
         self.selected_keyword_map_tree.column(
-            "word", width=120, minwidth=90, anchor="w", stretch=True)
+            "word", width=T.px(120), minwidth=T.px(90), anchor="w", stretch=True)
         self.selected_keyword_map_tree.column(
-            "folder", width=170, minwidth=110, anchor="w", stretch=True)
+            "folder", width=T.px(170), minwidth=T.px(110), anchor="w", stretch=True)
         self.selected_keyword_map_tree.grid(row=0, column=0, sticky="nsew")
         self.theme.zebra(self.selected_keyword_map_tree)
         linked_scroll = ttk.Scrollbar(
@@ -11770,14 +12204,17 @@ class App:
         mapbody = folder_card.body
         mapbody.columnconfigure(0, weight=1)
         mapbody.rowconfigure(1, weight=1)
-        ttk.Label(
+        map_hint = ttk.Label(
             mapbody,
             text="Endast redan skapade mappar i vald kategori visas här. "
                  "Kolumnen ‘KOPPLADE STÖDORD’ visar vad som sorteras till varje mapp. "
                  "Årsmappen visas inte; mappar som återkommer under olika år visas en gång.",
             style="CardMuted.TLabel", wraplength=580, justify="left",
-        ).grid(row=0, column=0, sticky="ew", padx=T.INNER,
-               pady=(T.INNER, 8))
+        )
+        map_hint.grid(row=0, column=0, sticky="ew", padx=T.INNER,
+                      pady=(T.INNER, 8))
+        _bind_responsive_wrap(mapbody, map_hint, reserve=28,
+                              minimum=160, maximum=720)
         map_view = ttk.Frame(mapbody, style="CardInner.TFrame")
         map_view.grid(row=1, column=0, sticky="nsew", padx=T.INNER, pady=2)
         map_view.columnconfigure(0, weight=1)
@@ -11788,9 +12225,9 @@ class App:
         self.subfolder_map_tree.heading("folder", text="MAPP")
         self.subfolder_map_tree.heading("words", text="KOPPLADE STÖDORD")
         self.subfolder_map_tree.column(
-            "folder", width=140, minwidth=90, anchor="w", stretch=True)
+            "folder", width=T.px(140), minwidth=T.px(90), anchor="w", stretch=True)
         self.subfolder_map_tree.column(
-            "words", width=190, minwidth=120, anchor="w", stretch=True)
+            "words", width=T.px(190), minwidth=T.px(120), anchor="w", stretch=True)
         self.subfolder_map_tree.grid(row=0, column=0, sticky="nsew")
         self.theme.zebra(self.subfolder_map_tree)
         try:
@@ -11798,24 +12235,31 @@ class App:
                 "_map_drop_target",
                 background=self.theme.c["accent_light"],
                 foreground=self.theme.c["accent_dark"],
-                font=("TkDefaultFont", 10, "bold"))
+                font=T.f_bold)
             self.kw_tree.tag_configure(
                 "_map_drag_source",
                 background=self.theme.c["accent_light"],
                 foreground=self.theme.c["accent_dark"],
-                font=("TkDefaultFont", 10, "bold"))
+                font=T.f_bold)
         except Exception:
             pass
         map_scroll = ttk.Scrollbar(
             map_view, orient="vertical", command=self.subfolder_map_tree.yview)
         map_scroll.grid(row=0, column=1, sticky="ns")
-        self.subfolder_map_tree.configure(yscrollcommand=map_scroll.set)
+        map_xscroll = ttk.Scrollbar(
+            map_view, orient="horizontal", command=self.subfolder_map_tree.xview)
+        map_xscroll.grid(row=1, column=0, sticky="ew")
+        self.subfolder_map_tree.configure(
+            yscrollcommand=map_scroll.set,
+            xscrollcommand=map_xscroll.set)
         self.subfolder_map_trees = [self.subfolder_map_tree]
         self.lbl_subfolder_map_status = ttk.Label(
             mapbody, text="Välj en kategori för att börja.",
             style="CardMuted.TLabel", wraplength=580, justify="left")
         self.lbl_subfolder_map_status.grid(
             row=2, column=0, sticky="ew", padx=T.INNER, pady=(6, 4))
+        _bind_responsive_wrap(mapbody, self.lbl_subfolder_map_status,
+                              reserve=28, minimum=160, maximum=720)
         map_actions = ttk.Frame(mapbody, style="CardInner.TFrame")
         map_actions.grid(row=3, column=0, sticky="ew",
                          padx=T.INNER, pady=(0, T.INNER))
@@ -11866,8 +12310,12 @@ class App:
         dialog.withdraw()
         dialog.transient(self.root)
         dialog.title("Kategoriinställningar")
-        dialog.geometry("780x510")
-        dialog.minsize(620, 420)
+        _fit_geometry(dialog, 780, 510, 620, 420)
+        try:
+            dialog.configure(background=self.C["bg"])
+            dialog.after(80, lambda: dark_titlebar(dialog, bool(self.theme.dark)))
+        except Exception:
+            pass
         dialog.columnconfigure(0, weight=1)
         dialog.rowconfigure(1, weight=1)
         dialog.protocol("WM_DELETE_WINDOW", dialog.withdraw)
@@ -11900,16 +12348,23 @@ class App:
             row=1, column=3, padx=(0, 4), pady=(10, 0))
         ttk.Button(meta, text="Spara", command=self._cat_save_subpath).grid(
             row=1, column=4, padx=(0, 12), pady=(10, 0))
-        ttk.Label(meta,
-                  text="Byt arkivmappens namn och tryck Spara för att döpa om den "
-                       "i Utforskaren; befintliga filer följer med.",
-                  style="CardMuted.TLabel", wraplength=560, justify="left").grid(
-                      row=7, column=1, columnspan=4, sticky="w", padx=8,
-                      pady=(8, 0))
-        ttk.Label(meta,
-                  text="Relativt till kategoriens datum-/årsmapp; skapas vid första sorteringen.",
-                  style="CardMuted.TLabel").grid(
-                      row=2, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
+        rename_hint = ttk.Label(
+            meta,
+            text="Byt arkivmappens namn och tryck Spara för att döpa om den "
+                 "i Utforskaren; befintliga filer följer med.",
+            style="CardMuted.TLabel", wraplength=560, justify="left")
+        rename_hint.grid(
+            row=7, column=1, columnspan=4, sticky="w", padx=8, pady=(8, 0))
+        _bind_responsive_wrap(meta, rename_hint, reserve=200,
+                              minimum=220, maximum=760)
+        sub_hint = ttk.Label(
+            meta,
+            text="Relativt till kategoriens datum-/årsmapp; skapas vid första sorteringen.",
+            style="CardMuted.TLabel", justify="left")
+        sub_hint.grid(
+            row=2, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
+        _bind_responsive_wrap(meta, sub_hint, reserve=200,
+                              minimum=220, maximum=760)
         ttk.Label(meta, text="Datum:", style="Card.TLabel").grid(
             row=3, column=0, sticky="w", padx=12, pady=(10, 0))
         self.sub_combo = ttk.Combobox(
@@ -11941,14 +12396,21 @@ class App:
             row=5, column=1, columnspan=4, sticky="ew", padx=8, pady=(10, 0))
         self.default_keyword_combo.bind(
             "<<ComboboxSelected>>", self._cat_default_changed)
-        ttk.Label(meta,
-                  text="Kopplas till vald kategori; samma ord får finnas i flera kategorier.",
-                  style="CardMuted.TLabel").grid(
-                      row=6, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
-        ttk.Label(
+        default_hint = ttk.Label(
+            meta,
+            text="Kopplas till vald kategori; samma ord får finnas i flera kategorier.",
+            style="CardMuted.TLabel", justify="left")
+        default_hint.grid(
+            row=6, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
+        _bind_responsive_wrap(meta, default_hint, reserve=200,
+                              minimum=220, maximum=760)
+        dialog_note = ttk.Label(
             dialog,
             text="De här inställningarna påverkar inte listorna med stödord och skapade mappar.",
-            style="CardMuted.TLabel").grid(row=2, column=0, sticky="w", padx=16, pady=(0, 8))
+            style="CardMuted.TLabel", justify="left")
+        dialog_note.grid(row=2, column=0, sticky="w", padx=16, pady=(0, 8))
+        _bind_responsive_wrap(dialog, dialog_note, reserve=40,
+                              minimum=240, maximum=900)
         ttk.Button(dialog, text="Klart", command=dialog.withdraw).grid(
             row=3, column=0, sticky="e", padx=16, pady=(0, 14))
 
@@ -12091,6 +12553,8 @@ class App:
                       "Välj en kategori i menyn ovan för att visa dess stödord och mappar."))
             self.kw_tree.grid_remove()
             self.kw_scrollbar.grid_remove()
+            if hasattr(self, "kw_xscrollbar"):
+                self.kw_xscrollbar.grid_remove()
             self.lbl_kw_sum.grid_remove()
             self.kw_hint.grid_remove()
             self.kw_buttons.grid_remove()
@@ -12103,6 +12567,8 @@ class App:
         self.empty_cat_panel.grid_remove()
         self.kw_tree.grid()
         self.kw_scrollbar.grid()
+        if hasattr(self, "kw_xscrollbar"):
+            self.kw_xscrollbar.grid()
         self.lbl_kw_sum.grid()
         self.kw_hint.grid()
         self.kw_buttons.grid()
@@ -13776,41 +14242,78 @@ class App:
 
         top = ttk.Frame(f, style="Card.TFrame")
         top.grid(row=0, column=0, sticky="ew", padx=T.PAD, pady=(T.PAD, 0))
+        top.columnconfigure(0, weight=1)
         self.lbl_queue = ttk.Label(top, text="Inga filer väntar på granskning.",
                                    style="CardHead.TLabel")
-        self.lbl_queue.pack(side="left", padx=T.INNER, pady=T.INNER)
-        ttk.Button(top, text="Granska alla…", style="Accent.TButton",
-                   command=self._process_queue).pack(side="right",
-                                                     padx=(0, T.INNER),
-                                                     pady=T.INNER)
-        ttk.Button(top, text="Skanna om alla",
-                   command=self._manual_rescan).pack(side="right", padx=6)
-        ttk.Button(top, text="Töm kön", style="Danger.TButton",
-                   command=self._clear_queue).pack(side="right", padx=6)
-        self.var_review_auto = self.tk.BooleanVar(
-            value=bool(self.settings.get("review_auto_advance", True)))
-        ttk.Checkbutton(
-            top, text="Fortsätt automatiskt efter bekräftat val",
-            style="Card.TCheckbutton", variable=self.var_review_auto,
-            command=self._toggle_review_auto_advance).pack(
-                side="right", padx=6, pady=T.INNER)
+        self.lbl_queue.grid(row=0, column=0, sticky="w",
+                            padx=T.INNER, pady=T.INNER)
+        q_controls = ttk.Frame(top, style="CardInner.TFrame")
+        q_controls.grid(row=0, column=1, sticky="e", padx=T.INNER, pady=T.INNER)
         self.var_review_preview = self.tk.BooleanVar(
             value=bool(self.settings.get("preview_in_dialog", True)))
         ttk.Checkbutton(
-            top, text="Visa sidförhandsvisning",
+            q_controls, text="Visa sidförhandsvisning",
             style="Card.TCheckbutton", variable=self.var_review_preview,
             command=self._toggle_review_preview).pack(
-                side="right", padx=6, pady=T.INNER)
+                side="left", padx=(0, 8))
+        self.var_review_auto = self.tk.BooleanVar(
+            value=bool(self.settings.get("review_auto_advance", True)))
+        ttk.Checkbutton(
+            q_controls, text="Fortsätt automatiskt efter bekräftat val",
+            style="Card.TCheckbutton", variable=self.var_review_auto,
+            command=self._toggle_review_auto_advance).pack(
+                side="left", padx=(0, 8))
+        ttk.Button(q_controls, text="Töm kön", style="Danger.TButton",
+                   command=self._clear_queue).pack(side="left", padx=4)
+        ttk.Button(q_controls, text="Skanna om alla",
+                   command=self._manual_rescan).pack(side="left", padx=4)
+        ttk.Button(q_controls, text="Granska alla…", style="Accent.TButton",
+                   command=self._process_queue).pack(side="left", padx=(4, 0))
 
+        q_top_compact = [None]
+
+        def layout_review_top(_e=None) -> None:
+            compact = max(1, top.winfo_width()) < 1180
+            if compact == q_top_compact[0]:
+                return
+            q_top_compact[0] = compact
+            if compact:
+                self.lbl_queue.grid_configure(pady=(T.INNER, 4))
+                q_controls.grid_configure(row=1, column=0, columnspan=2,
+                                          sticky="w", padx=T.INNER,
+                                          pady=(0, T.INNER))
+            else:
+                self.lbl_queue.grid_configure(pady=T.INNER)
+                q_controls.grid_configure(row=0, column=1, columnspan=1,
+                                          sticky="e", padx=T.INNER,
+                                          pady=T.INNER)
+
+        top.bind("<Configure>", layout_review_top, add="+")
+        self.root.after_idle(layout_review_top)
+
+        q_wrap = ttk.Frame(f, style="Card.TFrame")
+        q_wrap.grid(row=1, column=0, sticky="nsew", padx=T.PAD,
+                    pady=(T.GAP, T.PAD))
+        q_wrap.columnconfigure(0, weight=1)
+        q_wrap.rowconfigure(0, weight=1)
         cols = ("file", "reason", "guess", "ocr")
-        self.q_tree = ttk.Treeview(f, columns=cols, show="headings")
+        self.q_tree = ttk.Treeview(q_wrap, columns=cols, show="headings")
         T.fit_columns(self.q_tree, (
             ("file", "FIL", 26, "w", False),
             ("reason", "VARFÖR OSÄKER", 34, "w", True),
             ("guess", "GISSNING", 16, "w", False),
             ("ocr", "LÄST VIA", 9, "w", False)))
-        self.q_tree.grid(row=1, column=0, sticky="nsew", padx=T.PAD,
-                         pady=(T.GAP, T.PAD))
+        self.q_tree.grid(row=0, column=0, sticky="nsew", padx=(T.INNER, 0),
+                         pady=(T.INNER, 0))
+        q_ysb = ttk.Scrollbar(q_wrap, orient="vertical",
+                              command=self.q_tree.yview)
+        q_ysb.grid(row=0, column=1, sticky="ns", padx=(0, T.INNER),
+                   pady=(T.INNER, 0))
+        q_xsb = ttk.Scrollbar(q_wrap, orient="horizontal",
+                              command=self.q_tree.xview)
+        q_xsb.grid(row=1, column=0, sticky="ew", padx=(T.INNER, 0),
+                   pady=(0, T.INNER))
+        self.q_tree.configure(yscrollcommand=q_ysb.set, xscrollcommand=q_xsb.set)
         self.theme.zebra(self.q_tree)
         self.q_tree.bind("<Double-1>", lambda e: self._process_queue(self._queue_index()))
 
@@ -14280,29 +14783,66 @@ class App:
 
         top = ttk.Frame(f, style="Card.TFrame")
         top.grid(row=0, column=0, sticky="ew", padx=T.PAD, pady=(T.PAD, 0))
-        ttk.Label(top, text="Alla flyttade filer", style="CardHead.TLabel"
-                  ).pack(side="left", padx=T.INNER, pady=T.INNER)
-        ttk.Label(top, text="Markera rader och klicka Ångra för att flytta tillbaka",
+        top.columnconfigure(0, weight=1)
+        hist_title_box = ttk.Frame(top, style="CardInner.TFrame")
+        hist_title_box.grid(row=0, column=0, sticky="w",
+                            padx=T.INNER, pady=T.INNER)
+        ttk.Label(hist_title_box, text="Alla flyttade filer",
+                  style="CardHead.TLabel").pack(side="left")
+        ttk.Label(hist_title_box,
+                  text="  Markera rader och klicka Ångra för att flytta tillbaka",
                   style="CardMuted.TLabel").pack(side="left")
-        ttk.Button(top, text="Uppdatera", command=self._refresh_history
-                   ).pack(side="right", padx=(0, T.INNER), pady=T.INNER)
-        ttk.Button(top, text="Ångra valda", style="Accent.TButton",
-                   command=self._undo_selected).pack(side="right", padx=6)
-        ttk.Button(top, text="Exportera rapport (MD)", style="CardLink.TButton",
-                   command=self._export_report).pack(side="right", padx=6)
-        ttk.Button(top, text="Exportera årsarkiv…", style="CardLink.TButton",
-                   command=self._export_archive_gui).pack(side="right", padx=6)
+        hist_controls = ttk.Frame(top, style="CardInner.TFrame")
+        hist_controls.grid(row=0, column=1, sticky="e",
+                           padx=T.INNER, pady=T.INNER)
         # Hur många dagar rapporten ska täcka. Standard 10.
-        ttk.Label(top, text="Dagar:", style="CardMuted.TLabel").pack(
-            side="right", padx=(0, 4))
+        ttk.Label(hist_controls, text="Dagar:", style="CardMuted.TLabel").pack(
+            side="left", padx=(0, 4))
         self.var_report_days = tk.StringVar(
             value=str(max(1, int(self.settings.get("report_days", 10) or 10))))
-        days_box = ttk.Spinbox(top, from_=1, to=365, width=4,
+        days_box = ttk.Spinbox(hist_controls, from_=1, to=365, width=4,
                                textvariable=self.var_report_days)
-        days_box.pack(side="right", padx=(0, 6))
+        days_box.pack(side="left", padx=(0, 8))
+        ttk.Button(hist_controls, text="Exportera årsarkiv…",
+                   style="CardLink.TButton",
+                   command=self._export_archive_gui).pack(side="left", padx=4)
+        ttk.Button(hist_controls, text="Exportera rapport (MD)",
+                   style="CardLink.TButton",
+                   command=self._export_report).pack(side="left", padx=4)
+        ttk.Button(hist_controls, text="Ångra valda", style="Accent.TButton",
+                   command=self._undo_selected).pack(side="left", padx=4)
+        ttk.Button(hist_controls, text="Uppdatera", command=self._refresh_history
+                   ).pack(side="left", padx=(4, 0))
 
+        h_top_compact = [None]
+
+        def layout_hist_top(_e=None) -> None:
+            compact = max(1, top.winfo_width()) < 1180
+            if compact == h_top_compact[0]:
+                return
+            h_top_compact[0] = compact
+            if compact:
+                hist_title_box.grid_configure(pady=(T.INNER, 4))
+                hist_controls.grid_configure(row=1, column=0, columnspan=2,
+                                             sticky="w", padx=T.INNER,
+                                             pady=(0, T.INNER))
+            else:
+                hist_title_box.grid_configure(pady=T.INNER)
+                hist_controls.grid_configure(row=0, column=1, columnspan=1,
+                                             sticky="e", padx=T.INNER,
+                                             pady=T.INNER)
+
+        top.bind("<Configure>", layout_hist_top, add="+")
+        self.root.after_idle(layout_hist_top)
+
+        h_wrap = ttk.Frame(f, style="Card.TFrame")
+        h_wrap.grid(row=1, column=0, sticky="nsew", padx=T.PAD,
+                    pady=(T.GAP, T.PAD))
+        h_wrap.columnconfigure(0, weight=1)
+        h_wrap.rowconfigure(0, weight=1)
         cols = ("time", "file", "category", "score", "by", "matched")
-        self.h_tree = ttk.Treeview(f, columns=cols, show="headings", selectmode="extended")
+        self.h_tree = ttk.Treeview(h_wrap, columns=cols, show="headings",
+                                   selectmode="extended")
         T.fit_columns(self.h_tree, (
             ("time", "TID", 17, "w", False),
             ("file", "FIL", 24, "w", False),
@@ -14310,8 +14850,17 @@ class App:
             ("score", "POÄNG", 5, "center", False),
             ("by", "BESLUT", 7, "w", False),
             ("matched", "MATCHADE ORD", 24, "w", True)))
-        self.h_tree.grid(row=1, column=0, sticky="nsew", padx=T.PAD,
-                         pady=(T.GAP, T.PAD))
+        self.h_tree.grid(row=0, column=0, sticky="nsew", padx=(T.INNER, 0),
+                         pady=(T.INNER, 0))
+        h_ysb = ttk.Scrollbar(h_wrap, orient="vertical",
+                              command=self.h_tree.yview)
+        h_ysb.grid(row=0, column=1, sticky="ns", padx=(0, T.INNER),
+                   pady=(T.INNER, 0))
+        h_xsb = ttk.Scrollbar(h_wrap, orient="horizontal",
+                              command=self.h_tree.xview)
+        h_xsb.grid(row=1, column=0, sticky="ew", padx=(T.INNER, 0),
+                   pady=(0, T.INNER))
+        self.h_tree.configure(yscrollcommand=h_ysb.set, xscrollcommand=h_xsb.set)
         self.theme.zebra(self.h_tree)
         self.h_tree.bind("<Double-1>", lambda e: self._open_hist_target())
         self._history: List[Dict[str, Any]] = []
@@ -14501,13 +15050,23 @@ class App:
         self.json_status = ttk.Label(f, text="", anchor="w", style="Muted.TLabel")
         self.json_status.grid(row=5, column=0, columnspan=2, sticky="ew",
                               padx=T.PAD, pady=(0, 10))
-        self._json_load()
+        self._json_loaded_once = False
+
+    def _on_tab_changed(self, _event=None) -> None:
+        """Ladda tunga vyer (t.ex. JSON-flik) först när användaren öppnar dem."""
+        try:
+            current = self.nb.select()
+        except Exception:
+            return
+        if current == str(self.tab_json) and not getattr(self, "_json_loaded_once", False):
+            self._json_load()
 
     def _json_path(self) -> Path:
         return {"rules": rules_path(), "settings": settings_path(),
                 "history": history_path()}[self.json_file.get()]
 
     def _json_load(self) -> None:
+        self._json_loaded_once = True
         path = self._json_path()
         try:
             text = path.read_text(encoding="utf-8") if path.exists() else "{}"
@@ -14631,6 +15190,8 @@ class App:
             if hasattr(self, "var_low_memory_mode"):
                 self.var_low_memory_mode.set(
                     bool(self.settings.get("low_memory_mode", False)))
+            TEXT_CACHE.configure_limits(
+                bool(self.settings.get("low_memory_mode", False)))
             self.var_date_on.set(self.settings.get("date_enabled", False))
             self.var_date_fb.set(self.settings.get("date_fallback", "none"))
             mallar = [t for t, _ in SUBFOLDER_TEMPLATES if t]
@@ -14996,6 +15557,8 @@ class App:
 
     def _toggle_low_memory_mode(self) -> None:
         self._collect_settings()
+        TEXT_CACHE.configure_limits(
+            bool(self.settings.get("low_memory_mode", False)))
         workers = processing_worker_count(self.settings)
         self._log(
             f"Minnesläge {'på' if self.settings.get('low_memory_mode') else 'av'} "
@@ -15068,6 +15631,11 @@ class App:
         win.title("Inlärning per kategori")
         win.transient(self.root)
         win.resizable(True, True)
+        try:
+            win.configure(background=self.C["bg"])
+            win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
+        except Exception:
+            pass
         _fit_geometry(win, 920, 560, 620, 340)
         win.columnconfigure(0, weight=1)
         win.rowconfigure(0, weight=1)
@@ -15079,8 +15647,9 @@ class App:
                                   ("accuracy", "KALIBRERING", 110),
                                   ("updated", "SENAST UPPDATERAD", 180)):
             tree.heading(key, text=title)
-            tree.column(key, width=width, anchor="w")
+            tree.column(key, width=self.theme.px(width), anchor="w")
         tree.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        self.theme.zebra(tree)
         tree_y = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
         tree_y.grid(row=0, column=1, sticky="ns", padx=(0, 10), pady=10)
         tree_x = ttk.Scrollbar(win, orient="horizontal", command=tree.xview)
@@ -15799,9 +16368,13 @@ class App:
         title = ttk.Label(content, text="", style="CardTitle.TLabel",
                           wraplength=600, justify="left")
         title.pack(anchor="w", padx=20, pady=(18, 4))
+        _bind_responsive_wrap(content, title, reserve=44,
+                              minimum=240, maximum=900)
         intro = ttk.Label(content, text="", style="CardMuted.TLabel",
                           wraplength=600, justify="left")
         intro.pack(anchor="w", fill="x", padx=20, pady=(0, 10))
+        _bind_responsive_wrap(content, intro, reserve=44,
+                              minimum=240, maximum=900)
         langrow = ttk.Frame(content, style="Card.TFrame")
         langrow.pack(anchor="w", padx=20)
         lang_label = ttk.Label(langrow, text="", style="CardMuted.TLabel")
@@ -15827,14 +16400,20 @@ class App:
         swish_label = ttk.Label(swish_card, text="", style="CardHead.TLabel",
                                 wraplength=580, justify="center")
         swish_label.pack(anchor="center", padx=12, pady=(14, 6))
+        _bind_responsive_wrap(swish_card, swish_label, reserve=32,
+                              minimum=220, maximum=860)
         qr_label = ttk.Label(swish_card, background=self.C["surface"])
         qr_label.pack(padx=12, pady=10)
         privacy = ttk.Label(swish_card, text="", style="CardMuted.TLabel",
                             wraplength=580, justify="center")
         privacy.pack(anchor="center", padx=12, pady=(0, 12))
+        _bind_responsive_wrap(swish_card, privacy, reserve=32,
+                              minimum=220, maximum=860)
         thanks = ttk.Label(content, text="", style="CardTitle.TLabel",
                            wraplength=600, justify="left")
         thanks.pack(anchor="w", padx=20, pady=(0, 18))
+        _bind_responsive_wrap(content, thanks, reserve=44,
+                              minimum=240, maximum=900)
 
         def redraw_qr() -> None:
             try:
@@ -15928,15 +16507,19 @@ class App:
             win.configure(background=self.C["bg"])
         except Exception:
             pass
-        ttk.Label(win, text=rubrik, style="TLabel", wraplength=500,
-                  justify="left").pack(
-            anchor="w", fill="x", padx=16, pady=(14, 6))
+        title_lbl = ttk.Label(win, text=rubrik, style="TLabel", wraplength=500,
+                              justify="left")
+        title_lbl.pack(anchor="w", fill="x", padx=16, pady=(14, 6))
+        _bind_responsive_wrap(win, title_lbl, reserve=36,
+                              minimum=220, maximum=900)
         bar = ttk.Progressbar(win, mode="indeterminate", length=380)
         bar.pack(fill="x", padx=16)
         bar.start(12)
         etikett = ttk.Label(win, text="Startar …", style="Faint.TLabel",
                             wraplength=500, justify="left")
         etikett.pack(anchor="w", padx=16, pady=(8, 14))
+        _bind_responsive_wrap(win, etikett, reserve=36,
+                              minimum=220, maximum=900)
         return win, bar, etikett
 
     def _ensure_weekly_python_update_task(self) -> None:
@@ -15988,6 +16571,7 @@ class App:
             _fit_geometry(win, 760, 560, 500, 420)
             try:
                 win.configure(background=self.C["bg"])
+                win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
             except Exception:
                 pass
             wrap = max(240, min(560, win.winfo_screenwidth() - 160))
@@ -15995,33 +16579,47 @@ class App:
                       if saknade else
                       "Tillägg och OCR är installerade. Du kan kontrollera "
                       "dem eller uppdatera paketen manuellt:")
-            ttk.Label(win, text=rubrik, style="TLabel", wraplength=wrap,
-                      justify="left").pack(
-                anchor="w", padx=16, pady=(14, 4))
-            lista = tk.Listbox(win, height=min(6, len(saknade) + 1),
+            ext_head = ttk.Label(win, text=rubrik, style="TLabel",
+                                 wraplength=wrap, justify="left")
+            ext_head.pack(anchor="w", fill="x", padx=16, pady=(14, 4))
+            _bind_responsive_wrap(win, ext_head, reserve=36,
+                                  minimum=240, maximum=900)
+            lista_box = ttk.Frame(win, style="Card.TFrame")
+            lista_box.pack(fill="x", padx=16)
+            lista_box.columnconfigure(0, weight=1)
+            lista = tk.Listbox(lista_box, height=min(6, len(saknade) + 1),
                                exportselection=False, activestyle="none",
                                background=self.C["surface"],
                                foreground=self.C["text"],
+                               font=self.theme.f_base,
                                highlightthickness=0)
-            lista.pack(fill="x", padx=16)
+            lista.grid(row=0, column=0, sticky="ew")
+            lista_sb = ttk.Scrollbar(lista_box, orient="vertical",
+                                     command=lista.yview)
+            lista_sb.grid(row=0, column=1, sticky="ns")
+            lista.configure(yscrollcommand=lista_sb.set)
             if saknade:
                 for e in saknade:
                     lista.insert("end", f"{e['namn']}  -  {e['beskr']}")
             else:
                 lista.insert("end", "Inga saknade tillägg upptäcktes.")
-            ttk.Label(win, text="Tesseract krävs för OCR av skannade PDF:er. "
-                      "Om det saknas kan du installera eller välja sökväg här.",
-                      style="Faint.TLabel", wraplength=wrap,
-                      justify="left").pack(
-                anchor="w", padx=16, pady=(6, 0))
+            ext_hint = ttk.Label(
+                win, text="Tesseract krävs för OCR av skannade PDF:er. "
+                "Om det saknas kan du installera eller välja sökväg här.",
+                style="Faint.TLabel", wraplength=wrap, justify="left")
+            ext_hint.pack(anchor="w", fill="x", padx=16, pady=(6, 0))
+            _bind_responsive_wrap(win, ext_hint, reserve=36,
+                                  minimum=240, maximum=900)
             status = tk.StringVar(value=(
                 "Ingen Python-uppdatering körs när appen startar. "
                 "Automatiska Python- och tilläggsuppdateringar körs "
                 "måndagar kl. 08:00. Du kan uppdatera tilläggen manuellt här."
             ))
-            ttk.Label(win, textvariable=status, style="Faint.TLabel",
-                      wraplength=wrap, justify="left").pack(
-                anchor="w", padx=16, pady=(4, 0))
+            ext_status = ttk.Label(win, textvariable=status, style="Faint.TLabel",
+                                   wraplength=wrap, justify="left")
+            ext_status.pack(anchor="w", fill="x", padx=16, pady=(4, 0))
+            _bind_responsive_wrap(win, ext_status, reserve=36,
+                                  minimum=240, maximum=900)
             dolda = tk.BooleanVar(value=False)
 
             def _pip_installera():
@@ -16282,6 +16880,7 @@ class App:
             win.title("Rensa åtgärdade fel från loggen")
             win.transient(self.root)
             win.configure(background=self.C["bg"])
+            win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
             _fit_geometry(win, 860, 520, 560, 360)
             win.columnconfigure(0, weight=1)
             win.rowconfigure(1, weight=1)
@@ -16294,6 +16893,8 @@ class App:
                 wraplength=820, justify="left")
             info.grid(row=0, column=0, columnspan=2, sticky="ew",
                       padx=14, pady=(12, 8))
+            _bind_responsive_wrap(win, info, reserve=32,
+                                  minimum=240, maximum=1100)
             kolumner = ("kod", "status", "kategori", "antal", "meddelande")
             tree = self.ttk.Treeview(win, columns=kolumner, show="headings",
                                      selectmode="extended", height=12)
@@ -16302,17 +16903,22 @@ class App:
                     ("kategori", "Kategori", 110), ("antal", "Antal", 60),
                     ("meddelande", "Meddelande", 460)):
                 tree.heading(kol, text=rubrik)
-                tree.column(kol, width=bredd, stretch=(kol == "meddelande"))
-            tree.grid(row=1, column=0, sticky="nsew", padx=(14, 0), pady=4)
+                tree.column(kol, width=self.theme.px(bredd),
+                            stretch=(kol == "meddelande"))
+            tree.grid(row=1, column=0, sticky="nsew", padx=(14, 0), pady=(4, 0))
+            self.theme.zebra(tree)
             scroll = self.ttk.Scrollbar(win, orient="vertical",
                                         command=tree.yview)
-            scroll.grid(row=1, column=1, sticky="ns", padx=(0, 14), pady=4)
-            tree.configure(yscrollcommand=scroll.set)
+            scroll.grid(row=1, column=1, sticky="ns", padx=(0, 14), pady=(4, 0))
+            xscroll = self.ttk.Scrollbar(win, orient="horizontal",
+                                         command=tree.xview)
+            xscroll.grid(row=2, column=0, sticky="ew", padx=(14, 0), pady=(0, 4))
+            tree.configure(yscrollcommand=scroll.set, xscrollcommand=xscroll.set)
             status = self.ttk.Label(win, style="CardMuted.TLabel", text="")
-            status.grid(row=2, column=0, columnspan=2, sticky="w",
+            status.grid(row=3, column=0, columnspan=2, sticky="w",
                         padx=14, pady=(2, 0))
             rad = self.ttk.Frame(win, style="Card.TFrame")
-            rad.grid(row=3, column=0, columnspan=2, sticky="ew",
+            rad.grid(row=4, column=0, columnspan=2, sticky="ew",
                      padx=14, pady=12)
             rad.columnconfigure(0, weight=1)
 

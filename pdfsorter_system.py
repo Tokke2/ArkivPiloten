@@ -708,14 +708,22 @@ def set_process_dpi_aware() -> None:
     Utan detta skalar Windows själv fönstret på HiDPI-skärmar - typsnitt
     och färger blir grötiga och temamodulens ui_scale ser fel pixeltäthet.
     Med anropet får Tkinter den riktiga tätheten och allt ritas skarpt.
-    Kedjan prövar modernast först och ger sig aldrig - andra plattformar
-    är no-op.
+    Kedjan prövar modernast först (Per-Monitor v2 på Windows 10+) och ger
+    sig aldrig - andra plattformar är no-op.
     """
     if not sys.platform.startswith("win"):
         return
     try:
         import ctypes
-        try:                              # Per-monitor (Win 8.1+)
+        try:                              # Per-Monitor v2 (Win 10 1703+)
+            set_ctx = ctypes.windll.user32.SetProcessDpiAwarenessContext
+            set_ctx.argtypes = (ctypes.c_void_p,)
+            set_ctx.restype = ctypes.c_int
+            if set_ctx(ctypes.c_void_p(-4)):
+                return
+        except Exception:
+            pass
+        try:                              # Per-monitor v1 (Win 8.1+)
             ctypes.windll.shcore.SetProcessDpiAwareness(2)
             return
         except Exception:
@@ -752,9 +760,9 @@ def set_app_user_model_id(app_id: str = APP_USER_MODEL_ID) -> None:
 
 
 #: Ikonstorlekar som sätts på varje fönster. Tk väljer själv den storlek
-#: som passar titelrad, aktivitetsfält och Alt+Tab i stället för att skala
-#: om en enda bild (skarpare, särskilt på HiDPI-skärmar).
-WINDOW_ICON_SIZES = (16, 32, 48, 64)
+#: som passar titelrad, aktivitetsfält och Alt+Tab upp till 4K/HiDPI i
+#: stället för att skala upp en för liten bild (skarpare kanter).
+WINDOW_ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 
 def brand_window(root: Any, size: int = 64) -> Any:
@@ -1727,6 +1735,7 @@ class TrayIcon:
         self._detached = False
         self._ready = threading.Event()
         self._startup_error: Optional[BaseException] = None
+        self._last_tray_state: Optional[Tuple[bool, int]] = None
 
     # -- meny -------------------------------------------------------------
     def _build_menu(self):
@@ -1820,12 +1829,16 @@ class TrayIcon:
             session_error("systemfält", exc)
 
     def refresh(self) -> None:
-        """Uppdatera ikonens utseende och meny."""
+        """Uppdatera ikonens utseende och meny (hoppa över oförändrat läge)."""
         if not self.icon:
             return
         try:
             running = bool(self.app.watcher and self.app.watcher.running)
             n = len(self.app.queue)
+            state = (running, n)
+            if state == getattr(self, "_last_tray_state", None):
+                return
+            self._last_tray_state = state
             img = make_icon_image(64, active=running, badge=n)
             if img is not None:
                 self.icon.icon = img
@@ -1850,6 +1863,7 @@ class TrayIcon:
     def stop(self) -> None:
         """Stoppa tray-ikonen med 2 s vakthund: en hängande tray-backend
         (t.ex. saknad tray-daemon på Linux) får aldrig blockera avslut."""
+        self._last_tray_state = None
         if not self.icon:
             return
         icon, self.icon = self.icon, None

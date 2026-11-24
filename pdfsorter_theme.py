@@ -18,9 +18,10 @@ Saknas filen startar appen ändå, med Tkinters gråa standardutseende.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import sys
 
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 #: Programmets version. Höjs vid varje leverans.
 VERSION = "1.4.14"
@@ -221,25 +222,77 @@ def _pick_font(root, candidates: Tuple[str, ...], size: int,
     return ("TkDefaultFont", size, weight)
 
 
+#: Cache över skalade vektorikoner så att temabyten och uppdateringar
+#: aldrig behöver rita om identiska PNG-lager i onödan.
+_NAV_ICON_CACHE: "OrderedDict[Tuple[str, str, str, str, int], Any]" = OrderedDict()
+_ACTION_ICON_CACHE: "OrderedDict[Tuple[str, str, str, int], Any]" = OrderedDict()
+
+
+def display_dpi(root: Any) -> float:
+    """Läs skärmens verkliga pixeltäthet (DPI), även när X11 fastnar på 96."""
+    try:
+        dpi = float(root.winfo_fpixels("1i"))
+    except Exception:
+        dpi = 96.0
+    if dpi <= 0.0:
+        dpi = 96.0
+    if dpi <= 96.5:
+        try:
+            screen_w = int(root.winfo_screenwidth())
+            mm_w = int(root.winfo_screenmmwidth())
+            if 100 <= mm_w <= 2000 and screen_w >= 1920:
+                phys = screen_w / (mm_w / 25.4)
+                if 110.0 <= phys <= 288.0:
+                    dpi = round(phys, 1)
+        except Exception:
+            pass
+    return max(72.0, min(288.0, dpi))
+
+
+def calibrate_tk_scaling(root: Any, dpi: float | None = None) -> float:
+    """Synka Tk:s inbyggda punkt-till-pixel-skala med skärmens DPI."""
+    if dpi is None:
+        dpi = display_dpi(root)
+    target = max(1.0, float(dpi) / 72.0)
+    try:
+        tk_obj = getattr(root, "tk", None)
+        if tk_obj is not None:
+            current = float(tk_obj.call("tk", "scaling"))
+            if abs(current - target) > 0.08 and target > current:
+                tk_obj.call("tk", "scaling", target)
+                return target
+            return current
+    except Exception:
+        pass
+    return target
+
+
 def navigation_icon_image(kind: str, palette: Dict[str, str], size: int = 20):
     """Rita en liten, skalbar ikon till huvudflikarna.
 
     Ikonerna använder samma accent- och ytfärger som temat och ritas i hög
-    upplösning för att hålla sig skarpa även på HiDPI-skärmar. Pillow är
-    valfritt här: utan det returneras ``None`` och flikarna visar vanlig text.
+    upplösning (4× översampling + skärpa) för att hålla sig skarpa även på
+    4K/HiDPI-skärmar. Pillow är valfritt här: utan det returneras ``None``
+    och flikarna visar vanlig text.
     """
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageEnhance
 
-        size = max(16, min(40, int(size)))
+        size = max(16, min(64, int(size)))
+        accent = palette["accent"]
+        bg = palette["accent_light"]
+        outline = palette["accent_hair"]
+        cache_key = (str(kind), accent, bg, outline, size)
+        cached = _NAV_ICON_CACHE.get(cache_key)
+        if cached is not None:
+            _NAV_ICON_CACHE.move_to_end(cache_key)
+            return cached.copy()
+
         scale = 4
         side = size * scale
         unit = side / 24.0
         image = Image.new("RGBA", (side, side), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        accent = palette["accent"]
-        bg = palette["accent_light"]
-        outline = palette["accent_hair"]
 
         def xy(x, y):
             return (round(x * unit), round(y * unit))
@@ -304,7 +357,85 @@ def navigation_icon_image(kind: str, palette: Dict[str, str], size: int = 20):
             return None
 
         resampling = getattr(Image, "Resampling", Image)
-        return image.resize((size, size), resampling.LANCZOS)
+        out = image.resize((size, size), resampling.LANCZOS)
+        out = ImageEnhance.Sharpness(out).enhance(1.15)
+        _NAV_ICON_CACHE[cache_key] = out
+        while len(_NAV_ICON_CACHE) > 48:
+            _NAV_ICON_CACHE.popitem(last=False)
+        return out.copy()
+    except Exception:
+        return None
+
+
+def action_icon_image(kind: str, palette: Dict[str, str], size: int = 18,
+                      inverted: bool = False):
+    """Rita skarpa små vektorikoner för knappar och verktygsrader."""
+    try:
+        from PIL import Image, ImageDraw, ImageEnhance
+
+        size = max(14, min(48, int(size)))
+        fg = palette["text_invert"] if inverted else palette["accent"]
+        bg = palette["accent"] if inverted else palette["accent_light"]
+        cache_key = (str(kind), fg, bg, size)
+        cached = _ACTION_ICON_CACHE.get(cache_key)
+        if cached is not None:
+            _ACTION_ICON_CACHE.move_to_end(cache_key)
+            return cached.copy()
+
+        scale = 4
+        side = size * scale
+        unit = side / 24.0
+        image = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        width = max(1, round(2.0 * unit))
+
+        def xy(x, y):
+            return (round(x * unit), round(y * unit))
+
+        def line(points, stroke=width):
+            draw.line([xy(x, y) for x, y in points], fill=fg,
+                      width=stroke, joint="curve")
+
+        if kind == "sort":
+            line(((7, 5), (17, 12), (7, 19), (7, 5)))
+        elif kind == "watch":
+            draw.ellipse((xy(4, 7), xy(20, 17)), outline=fg, width=width)
+            cx, cy = xy(12, 12)
+            r = 2.4 * unit
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=fg)
+        elif kind == "folder":
+            line(((3.5, 7), (9.5, 7), (11, 9.5), (20.5, 9.5),
+                  (19.5, 18.5), (4.5, 18.5), (3.5, 7)))
+        elif kind == "search":
+            draw.ellipse((xy(4.5, 4.5), xy(15.5, 15.5)), outline=fg, width=width)
+            line(((14, 14), (19.5, 19.5)), stroke=max(1, round(2.4 * unit)))
+        elif kind == "audit":
+            line(((12, 3.5), (19, 6.5), (19, 12.5), (12, 20.5),
+                  (5, 12.5), (5, 6.5), (12, 3.5)))
+            line(((8.5, 12), (11, 14.5), (16, 9.5)))
+        elif kind == "add":
+            line(((12, 5), (12, 19)))
+            line(((5, 12), (19, 12)))
+        elif kind == "refresh":
+            draw.arc((xy(4.5, 4.5), xy(19.5, 19.5)), 35, 315, fill=fg, width=width)
+            line(((16.5, 4.5), (19.5, 7.5), (15.5, 9)))
+        elif kind == "help":
+            draw.ellipse((xy(4, 4), xy(20, 20)), outline=fg, width=width)
+            line(((9.5, 9.5), (11, 7.8), (13.5, 7.8), (14.8, 9.5),
+                  (12, 12.5), (12, 14.5)))
+            cx, cy = xy(12, 17.5)
+            r = 0.8 * unit
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=fg)
+        else:
+            return None
+
+        resampling = getattr(Image, "Resampling", Image)
+        out = image.resize((size, size), resampling.LANCZOS)
+        out = ImageEnhance.Sharpness(out).enhance(1.15)
+        _ACTION_ICON_CACHE[cache_key] = out
+        while len(_ACTION_ICON_CACHE) > 48:
+            _ACTION_ICON_CACHE.popitem(last=False)
+        return out.copy()
     except Exception:
         return None
 
@@ -349,17 +480,31 @@ class Theme:
             except Exception:
                 continue
 
-        # HiDPI: skala typsnitten efter skärmens pixeltäthet så att
-        # gränssnittet inte blir pyttelitet på 4K-skärmar (design/läsbarhet).
-        try:
-            dpi = float(root.winfo_fpixels("1i"))
-        except Exception:
-            dpi = 96.0
-        self.ui_scale = (1.25 if dpi >= 144 else (1.1 if dpi >= 120 else 1.0))
-        self.ui_scale *= self.text_scale
+        # HiDPI: känn av riktig pixeltäthet, synka Tk-skalning och skala både
+        # typsnitt, ikoner och pixelavstånd mjukt även på 4K/5K-skärmar.
+        dpi = display_dpi(root)
+        tk_scale = calibrate_tk_scaling(root, dpi)
+        if dpi >= 144:
+            dpi_scale = min(1.85, round(1.25 + (dpi - 144.0) / 192.0, 2))
+        elif dpi >= 120:
+            dpi_scale = 1.1
+        else:
+            dpi_scale = 1.0
+        self.dpi = dpi
+        self.ui_scale = dpi_scale * self.text_scale
+        self.pixel_scale = max(1.0, min(2.75, dpi / 96.0)) * self.text_scale
+        self.PAD = self.px(12)
+        self.GAP = self.px(8)
+        self.INNER = self.px(10)
+
+        # När OS/Tk redan skalar punktstorleken med DPI (t.ex. Per-Monitor v2
+        # på Windows eller kalibrerad X11) undviker vi dubbel förstoring av
+        # punktstorlekar och skalar bara efter användarens textval.
+        tk_handles_dpi = (dpi > 105.0 and tk_scale >= (dpi / 72.0) * 0.92)
+        font_scale = (self.text_scale if tk_handles_dpi else self.ui_scale)
 
         def _sz(n: int) -> int:
-            return max(8, int(round(n * self.ui_scale)))
+            return max(8, int(round(n * font_scale)))
 
         ui = ("Segoe UI Variable Text", "Segoe UI", "Inter", "SF Pro Text",
               "Helvetica Neue", "Cantarell", "Ubuntu", "DejaVu Sans", "Arial")
@@ -383,6 +528,10 @@ class Theme:
         except Exception:
             pass
 
+    def px(self, value: float) -> int:
+        """Skala ett basmått (96 DPI) till aktuell skärmtäthet och textstorlek."""
+        return max(1, int(round(float(value) * getattr(self, "pixel_scale", 1.0))))
+
     def _apply_navigation_icons(self) -> None:
         """Sätt temafärgade, skalbara ikoner på huvudfönstrets flikar."""
         try:
@@ -395,7 +544,7 @@ class Theme:
         refs = []
         # Följ typsnittsskalan så att ikonerna inte blir pyttesmå i
         # förhållande till texten på HiDPI-skärmar.
-        icon_size = max(16, min(40, int(round(20 * self.ui_scale))))
+        icon_size = max(16, min(64, int(round(20 * self.ui_scale))))
 
         def visit(widget):
             try:
@@ -514,15 +663,23 @@ class Theme:
         self._cfg("Ok.TLabel", foreground=c["ok"], font=self.f_small)
         self._cfg("Warn.TLabel", foreground=c["warn"], font=self.f_small)
         self._cfg("Err.TLabel", foreground=c["err"], font=self.f_small)
+        px = self.px
+        try:
+            from tkinter import font as tkfont
+            _line_h = int(tkfont.Font(root=self.root, font=self.f_base).metrics("linespace"))
+        except Exception:
+            _line_h = px(20)
+        row_h = max(px(30), _line_h + px(12))
+
         for tone in ("ok", "warn", "err", "accent"):
             self._cfg(f"Pill{tone.title()}.TLabel",
                          background=c[f"{tone}_light"], foreground=c[tone],
-                         font=self.f_small, padding=(9, 3))
+                         font=self.f_small, padding=(px(9), px(3)))
         # Neutral statuspille (t.ex. "Bevakning: AV") - samma form som
         # statuspillerna men utan att ropa.
         self._cfg("PillMuted.TLabel", background=c["surface_alt"],
                      foreground=c["text_muted"], font=self.f_small,
-                     padding=(9, 3))
+                     padding=(px(9), px(3)))
 
         self._cfg("TLabelframe", background=c["bg"], borderwidth=1,
                      relief="solid", bordercolor=c["border"])
@@ -532,7 +689,7 @@ class Theme:
         # -- knappar ------------------------------------------------------
         self._cfg("TButton", background=c["surface"], foreground=c["text"],
                      bordercolor=c["border_strong"], relief="solid",
-                     borderwidth=1, padding=(12, 7), font=self.f_base,
+                     borderwidth=1, padding=(px(12), px(7)), font=self.f_base,
                      anchor="center")
         self._map("TButton",
                background=[("pressed", c["accent_light"]),
@@ -544,7 +701,7 @@ class Theme:
 
         self._cfg("Accent.TButton", background=c["accent"],
                      foreground=c["text_invert"], bordercolor=c["accent_dark"],
-                     padding=(14, 8), font=self.f_bold)
+                     padding=(px(14), px(8)), font=self.f_bold)
         self._map("Accent.TButton",
                background=[("pressed", c["accent_dark"]),
                            ("active", c["accent_dark"]),
@@ -561,7 +718,7 @@ class Theme:
                foreground=[("active", c["err"])])
 
         self._cfg("Link.TButton", background=c["bg"], foreground=c["accent"],
-                     borderwidth=0, relief="flat", padding=(8, 5),
+                     borderwidth=0, relief="flat", padding=(px(8), px(5)),
                      font=self.f_base)
         self._map("Link.TButton",
                background=[("active", c["accent_light"]), ("pressed", c["accent_light"])],
@@ -569,7 +726,7 @@ class Theme:
 
         self._cfg("CardLink.TButton", background=c["surface"],
                      foreground=c["accent"], borderwidth=0, relief="flat",
-                     padding=(8, 5))
+                     padding=(px(8), px(5)))
         self._map("CardLink.TButton",
                background=[("active", c["accent_light"])],
                foreground=[("active", c["accent_dark"])])
@@ -578,24 +735,24 @@ class Theme:
         # Vald flik får vit botten och en kraftig accentkant upptill, så
         # den läses ihop med kortytan under.
         self._cfg("TNotebook", background=c["bg"], borderwidth=0,
-                     tabmargins=(2, 4, 2, 0))
+                     tabmargins=(px(2), px(4), px(2), 0))
         self._cfg("TNotebook.Tab", background=c["bg"],
-                     foreground=c["text_muted"], padding=(12, 8),
+                     foreground=c["text_muted"], padding=(px(12), px(8)),
                      font=self.f_base, borderwidth=0)
         self._map("TNotebook.Tab",
                background=[("selected", c["surface"]), ("active", c["accent_light"])],
                foreground=[("selected", c["accent_dark"]), ("active", c["text"])],
                font=[("selected", self.f_bold)],
-               expand=[("selected", (0, 3, 0, 0))])
+               expand=[("selected", (0, px(3), 0, 0))])
 
         # -- tabeller -----------------------------------------------------
         self._cfg("Treeview", background=c["surface"],
                      fieldbackground=c["surface"], foreground=c["text"],
-                     rowheight=32, borderwidth=0, relief="flat",
+                     rowheight=row_h, borderwidth=0, relief="flat",
                      font=self.f_base)
         self._cfg("Treeview.Heading", background=c["header_bg"],
                      foreground=c["text_muted"], relief="flat",
-                     padding=(10, 9), font=self.f_small, borderwidth=0)
+                     padding=(px(10), px(8)), font=self.f_small, borderwidth=0)
         self._map("Treeview.Heading",
                background=[("active", c["accent_light"])],
                foreground=[("active", c["accent_dark"])])
@@ -609,7 +766,7 @@ class Theme:
             self._cfg(cls, fieldbackground=c["surface"],
                          background=c["surface"], foreground=c["text"],
                          bordercolor=c["border_strong"], borderwidth=1,
-                         relief="solid", padding=(9, 7),
+                         relief="solid", padding=(px(9), px(7)),
                          arrowcolor=c["text_muted"], insertcolor=c["text"],
                          selectbackground=c["accent_light"],
                          selectforeground=c["accent_dark"])
@@ -639,9 +796,10 @@ class Theme:
         # ljus ruta - sätts båda till samma ton försvinner krysset helt.
         for cls in ("TCheckbutton", "TRadiobutton"):
             self._cfg(cls, background=c["bg"], foreground=c["text"],
-                         focusthickness=0, padding=(3, 5),
+                         focusthickness=0, padding=(px(3), px(5)),
                          indicatorforeground=c["accent_dark"],
-                         indicatorrelief="solid", indicatormargin=(0, 0, 7, 0),
+                         indicatorrelief="solid",
+                         indicatormargin=(0, 0, px(7), 0),
                          bordercolor=c["border_strong"])
             self._map(cls,
                    background=[("active", c["bg"])],
@@ -667,24 +825,26 @@ class Theme:
                                    ("!selected", c["surface"])])
 
         # -- rullningslister ----------------------------------------------
+        sb_w = max(12, px(14))
         for orient in ("Vertical", "Horizontal"):
             self._cfg(f"{orient}.TScrollbar", background=c["border"],
                          troughcolor=c["bg"], bordercolor=c["bg"],
                          arrowcolor=c["text_muted"], relief="flat",
-                         width=13, arrowsize=13)
+                         width=sb_w, arrowsize=sb_w)
             self._map(f"{orient}.TScrollbar",
                    background=[("pressed", c["accent"]),
                                ("active", c["border_strong"])])
 
         self._cfg("TProgressbar", background=c["accent"],
                      troughcolor=c["surface_sunk"], bordercolor=c["surface_sunk"],
-                     lightcolor=c["accent"], darkcolor=c["accent"], thickness=6)
+                     lightcolor=c["accent"], darkcolor=c["accent"],
+                     thickness=max(5, px(7)))
 
         # -- statusrad -----------------------------------------------------
         self._cfg("Status.TFrame", background=c["header_bg"])
         self._cfg("Status.TLabel", background=c["header_bg"],
                      foreground=c["text_muted"], font=self.f_small,
-                     padding=(12, 7))
+                     padding=(px(12), px(7)))
 
     # ======================================================================
     # Byggstenar
@@ -705,7 +865,7 @@ class Theme:
         holder.rowconfigure(1, weight=1)
         if title:
             head = ttk.Frame(holder, style="TFrame")
-            head.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+            head.grid(row=0, column=0, sticky="ew", pady=(0, self.px(5)))
             ttk.Label(head, text=title.upper(), style="Section.TLabel"
                       ).pack(side="left")
             if subtitle:
@@ -743,13 +903,16 @@ class Theme:
             cell_font = tkfont.Font(font=self.f_base)
         except Exception:
             head_font = cell_font = None
+        head_pad = self.px(36)
+        cell_pad = self.px(26)
         for col, txt, sample, anchor, stretch in spec:
             tree.heading(col, text=txt)
             if head_font is not None:
-                head_w = head_font.measure(txt) + 34
-                cell_w = cell_font.measure("x" * sample) + 24
+                head_w = head_font.measure(txt) + head_pad
+                cell_w = cell_font.measure("x" * sample) + cell_pad
             else:
-                head_w, cell_w = len(txt) * 9 + 34, sample * 9
+                char_w = max(8, self.px(9))
+                head_w, cell_w = len(txt) * char_w + head_pad, sample * char_w
             need = max(head_w, cell_w)
             # Rubriken måste alltid rymmas, annars står det "TRÄFFAF".
             # Innehållet får däremot krympa i en kolumn som sträcker sig.

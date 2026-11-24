@@ -295,6 +295,10 @@ class Extraction:
     #: Alla datum som hittades, med etikett. Används i förklaringsrutan
     #: och vid felsökning - man ska kunna se vad som fanns att välja på.
     date_candidates: List[Tuple[date, str]] = field(default_factory=list)
+    _combined_cache_key: Optional[Tuple[str, int, str]] = field(
+        default=None, init=False, repr=False, compare=False)
+    _combined_cache_val: str = field(
+        default="", init=False, repr=False, compare=False)
 
     @property
     def combined(self) -> str:
@@ -305,6 +309,9 @@ class Extraction:
         brevhuvud, och en fil som hette "offert_101.pdf" fick analysen att
         tro att dokumentet började med ordet "offert".
         """
+        key = (self.text, len(self.metadata), self.filename_text)
+        if self._combined_cache_key == key:
+            return self._combined_cache_val
         # Radbrytning mellan fälten, inte mellanslag. Med mellanslag flyter
         # titelns sista ord ihop med författarens första, och regexen för
         # firmanamn hittar "Pilkington Pilkington Sverige AB" - ett namn
@@ -315,7 +322,10 @@ class Extraction:
         meta = "\n".join(str(v) for k, v in self.metadata.items()
                          if v and not k.startswith("_")
                          and normalize(str(v)) not in norm)
-        return "\n".join(p for p in (self.text, meta, self.filename_text) if p)
+        val = "\n".join(p for p in (self.text, meta, self.filename_text) if p)
+        self._combined_cache_key = key
+        self._combined_cache_val = val
+        return val
 
     @property
     def document_breaks(self) -> List[int]:
@@ -714,7 +724,15 @@ def _render_pages(path: Path, max_pages: int, dpi: int = 200) -> List[Any]:
                 zoom = _bounded_render_zoom(page.rect, requested_zoom)
                 pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
                                       alpha=False)
-                images.append(Image.open(io.BytesIO(pix.tobytes("png"))))
+                # Bygg PIL-bilden direkt ur pixmapens RGB-buffert utan att
+                # koda/avkoda PNG-bytes i onödan (snabbare & mindre minne).
+                samples = getattr(pix, "samples", None)
+                if samples is not None and getattr(pix, "n", 0) == 3:
+                    im = Image.frombytes("RGB", (pix.width, pix.height), samples)
+                else:
+                    im = Image.open(io.BytesIO(pix.tobytes("png")))
+                images.append(im)
+                del pix
         return images
     exe = shutil.which("pdftoppm")
     if exe:
@@ -1052,9 +1070,11 @@ def _run_ocr_detailed(path: Path, max_pages: int, language: str,
 
     def ocr_one(img):
         """En sida, flera konfigurationer, bästa konfidens vinner (REQ-N5):
-        psm 3 på den förbehandlade gråbilden, och på "high" dessutom psm 6
-        på en Otsu-binariserad kopia - bleka skanningar får skarpare kanter
-        för LSTM:n."""
+        psm 3 körs först; när sidan redan är skarp (>=88 % konfidens och
+        minst 120 tecken) slipper vi köra tunga reservpass och sparar
+        både tid, CPU och batteri. På bleka/brusiga sidor körs Otsu-
+        binarisering (psm 6), kolumnläge (psm 4/11) och vid behov 1,5×
+        uppskalning."""
         skapade = [img]
         try:
             oriented, rotation = _orient(img)
@@ -1064,36 +1084,46 @@ def _run_ocr_detailed(path: Path, max_pages: int, language: str,
             # transformationer gäller bara renderad OCR-bild, aldrig PDF:en.
             pre = _preprocess(oriented, quality, do_deskew=True)
             skapade.append(pre)
-            passes = [(pre, "--oem 1 --psm 3")]
-            if quality == "high":
+
+            def _score_pass(raw_score: float, txt: str) -> float:
+                return raw_score + min(len(txt), 2000) * 0.01
+
+            raw1, text1 = _ocr_pass(pre, langs, "--oem 1 --psm 3", pytesseract)
+            best_text = text1
+            best_score = _score_pass(raw1, text1)
+
+            # Snabbt uthopp för rena sidor: undviker 4 extra tesseract-processer
+            # och stor 1,5×-kopia när första passet redan läste skarpt.
+            if quality == "high" and not (
+                    raw1 >= 88.0 and len(text1.strip()) >= 120):
                 bin_ = _binarize(pre)
                 skapade.append(bin_)
-                passes.append((bin_, "--oem 1 --psm 6"))
-                # Extra pass 2026-10-15 (bättre avläsning): psm 4 antar
-                # en enda textkolumn med varierande innehåll - fångar
-                # skanningar som psm 3/6 delar upp fel.
-                passes.append((pre, "--oem 1 --psm 4"))
-                # PSM 11 hittar fristående etiketter och text kring tabeller/
-                # diagram bättre än vanliga löptextlägen.
-                passes.append((pre, "--oem 1 --psm 11"))
-                # Extra avläsningspass på 1,5× uppskalad bild: liten och
-                # blek text som annars försvinner (bättre avläsning).
-                try:
-                    from PIL import Image as _PIL
-                    big = pre.resize((int(pre.width * 1.5),
-                                      int(pre.height * 1.5)), _PIL.LANCZOS)
-                    skapade.append(big)
-                    passes.append((big, "--oem 1 --psm 3"))
-                except Exception:
-                    pass
-            best_text, best_score = "", -1.0
-            for pim, pcfg in passes:
-                score, text = _ocr_pass(pim, langs, pcfg, pytesseract)
-                # Längden bryter lika: mer text är bättre än ingen, men
-                # konfidens går alltid först.
-                komb = score + min(len(text), 2000) * 0.01
-                if komb > best_score:
-                    best_score, best_text = komb, text
+                extra_passes = [
+                    (bin_, "--oem 1 --psm 6"),
+                    (pre, "--oem 1 --psm 4"),
+                    (pre, "--oem 1 --psm 11"),
+                ]
+                best_raw = raw1
+                for pim, pcfg in extra_passes:
+                    score, text = _ocr_pass(pim, langs, pcfg, pytesseract)
+                    komb = _score_pass(score, text)
+                    if komb > best_score:
+                        best_score, best_text, best_raw = komb, text, score
+                # Sista reserv: 1,5× uppskalad kopia bara om sidan fortfarande
+                # är blek/svårläst (<82 % eller <80 tecken).
+                if best_raw < 82.0 or len(best_text.strip()) < 80:
+                    try:
+                        from PIL import Image as _PIL
+                        big = pre.resize((int(pre.width * 1.5),
+                                          int(pre.height * 1.5)), _PIL.LANCZOS)
+                        skapade.append(big)
+                        score, text = _ocr_pass(
+                            big, langs, "--oem 1 --psm 3", pytesseract)
+                        komb = _score_pass(score, text)
+                        if komb > best_score:
+                            best_score, best_text = komb, text
+                    except Exception:
+                        pass
             return best_text, best_score, rotation
         except Exception:
             return "", -1.0, 0
@@ -1113,13 +1143,14 @@ def _run_ocr_detailed(path: Path, max_pages: int, language: str,
             max_workers=workers, thread_name_prefix="pdfsorter-ocr") as pool:
         futs = [pool.submit(ocr_one, im) for im in images]
         results: List[Tuple[str, float, int]] = []
-        for f in futs:
+        for idx, f in enumerate(futs):
             # 90 s per sida: en patologisk skanning får aldrig hänga appen.
             try:
                 txt, sc, rotation = f.result(timeout=90)
             except Exception:
                 txt, sc, rotation = "", -1.0, 0
                 f.cancel()
+            images[idx] = None
             results.append((txt, sc, rotation))
     texts = [row[0] for row in results]
     confs = [row[1] for row in results if row[0] and row[1] > 0]
