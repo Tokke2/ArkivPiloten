@@ -77,7 +77,7 @@ __all__ = [
 ]
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.14"
+APP_VERSION = "1.4.15"
 
 def _mod_versions_line() -> str:
     """Versioner för alla fem modulerna (felsökning/support)."""
@@ -3513,6 +3513,66 @@ def _current_build_signature() -> str:
     return hasher.hexdigest()[:16]
 
 
+def _prior_logged_version(logs_dir: Path) -> str:
+    """Läs senast loggade appversion från äldre start/sessionsloggar om annan än nu."""
+    pat_start = re.compile(rf"{re.escape(APP_NAME)}\s+(\d+\.\d+\.\d+)\s+\|")
+    start_log = logs_dir / "startare.log"
+    if start_log.is_file():
+        try:
+            text = start_log.read_text(encoding="utf-8", errors="ignore")
+            matches = pat_start.findall(text[-65536:])
+            for ver in reversed(matches):
+                if ver != APP_VERSION:
+                    return ver
+        except OSError:
+            pass
+    pat_sess = re.compile(rf"{re.escape(APP_NAME)}\s+(\d+\.\d+\.\d+)\s+-\s+sessionslogg")
+    try:
+        candidates = sorted(
+            (p for p in logs_dir.rglob("app_*.log")
+             if p.is_file() and "arkiv" not in p.parts),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        candidates = []
+    for path in candidates[:5]:
+        try:
+            if _SESSION_PATH is not None and path.resolve() == _SESSION_PATH.resolve():
+                continue
+            head = path.read_text(encoding="utf-8", errors="ignore")[:2048]
+            m = pat_sess.search(head)
+            if m and m.group(1) != APP_VERSION:
+                return m.group(1)
+        except OSError:
+            continue
+    return ""
+
+
+def _archive_pre_update_runtime_logs(logs_dir: Path) -> int:
+    """Arkivera föregående bygges startare.log/krasch.log direkt efter uppdatering."""
+    moved = 0
+    stderr_path = getattr(sys.stderr, "path", None)
+    stderr_open = getattr(sys.stderr, "_fh", None) is not None
+    for name in ("startare.log", "krasch.log"):
+        fil = logs_dir / name
+        if not fil.is_file():
+            continue
+        try:
+            if _SESSION_PATH is not None and fil.resolve() == _SESSION_PATH.resolve():
+                continue
+            if stderr_open and stderr_path is not None and fil.resolve() == Path(stderr_path).resolve():
+                continue
+            loggdatum = _dt.fromtimestamp(fil.stat().st_mtime).date()
+            dest = logs_dir / "arkiv" / f"{loggdatum:%Y}" / f"{loggdatum:%m}"
+            arc_name = f"{fil.stem}_{loggdatum:%Y%m%d}{fil.suffix}.gz"
+            if _gzip_archive_file(fil, dest, arc_name):
+                moved += 1
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+    return moved
+
+
 def auto_resolve_on_build_change() -> List[str]:
     """Rensa automatiskt gamla fel när ett nytt bygge/uppdatering körs.
 
@@ -3525,24 +3585,31 @@ def auto_resolve_on_build_change() -> List[str]:
     state_file = mapp / ".build_state.json"
     curr_sig = _current_build_signature()
     prev_sig = ""
+    prev_ver = ""
     had_state = False
     if state_file.is_file():
         had_state = True
         try:
             data = json.loads(state_file.read_text(encoding="utf-8"))
             prev_sig = str(data.get("signature", ""))
+            prev_ver = str(data.get("version", ""))
         except Exception:
             prev_sig = ""
+            prev_ver = ""
 
     klara: List[str] = []
-    if had_state and prev_sig and prev_sig != curr_sig:
+    build_changed = False
+    if had_state and ((prev_sig and prev_sig != curr_sig)
+                      or (prev_ver and prev_ver != APP_VERSION)):
+        build_changed = True
         for post in list_error_codes():
             if post.get("status") == "ÖPPEN" and mark_error_code_resolved(
                     post["kod"], f"Automatiskt: nytt appbygge ({APP_VERSION})"):
                 klara.append(post["kod"])
     elif not had_state:
         # Första starten med byggstämpel: om det finns en nylig uppdateringsmarkör
-        # i samma appdatamapp, rensa fel som loggades före uppdateringen.
+        # i samma appdatamapp, eller spår av en tidigare appversion i loggarna,
+        # rensa fel som hör till den gamla versionen.
         try:
             if mapp.parent == config_dir():
                 upd_file = config_dir() / "updates" / "last_update.json"
@@ -3550,6 +3617,7 @@ def auto_resolve_on_build_change() -> List[str]:
                     upd = json.loads(upd_file.read_text(encoding="utf-8"))
                     upd_ts = _felkod_tid(str(upd.get("time", "")))
                     if upd_ts is not None:
+                        build_changed = True
                         for post in list_error_codes():
                             if post.get("status") != "ÖPPEN":
                                 continue
@@ -3561,6 +3629,20 @@ def auto_resolve_on_build_change() -> List[str]:
                                     klara.append(post["kod"])
         except Exception:
             pass
+        prev_logged = _prior_logged_version(mapp)
+        if prev_logged:
+            build_changed = True
+            for post in list_error_codes():
+                if post.get("status") == "ÖPPEN" and mark_error_code_resolved(
+                        post["kod"],
+                        f"Automatiskt: uppgraderad från {prev_logged} till {APP_VERSION}"):
+                    klara.append(post["kod"])
+
+    if build_changed:
+        archived_runtime = _archive_pre_update_runtime_logs(mapp)
+        if archived_runtime:
+            session_log("logg", f"Arkiverade {archived_runtime} äldre start/kraschlogg(ar) "
+                        f"efter uppdatering till {APP_VERSION}")
 
     if klara:
         session_log("logg", f"Automatiskt åtgärdade {len(klara)} felkod(er) "

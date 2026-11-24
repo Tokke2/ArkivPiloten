@@ -82,6 +82,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import warnings
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta  # noqa: F401
@@ -99,7 +100,7 @@ except Exception:                     # pragma: no cover - trasig installation
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.4.14"
+APP_VERSION = "1.4.15"
 COPYRIGHT_NOTICE = "© 2026 Rickard Längkvist"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
@@ -4958,8 +4959,12 @@ def deskew_pdf_copy(source: Path, destination: Path,
                     page_scale = _bounded_render_zoom(page.rect, scale)
                     pix = page.get_pixmap(
                         matrix=fitz.Matrix(page_scale, page_scale), alpha=False)
-                    with Image.open(io.BytesIO(pix.tobytes("png"))) as opened:
-                        image = opened.convert("RGB")
+                    with warnings.catch_warnings():
+                        bomb_w = getattr(Image, "DecompressionBombWarning", None)
+                        if bomb_w is not None:
+                            warnings.simplefilter("ignore", bomb_w)
+                        with Image.open(io.BytesIO(pix.tobytes("png"))) as opened:
+                            image = opened.convert("RGB")
                     correction = (angle if angle is not None else
                                  float(_deskew_angle(image, max_angle=5.0, steps=11)))
                     correction = max(-15.0, min(15.0, correction))
@@ -6395,7 +6400,14 @@ class ReviewDialog:
         self.win.after_idle(layout_review_columns)
         # Every file starts with its filename/status visible at the top, even
         # if the canvas scrollregion changed while the columns were settling.
-        self.win.after(30, lambda: self._outer.yview_moveto(0))
+        def scroll_to_top():
+            try:
+                if self.win.winfo_exists():
+                    self._outer.yview_moveto(0)
+            except Exception:
+                pass
+
+        self.win.after(30, scroll_to_top)
 
         # -- knappar (ligger utanför rullytan, alltid synliga) -------------
         btns = ttk.Frame(self.win)
@@ -6719,11 +6731,15 @@ class ReviewDialog:
                             matrix=pymupdf.Matrix(preview_zoom, preview_zoom),
                             alpha=False)
                         samples = getattr(pix, "samples", None)
-                        if samples is not None and getattr(pix, "n", 0) == 3:
-                            im = _PILImage.frombytes(
-                                "RGB", (pix.width, pix.height), samples)
-                        else:
-                            im = _PILImage.open(_io.BytesIO(pix.tobytes("png")))
+                        with warnings.catch_warnings():
+                            bomb_w = getattr(_PILImage, "DecompressionBombWarning", None)
+                            if bomb_w is not None:
+                                warnings.simplefilter("ignore", bomb_w)
+                            if samples is not None and getattr(pix, "n", 0) == 3:
+                                im = _PILImage.frombytes(
+                                    "RGB", (pix.width, pix.height), samples)
+                            else:
+                                im = _PILImage.open(_io.BytesIO(pix.tobytes("png")))
                         bilder.append(im)
                         del pix
                         page_boxes: List[Tuple[float, float, float, float, str, str]] = []

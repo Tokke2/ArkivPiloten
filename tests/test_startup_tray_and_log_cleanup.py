@@ -546,8 +546,10 @@ def test_pyw_matches_launcher_constant_and_lazy_stderr_avoids_empty_file(tmp_pat
 
 
 def test_windows_batch_rechecks_packages_when_python_changes():
-    batch = (ROOT / "ArkivPiloten - Installera senaste Python och starta.bat"
-             ).read_text(encoding="utf-8")
+    raw = (ROOT / "ArkivPiloten - Installera senaste Python och starta.bat").read_bytes()
+    assert b"\n" in raw
+    assert raw.count(b"\r\n") == raw.count(b"\n")
+    batch = raw.decode("utf-8")
     assert 'if /i not "!SAVED_PY!"=="%PYEXE%" del /f /q "%PKGSTATE%"' in batch
     assert '> "%PKGSTATE%" echo %PYEXE%' in batch
 
@@ -574,4 +576,55 @@ def test_archive_old_logs_skips_locked_and_vanished_files_without_warnings(tmp_p
     assert S.archive_old_logs(1) == 0
     assert locked.exists()
     assert warnings == []
+
+
+def test_upgrade_from_pre_build_state_install_resolves_errors_and_archives_startare_log(
+        tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True)
+    monkeypatch.setattr(D._State, "seen", {}, raising=False)
+    monkeypatch.setattr(S, "session_dir", lambda: logs)
+    monkeypatch.setattr(S, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr(S, "_SESSION_FH", None)
+    monkeypatch.setattr(S, "migrate_legacy_logs", lambda: None)
+
+    (logs / "startare.log").write_text(
+        "ArkivPiloten 1.4.14 | Python 3.14.10 | Windows-11\n"
+        "TypeError: _bind_responsive_wrap() got an unexpected keyword argument 'reserve'\n",
+        encoding="utf-8",
+    )
+    S.session_log("ui", "TypeError: old 1.4.14 crash", level="err")
+    assert "old 1.4.14 crash" in (logs / "fel-samlat.log").read_text(encoding="utf-8")
+
+    try:
+        assert S.start_session() is not None
+    finally:
+        S.close_session()
+
+    assert not (logs / "startare.log").exists()
+    archived = list((logs / "arkiv").rglob("startare_*.log.gz"))
+    assert len(archived) == 1
+    assert "old 1.4.14 crash" not in (logs / "fel-samlat.log").read_text(encoding="utf-8")
+    kvar = (logs / "felkoder.log").read_text(encoding="utf-8")
+    assert "[ÖPPEN]" not in kvar
+    assert "uppgraderad från 1.4.14" in kvar
+
+
+def test_process_queue_impl_skips_destroyed_root_and_tcl_error():
+    class FakeTclError(Exception):
+        pass
+
+    class FakeTk:
+        TclError = FakeTclError
+
+    class DeadRoot:
+        def winfo_exists(self):
+            return False
+
+    app = object.__new__(P.App)
+    app.tk = FakeTk
+    app._closing = False
+    app.queue = [object()]
+    app.root = DeadRoot()
+    P.App._process_queue_impl(app, 0)
 

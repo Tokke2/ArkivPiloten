@@ -4,8 +4,8 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.4.14 — after 100 manual confirmations, two category-exclusive exact saved support-word matches can move a file automatically.**
-**PDF Sorter 1.4.14 — efter 100 manuella bekräftelser krävs två exakta sparade stödord som bara finns i en kategori för automatflytt.**
+**PDF Sorter 1.4.15 — after 100 manual confirmations, two category-exclusive exact saved support-word matches can move a file automatically.**
+**PDF Sorter 1.4.15 — efter 100 manuella bekräftelser krävs två exakta sparade stödord som bara finns i en kategori för automatflytt.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
@@ -397,7 +397,7 @@ Hittat en bugg? Kör `python pdfsorter.py --ai-rapport` (eller *Kopiera AI-rappo
 
 <div align="center">
 
-**ArkivPiloten 1.4.14** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
+**ArkivPiloten 1.4.15** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
 
 [🇬🇧 Back to English ↑](#english) · [🇸🇪 Tillbaka till Svenska ↑](#svenska) · [❤️ Donate / Donera ↑](#support)
 

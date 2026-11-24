@@ -44,6 +44,7 @@ Saknas filen kan pdfsorter.py inte läsa PDF alls, och säger till om det.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import io
 import json
 import logging
@@ -56,6 +57,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
@@ -63,7 +65,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 #: Programmets version. Höjs vid varje leverans.
-VERSION = "1.4.14"
+VERSION = "1.4.15"
 EXTRACTION_CACHE_SCHEMA = 3
 
 __all__ = [
@@ -220,6 +222,40 @@ def status_text() -> str:
     return f"PDF-motor: {engine}  |  OCR: {ocr}"
 
 
+def _configure_pdf_engine_loggers() -> None:
+    """Prevent PDF backend warnings from falling back to stderr via lastResort.
+
+    Attaching a NullHandler keeps ``propagate = True`` intact so
+    ``_PdfDiagnosticCapture`` on the root logger still captures and summarizes
+    every warning during ``extract()``, while background or helper calls outside
+    ``extract()`` never leak raw stderr spam into ``logs/startare.log``.
+    """
+    for name in ("pdfminer", "pypdf", "fitz", "pymupdf"):
+        lg = logging.getLogger(name)
+        if not lg.handlers:
+            lg.addHandler(logging.NullHandler())
+
+
+_configure_pdf_engine_loggers()
+
+
+@contextlib.contextmanager
+def _quiet_decompression_warning():
+    """Suppress Pillow's DecompressionBombWarning without disabling BombError."""
+    from PIL import Image
+    bomb_warning = getattr(Image, "DecompressionBombWarning", None)
+    with warnings.catch_warnings():
+        if bomb_warning is not None:
+            warnings.simplefilter("ignore", bomb_warning)
+        yield
+
+
+def _open_image_quiet(source):
+    from PIL import Image
+    with _quiet_decompression_warning():
+        return Image.open(source)
+
+
 class _PdfDiagnosticCapture(logging.Handler):
     """Collect and de-duplicate warnings from PDF engines during one read."""
 
@@ -245,6 +281,7 @@ class _PdfDiagnosticCapture(logging.Handler):
             return
 
     def __enter__(self):
+        _configure_pdf_engine_loggers()
         logging.getLogger().addHandler(self)
         return self
 
@@ -728,9 +765,10 @@ def _render_pages(path: Path, max_pages: int, dpi: int = 200) -> List[Any]:
                 # koda/avkoda PNG-bytes i onödan (snabbare & mindre minne).
                 samples = getattr(pix, "samples", None)
                 if samples is not None and getattr(pix, "n", 0) == 3:
-                    im = Image.frombytes("RGB", (pix.width, pix.height), samples)
+                    with _quiet_decompression_warning():
+                        im = Image.frombytes("RGB", (pix.width, pix.height), samples)
                 else:
-                    im = Image.open(io.BytesIO(pix.tobytes("png")))
+                    im = _open_image_quiet(io.BytesIO(pix.tobytes("png")))
                 images.append(im)
                 del pix
         return images
@@ -747,7 +785,7 @@ def _render_pages(path: Path, max_pages: int, dpi: int = 200) -> List[Any]:
             except subprocess.TimeoutExpired:
                 pass
             for png in sorted(Path(tmp).glob("page*.png")):
-                with Image.open(png) as im:
+                with _open_image_quiet(png) as im:
                     images.append(im.copy())
     return images
 
@@ -1196,7 +1234,6 @@ def header_images(path: Path) -> List[Any]:
     """
     if not has_pymupdf():
         return []
-    from PIL import Image
     pymupdf = _open_pymupdf()
     crops: List[Any] = []
     try:
@@ -1227,7 +1264,7 @@ def header_images(path: Path) -> List[Any]:
                 zoom = _bounded_render_zoom(clip, 4.0)
                 pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
                                       clip=clip, alpha=False)
-                crops.append(Image.open(io.BytesIO(pix.tobytes("png"))))
+                crops.append(_open_image_quiet(io.BytesIO(pix.tobytes("png"))))
     except Exception:
         return []
     return crops
@@ -1243,7 +1280,6 @@ def embedded_images(path: Path, max_images: int = 6,
     """
     if not has_pymupdf():
         return []
-    from PIL import Image
     pymupdf = _open_pymupdf()
     crops: List[Any] = []
     try:
@@ -1273,7 +1309,7 @@ def embedded_images(path: Path, max_images: int = 6,
                 zoom = _bounded_render_zoom(clip, 3.0)
                 pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
                                       clip=clip, alpha=False)
-                crops.append(Image.open(io.BytesIO(pix.tobytes("png"))))
+                crops.append(_open_image_quiet(io.BytesIO(pix.tobytes("png"))))
         return crops
     except Exception:
         return crops

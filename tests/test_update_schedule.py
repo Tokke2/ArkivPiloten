@@ -783,12 +783,12 @@ def test_up_to_date_dialog_shows_installed_build(monkeypatch):
 
     P.App._update_prompt(
         app,
-        {"ok": True, "available": False, "remote": "1.4.14",
+        {"ok": True, "available": False, "remote": P.APP_VERSION,
          "local_commit": "822b3a126faa5f818429729f72a21d93e538137f"},
         manual=True)
 
     assert len(app.messagebox.shown) == 1
-    assert "1.4.14" in app.messagebox.shown[0]
+    assert P.APP_VERSION in app.messagebox.shown[0]
     assert "Bygge: 822b3a126faa" in app.messagebox.shown[0]
 
 
@@ -796,7 +796,7 @@ def test_up_to_date_dialog_hides_build_when_unknown(monkeypatch):
     app = _prompt_app(monkeypatch)
 
     P.App._update_prompt(
-        app, {"ok": True, "available": False, "remote": "1.4.14",
+        app, {"ok": True, "available": False, "remote": P.APP_VERSION,
               "local_commit": ""},
         manual=True)
 
