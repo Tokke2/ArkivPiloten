@@ -1,0 +1,116 @@
+name: release
+
+# Uppdatera den befintliga GitHub-releasen vid varje kodpush, oavsett gren.
+# Versionen hämtas från appen och ändras inte av arbetsflödet: samma versions-
+# tagg behålls och dess paket skrivs över. Appens autouppdatering läser senaste.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # Alla grenar skriver över samma release - serialisera publiceringarna.
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build package + SHA256SUMS
+        run: python tools/build_release.py --out dist
+
+      - name: Publish or refresh the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Engångsuppgraderingen ska kunna hämtas med fast URL:
+          #   .../releases/latest/download/uppgradera-arkivpiloten.bat
+          cp tools/install_latest.py uppgradera-arkivpiloten.bat \
+             uppgradera-arkivpiloten.sh dist/
+          VERSION=$(python -c "import json;print(json.load(open('dist/release.json'))['version'])")
+          TAG="v$VERSION"
+
+          # Se till att releasen finns först - då finns även taggen, och
+          # även om en filuppladdning skulle strula kan appen falla
+          # tillbaka på tagg-arkivet med en publicerad kontrollsumma.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+              gh release create "$TAG" --title "ArkivPiloten $VERSION" \
+                --notes "" --latest
+            else
+              gh release create "$TAG" --title "ArkivPiloten $VERSION" \
+                --notes "" --target "$GITHUB_SHA" --latest
+            fi
+          fi
+
+          # Den fristående Python-installationsbatten ska inte ligga i releasen:
+          # installation erbjuds endast av plattformens ordinarie startfil.
+          if gh release view "$TAG" --json assets --jq '.assets[].name' | \
+              grep -Fxq 'Installera senaste Python.bat'; then
+            gh release delete-asset "$TAG" "Installera senaste Python.bat" --yes
+          fi
+
+          gh release upload "$TAG" dist/ArkivPiloten.zip dist/SHA256SUMS.txt \
+            dist/install_latest.py dist/uppgradera-arkivpiloten.bat \
+            dist/uppgradera-arkivpiloten.sh \
+            --clobber || echo "::warning::Kunde inte ladda upp release-filerna - tagg-arkivet används som reserv"
+
+          # Kontrollsumma för tagg-arkivet (reservvägen). GitHubs arkiv är
+          # stabila för en oförändrad tagg; ändras de avbryter appen
+          # uppdateringen i stället för att installera något overifierat.
+          TAG_SHA=$(curl -fsSL "https://codeload.github.com/${GITHUB_REPOSITORY}/zip/refs/tags/${TAG}" | sha256sum | cut -d' ' -f1)
+          PREV=$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)
+
+          {
+            echo "Paket byggt från \`${GITHUB_SHA::12}\` på \`${GITHUB_REF_NAME}\`."
+            echo
+            echo "Autouppdateringen verifierar paketet mot \`SHA256SUMS.txt\` innan något installeras."
+            echo
+            echo "### Uppdatering"
+            echo
+            echo "Från äldre versioner visas ArkivPiloten $VERSION som en vanlig versionsuppdatering. Efter installationen jämför uppdateraren både release-commit och filhashar, så även framtida innehållsuppdateringar hittas när versionsnumret är oförändrat."
+            echo
+            echo "<!-- ARKIVPILOTEN_BUILD_MANIFEST_BEGIN"
+            cat dist/BUILD-MANIFEST.json
+            echo "ARKIVPILOTEN_BUILD_MANIFEST_END -->"
+            echo
+            echo
+            if [ -n "$PREV" ]; then
+              echo "### Ändringar sedan $PREV"
+              echo
+              git log --pretty='- %s (%h)' "$PREV..$GITHUB_SHA" | head -40
+              echo
+            fi
+            echo "### Har du 1.0.0 eller 1.1.0?"
+            echo
+            echo "De versionerna letade uppdateringar i \`main\` i stället för här,"
+            echo "så de ser aldrig en release. Kör engångsuppgraderingen en gång:"
+            echo
+            echo "- Windows: ladda ner \`uppgradera-arkivpiloten.bat\` nedan och dubbelklicka"
+            echo "- macOS/Linux: \`bash uppgradera-arkivpiloten.sh\`"
+            echo
+            echo "Den hämtar senaste versionen, kontrollerar summan och byter bara"
+            echo "programfilerna. Regler, inställningar och historik rörs aldrig."
+            echo
+            echo "### Reserv om release-filerna inte kan hämtas"
+            echo
+            echo "SHA256 (ArkivPiloten-$VERSION.zip): $TAG_SHA"
+            echo
+            echo "Summan avser GitHubs tagg-arkiv för \`$TAG\`."
+          } > "$RUNNER_TEMP/notes.md"
+
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"

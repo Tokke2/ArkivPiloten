@@ -10,17 +10,20 @@ Windows - då syns ingen terminal alls).
 Vad den gör
 -----------
 Bevakar en eller flera inmappar, läser varje ny PDF och flyttar den till
-en undermapp i utmappen: allt om Pilkington -> Utmapp/Pilkington/.
-Undermappar skapas automatiskt.
+en undermapp i utmappen efter en exakt stödordsträff eller användarens val.
+Undermappar skapas automatiskt vid behov.
 
-Ett tydligt stödord räcker normalt för att avgöra vart filen hör. En
-kategori kan kräva fler - sätt "Kräver" under Matchningar om ett företag
-har ord som lätt ger falska träffar. Ett bevisat organisationsnummer
-räcker däremot alltid ensamt.
+Appen lär bara in stödord som användaren själv väljer och sparar. En fil
+flyttas automatiskt först efter hundra manuellt bekräftade filer i kategorin,
+och därefter endast när minst två olika sparade stödord som bara finns i den
+kategorin matchar exakt som helord/fras i PDF-texten och kategorin ligger först.
+Case och upprepade blanksteg normaliseras; stavning
+och skiljetecken inne i stödordet/frasen måste annars stämma. Inlärning, lösa poäng,
+OCR-brus, delord och flexibla ID-matchningar kan aldrig själva flytta filer.
 
-Är appen osäker visas en dialogruta med 10 föreslagna stödord ur just den
-filen. Du bockar i de ord som hör till rätt kategori. Därefter går filen -
-och alla framtida liknande filer - automatiskt.
+Alla andra filer visas i granskningsdialogen. Användaren väljer kategori,
+stödord och vid behov undermapp. Alla sparade stödord går att rensa med
+knappen på fliken Kategorier.
 
 Filer i projektet
 -----------------
@@ -75,13 +78,20 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import unicodedata
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta  # noqa: F401
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+try:
+    import pdfsorter_diag as diag
+except Exception:                     # pragma: no cover - trasig installation
+    diag = None                       # type: ignore[assignment]
 
 
 # ========================================================================
@@ -89,7 +99,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ========================================================================
 
 APP_NAME = "ArkivPiloten"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.4.14"
+COPYRIGHT_NOTICE = "© 2026 Rickard Längkvist"
 
 #: Höjs bara om formatet på JSON-filerna ändras på ett icke bakåtkompatibelt
 #: sätt. Läskoden tål okända fält, så tillägg kräver ingen höjning.
@@ -151,6 +162,7 @@ try:
         _RECIPIENT_MARKERS,
         _luhn_ok,
         _recipient_zone,
+        _deskew_angle,
         backend_status,
         extract,
         guess_category_name,
@@ -160,6 +172,8 @@ try:
         ocr_available,
         STOPWORDS,
         reading_health,
+        search_extracted_pages,
+        compare_extracted_pages,
         set_tesseract_path,
         status_text,
         suggest_keywords,
@@ -203,6 +217,22 @@ except ImportError:
         """Gammal läsmodul: OCR-brustoleransen är avstängd."""
         return text
 
+try:
+    from pdfsorter_read import _bounded_render_zoom
+except ImportError:
+    def _bounded_render_zoom(rect: Any, requested_zoom: float) -> float:
+        """Fallback for an older companion reader module."""
+        try:
+            width = abs(float(rect.width))
+            height = abs(float(rect.height))
+            zoom = max(0.01, float(requested_zoom))
+            if width <= 0 or height <= 0:
+                return zoom
+            return min(zoom, 5200 / max(width, height),
+                       math.sqrt(24_000_000 / (width * height)))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return 1.0
+
 
 # ==========================================================================
 # DEL 2 - LAGRING OCH FILFLYTT
@@ -224,12 +254,14 @@ try:
         _write_json,
         append_history,
         config_dir,
+        config_dir_mode,
         InstanceLock,
         consume_show_request,
         history_path,
         flush_history,
         compact_history_if_large,
         is_ignored_file,
+        is_file_locked,
         json_dir,
         migrate_to_portable,
         list_ignored_files,
@@ -238,6 +270,7 @@ try:
         mark_ignored_file,
         request_show,
         load_settings,
+        migrate_review_preview_setting,
         now_iso,
         place_file,
         render_subfolder,
@@ -297,32 +330,38 @@ STRONG_LABELS = {
 #: veta vilken typ de hade när de sparades.
 _STRONG_PATTERNS = (
     # Blanksteg tillåts: "556033 9086" förekommer i sidfötter och OCR-text.
-    ("orgnr", re.compile(r"^\d{6}[-\u2013 ]?\d{4}$")),
+    # Även "·" och "•" räknas som avskiljare: en del typsnitt och OCR ger
+    # dem i stället för bindestreck ("556033·9086").
+    ("orgnr", re.compile(r"^\d{6}[-\u2013\u00b7\u2022 ]?\d{4}$")),
     ("vat", re.compile(r"^[a-z]{2}\d{9,12}$")),
-    ("giro", re.compile(r"^\d{3,4}-\d{4}$")),
-    ("domain", re.compile(r"^[\w-]+\.[\w.-]{2,}$")),
-    # Projekt- och objektkoder: IF26, AB-1200, K4711, 24:118.
+    ("giro", re.compile(r"^\d{3,4}[-\u2013\u00b7\u2022]?\d{4}$")),
+    # Domän: sista delen måste vara en riktig toppdomän av bokstäver.
+    # Tidigare räckte "\w", vilket gjorde "24.10.2025", "1.234" och
+    # "v1.4.4" till starka bevis - datum och versionsnummer är precis
+    # motsatsen till ett unikt kännetecken.
+    ("domain", re.compile(
+        r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$")),
+    # Projekt- och objektkoder: IF26, AB-1200, K4711.
     # Bokstäver OCH siffror i samma korta ord är ingen slump - ingen
-    # skriver "IF26" i förbigående. Sådana koder är hela poängen med
-    # att sortera på projekt, så de måste räknas som ett unikt
-    # kännetecken även när de bara står mitt i löptexten.
-    ("kod", re.compile(r"^(?=.{3,12}$)(?=.*\d)[a-z0-9]+(?:[-:/][a-z0-9]+)*$")),
+    # skriver "IF26" i förbigående. Ett rent årtal ("2025"), ett datum
+    # ("2024-01") eller ett belopp är däremot vardagsmat och får aldrig
+    # räknas som ett starkt bevis: det kringgår poängtröskel, antal
+    # stödord och textlängd i _auto_blocker.
+    ("kod", re.compile(
+        r"^(?=.{3,12}$)(?=.*\d)(?=.*[a-z])[a-z0-9]+(?:[-:/][a-z0-9]+)*$")),
 )
 
 
 def _strength_of(t: str) -> str:
     for kind, pat in _STRONG_PATTERNS:
         if pat.match(t):
-            siffror = t.replace("-", "").replace("–", "")
             # Org.nr ska ha giltig kontrollsiffra för att räknas. Ett
             # tiosiffrigt nummer med fel checksiffra är ett kundnummer,
-            # inte ett organisationsnummer - och inte heller en projektkod:
-            # det ska hamna hos referensnumren, inte räknas som starkt
-            # (REQ-C1 AC-1.2).
-            if kind == "orgnr" and not _luhn_ok(siffror):
-                continue
-            if kind == "kod" and re.fullmatch(r"\d{6}[-– ]?\d{4}", t) \
-                    and not _luhn_ok(siffror):
+            # inte ett organisationsnummer (REQ-C1 AC-1.2) - och det är
+            # ingen projektkod heller, eftersom koder måste innehålla
+            # minst en bokstav.
+            if kind == "orgnr" and not _luhn_ok(
+                    t.replace("-", "").replace("–", "")):
                 continue
             return kind
     return ""
@@ -332,8 +371,8 @@ def keyword_strength(text: str) -> str:
     """Vilken sorts bevis är det här stödordet?
 
     Returnerar "orgnr", "vat", "giro", "domain", "kod" eller "" för vanliga
-    ord. Används av den strikta sorteringen, som kan kräva att minst ett
-    riktigt starkt bevis finns innan en fil flyttas automatiskt.
+    ord. Används för rangordning och för att känna igen identifierare; det
+    här styr inte automatflytt, som kräver en separat exakt stödordsträff.
 
     OCR-tolerant (REQ-N6): matchar inte originaltexten prövas även en
     avbrusad kopia, så att "556O33-9O86" ur en skanning ändå räknas som
@@ -349,6 +388,78 @@ def keyword_strength(text: str) -> str:
     return _strength_of(t) or (_strength_of(d) if d != t else "")
 
 
+#: Skiljetecken som får skilja delarna i en identifierare. Samma nummer
+#: skrivs "556033-9086", "556033 9086", "556033–9086" eller "5560339086"
+#: beroende på avsändare, typsnitt och OCR - och en del typsnitt/OCR ger
+#: "·" eller "•" i stället för bindestreck. Alla ska matcha samma regel.
+_ID_SEP_CHARS = ("-\u2010\u2011\u2012\u2013\u2014\u2212"
+                 "\u00b7\u2022\u00a0:/ .")
+_ID_SEP_CLASS = "[" + re.escape(_ID_SEP_CHARS) + "]"
+_ID_SEP_RE = re.compile(_ID_SEP_CLASS + "+")
+
+#: Memo: text -> är stödordet en flexibel identifierare? (Dyr att räkna
+#: ut per dokument, svaret beror bara på texten.)
+_FLEX_CACHE: Dict[str, bool] = {}
+
+
+def _id_groups(text: str) -> List[str]:
+    """Dela en identifierare i sina delar, oberoende av skrivsätt.
+
+    "556033-9086", "556033 9086" och "556033–9086" ger alla
+    ["556033", "9086"]. Ett tiosiffrigt org.nr utan skiljetecken delas i
+    6+4 när kontrollsiffran stämmer, och ett VAT-nummer i SE + 6 + 4 + 2.
+    """
+    parts = [p for p in _ID_SEP_RE.split(normalize(text)) if p]
+    if len(parts) == 1:
+        p = parts[0]
+        if p.isdigit() and len(p) == 10 and _luhn_ok(p):
+            return [p[:6], p[6:]]
+        m = re.fullmatch(r"se(\d{12})", p)
+        if m:
+            d = m.group(1)
+            return ["se", d[:6], d[6:10], d[10:]]
+    return parts
+
+
+def _flexible_id_pattern(text: str) -> Optional[re.Pattern]:
+    """Mönster som matchar samma identifierare oavsett skiljetecken.
+
+    Returnerar None för vanliga ord och för ensamma delar - då gäller den
+    exakta ordgränsen som förut.
+    """
+    parts = _id_groups(text)
+    if not 2 <= len(parts) <= 6:
+        return None
+    if not all(re.fullmatch(r"[a-z0-9]+", p) for p in parts):
+        return None
+    # Bara identifierare som faktiskt är nummer: varje del utom en möjlig
+    # landsprefix i början måste innehålla en siffra. Då blir "556033-9086"
+    # flexibel, medan "pilkington.se" inte kan matcha "Pilkington se
+    # bilaga" - en domän ska ha sin punkt.
+    if not all(any(ch.isdigit() for ch in p) for p in parts[1:]):
+        return None
+    if not any(ch.isdigit() for ch in parts[0]):
+        if not (len(parts) >= 3
+                and re.fullmatch(r"se|no|dk|fi", parts[0])):
+            return None
+    core = _ID_SEP_CLASS + "*"
+    core = core.join(re.escape(p) for p in parts)
+    return re.compile(r"(?<![0-9a-z])" + core + r"(?![0-9a-z])")
+
+
+def _is_flexible(text: str) -> bool:
+    """Sant om stödordet är en stark identifierare med flera delar."""
+    key = str(text or "")
+    v = _FLEX_CACHE.get(key)
+    if v is None:
+        v = bool(keyword_strength(key)) and \
+            _flexible_id_pattern(key) is not None
+        if len(_FLEX_CACHE) > 4000:      # minnestak, som mönstercachen
+            _FLEX_CACHE.clear()
+        _FLEX_CACHE[key] = v
+    return v
+
+
 @dataclass
 class CategoryScore:
     name: str
@@ -359,6 +470,9 @@ class CategoryScore:
     #: Flersidig matchning: stödord som upprepas på flera sidor, med
     #: sidantal - "pilkington ×4 sidor". Starkt avsändarbevis.
     multipage: List[str] = field(default_factory=list)
+    #: Rankningsbonus från en säker lärd klassificerare. Påverkar bara
+    #: ordningen och marginalen - aldrig beviskraven i _auto_blocker.
+    bonus: float = 0.0
 
     def zone_of(self, word: str) -> str:
         return self.zones.get(word, "body")
@@ -413,6 +527,8 @@ class Decision:
     #: N14: lärd klassificerares förslag (kategori, antal liknande filer);
     #: visas i granskningsrutan när reglerna inte räcker till.
     learned_hint: Optional[Tuple[str, int]] = None
+    #: Möjlig dubblettfaktura; endast en granskningsvarning, aldrig en åtgärd.
+    invoice_duplicate: Optional[Dict[str, Any]] = None
 
     @property
     def best(self) -> Optional[CategoryScore]:
@@ -421,6 +537,144 @@ class Decision:
     @property
     def runner_up(self) -> Optional[CategoryScore]:
         return self.scores[1] if len(self.scores) > 1 else None
+
+
+def category_explanation(score: Optional[CategoryScore],
+                         learned_hint: Optional[Tuple[str, int]] = None) -> str:
+    if score is None:
+        return ""
+    labels = {
+        "sender": "avsändarblocket", "header": "brevhuvudet",
+        "identity": "avsändarens identifierare", "pagehead": "sidhuvudet",
+        "pagefoot": "sidfoten", "filename": "filnamnet",
+        "recipient": "mottagarblocket", "body": "brödtexten",
+    }
+    grouped: Dict[str, List[str]] = {}
+    for word in score.matched:
+        grouped.setdefault(labels.get(score.zone_of(word), "dokumentet"), []).append(word)
+    if grouped:
+        evidence = "; ".join(
+            f"{', '.join(words[:3])} i {zone}" for zone, words in grouped.items())
+        text = f"{score.name} föreslås utifrån {evidence}."
+    else:
+        text = f"{score.name} har högst regelpoäng ({score.score:g})."
+    if score.bonus:
+        text += " Den lärda modellen stödjer rangordningen."
+    elif learned_hint and learned_hint[0] == score.name:
+        text += f" Historiken känner igen {learned_hint[1]} liknande filer."
+    return text
+
+
+_INVOICE_NUMBER_RE = re.compile(
+    r"\b(?:faktura(?:n)?\s*(?:nr\.?|nummer|no\.?)|"
+    r"invoice\s*(?:no\.?|number|#))\s*[:#]?\s*"
+    r"([A-Z0-9][A-Z0-9./_-]{1,30}(?:\s+[A-Z0-9./_-]*\d[A-Z0-9./_-]*)?)\b",
+    re.I)
+_INVOICE_AMOUNT_LABEL_RE = re.compile(
+    r"\b(?:summa\s+att\s+betala|belopp\s+att\s+betala|"
+    r"totalt?\s+att\s+betala|att\s+betala|amount\s+due|"
+    r"total\s+amount\s+due|total\s+due|balance\s+due|"
+    r"grand\s+total|invoice\s+total)\b", re.I)
+_INVOICE_AMOUNT_RE = re.compile(
+    r"(?<!\d)[+-]?(?:\d{1,3}(?:[ \u00a0.,]\d{3})+|\d+)"
+    r"(?:[,.]\d{1,2})?(?!\d)")
+_INVOICE_CURRENCY_RE = re.compile(
+    r"\b(SEK|NOK|DKK|EUR|USD|GBP)\b|\bkr\b|€|\$|£", re.I)
+
+
+def _invoice_amount_minor(raw: str) -> Optional[int]:
+    """Parse a common Swedish/European/English amount into integer cents."""
+    value = re.sub(r"[\s\u00a0]", "", str(raw or ""))
+    if not value:
+        return None
+    sign = -1 if value.startswith("-") else 1
+    value = value.lstrip("+-")
+    comma, dot = value.rfind(","), value.rfind(".")
+    decimal_sep = ""
+    if comma >= 0 and dot >= 0:
+        decimal_sep = "," if comma > dot else "."
+    elif comma >= 0:
+        tail = value[comma + 1:]
+        decimal_sep = "," if len(tail) in (1, 2) else ""
+    elif dot >= 0:
+        tail = value[dot + 1:]
+        decimal_sep = "." if len(tail) in (1, 2) else ""
+    if decimal_sep:
+        whole, fraction = value.rsplit(decimal_sep, 1)
+    else:
+        whole, fraction = value, ""
+    whole = re.sub(r"[.,]", "", whole)
+    if not whole.isdigit() or (fraction and not fraction.isdigit()):
+        return None
+    cents = int((fraction + "00")[:2]) if fraction else 0
+    return sign * (int(whole) * 100 + cents)
+
+
+def extract_invoice_identity(text: str, supplier: str) -> Optional[Dict[str, Any]]:
+    """Extract a conservative supplier + labelled invoice number + payable total.
+
+    It intentionally requires an explicit invoice-number label and an
+    explicitly labelled amount due. Missing or ambiguous fields mean no match.
+    """
+    body = str(text or "")
+    supplier_key = normalize(supplier)
+    if not supplier_key:
+        return None
+    number_match = _INVOICE_NUMBER_RE.search(body)
+    if not number_match:
+        return None
+    invoice_number = re.sub(r"[^a-z0-9]", "", number_match.group(1).casefold())
+    if len(invoice_number) < 3 or not any(ch.isdigit() for ch in invoice_number):
+        return None
+
+    amount_minor = None
+    currency = ""
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        label = _INVOICE_AMOUNT_LABEL_RE.search(line)
+        if not label:
+            continue
+        amount_match = _INVOICE_AMOUNT_RE.search(line, label.end())
+        amount_line = line
+        if not amount_match and index + 1 < len(lines):
+            amount_line = lines[index + 1]
+            amount_match = _INVOICE_AMOUNT_RE.search(amount_line)
+        if not amount_match:
+            continue
+        amount_minor = _invoice_amount_minor(amount_match.group(0))
+        currency_match = _INVOICE_CURRENCY_RE.search(line + " " + amount_line)
+        if currency_match:
+            token = currency_match.group(1)
+            currency = (token.upper() if token else
+                        "EUR" if currency_match.group(0) == "€" else
+                        "GBP" if currency_match.group(0) == "£" else
+                        "USD" if currency_match.group(0) == "$" else "SEK")
+        if amount_minor is not None:
+            break
+    if amount_minor is None:
+        return None
+    return {"supplier": supplier_key, "invoice_number": invoice_number,
+            "amount_minor": amount_minor, "currency": currency}
+
+
+def invoice_identity_matches(first: Dict[str, Any],
+                             second: Dict[str, Any]) -> bool:
+    """Require all three business identifiers; this is only a review signal."""
+    if (not first or not second
+            or normalize(str(first.get("supplier", "")))
+            != normalize(str(second.get("supplier", "")))
+            or not first.get("invoice_number")
+            or str(first.get("invoice_number"))
+            != str(second.get("invoice_number", ""))):
+        return False
+    try:
+        same_amount = int(first["amount_minor"]) == int(second["amount_minor"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    first_currency = str(first.get("currency", "") or "")
+    second_currency = str(second.get("currency", "") or "")
+    return same_amount and (not first_currency or not second_currency
+                            or first_currency == second_currency)
 
 
 def _kw_pattern(kw: Dict[str, Any]) -> re.Pattern:
@@ -443,14 +697,25 @@ def _kw_pattern(kw: Dict[str, Any]) -> re.Pattern:
     return re.compile(text)
 
 
-_PATTERN_CACHE: Dict[Tuple[str, bool], re.Pattern] = {}
+_PATTERN_CACHE: Dict[Tuple[str, bool, bool], re.Pattern] = {}
+_EXACT_PATTERN_CACHE: Dict[str, re.Pattern] = {}
 
 
 def _cached_pattern(kw: Dict[str, Any]) -> re.Pattern:
-    key = (kw["text"], bool(kw.get("whole_word", True)))
+    """Sökmönstret för ett stödord (cache: text, helord, flexibel).
+
+    Starka identifierare (org.nr, VAT, giro, projektkod) får ett flexibelt
+    mönster: samma nummer matchar oavsett om det skrivs med bindestreck,
+    blanksteg, tankstreck eller helt utan skiljetecken. Vanliga ord
+    matchas exakt som förut.
+    """
+    text = kw["text"]
+    helord = bool(kw.get("whole_word", True))
+    flex = helord and _is_flexible(text)
+    key = (text, helord, flex)
     pat = _PATTERN_CACHE.get(key)
     if pat is None:
-        pat = _kw_pattern(kw)
+        pat = _flexible_id_pattern(text) if flex else _kw_pattern(kw)
         # Minnestak (ANVÄNDARORDER 2026-08-26): mönstercachen får inte
         # växa obundet; vid tak töms den och byggs upp igen billigt.
         if len(_PATTERN_CACHE) > 4000:
@@ -715,6 +980,11 @@ class TextZones:
         """
         if not kw.get("whole_word", True):
             return True
+        if _is_flexible(kw["text"]):
+            # Delarna kan stå med eller utan skiljetecken ("556033 9086",
+            # "5560339086") - då räcker inte mängduppslagningen, utan
+            # regexen får avgöra. Sådana stödord är få.
+            return True
         delar = _TOKEN_RE.findall(kw["text"])
         if not delar:
             return True
@@ -754,6 +1024,14 @@ class TextZones:
         if i_full:
             for zone in ("sender", "header", "pagehead", "identity", "pagefoot"):
                 if träffar(zone):
+                    # Står ordet i mottagarblocket hör det till KUNDEN, även
+                    # när blocket råkar ligga i sidhuvudets band. Undantag:
+                    # står samma text också överst som avsändare, då är det
+                    # avsändaren (annars kunde en rubrik i mottagarblocket
+                    # göra kunden till avsändare).
+                    if (in_recipient and zone != "sender"
+                            and not träffar("sender")):
+                        return True, "recipient", ZONE_WEIGHTS["recipient"]
                     return True, zone, ZONE_WEIGHTS[zone]
 
         if i_name:
@@ -787,6 +1065,39 @@ def _zones_for(text: str, filename: str, page_header: str,
         while len(_ZONES_CACHE) > 200:
             _ZONES_CACHE.popitem(last=False)
     return z
+
+
+#: Hur mycket varje avvisande sänker ett stödords vikt, och hur snabbt
+#: gamla avvisanden glöms (halveringstid i dagar). Efter fem avvisanden
+#: väger ordet noll och kan inte längre flytta en fil.
+_REJECT_STEP = 0.2
+_REJECT_HALF_LIFE_DAYS = 365.0
+
+
+def _reject_factor(kw: Dict[str, Any],
+                   now: Optional[datetime] = None) -> float:
+    """Viktfaktor 0-1 utifrån hur ofta stödordet lett fel.
+
+    Avvisanden åldras: ett ord som rättades för ett år sedan väger hälften
+    så tungt som ett som rättades i går. På så vis ligger gamla misstag
+    inte kvar och stör när reglerna väl blivit bättre.
+    """
+    n = int(kw.get("rejected", 0) or 0)
+    if n <= 0:
+        return 1.0
+    age = 0.0
+    stamp = str(kw.get("rejected_at", "") or "")
+    if stamp:
+        try:
+            t = datetime.fromisoformat(stamp)
+            nu = now or datetime.now().astimezone()
+            if t.tzinfo is None:
+                t = t.astimezone()
+            age = max(0.0, (nu - t).total_seconds() / 86400.0)
+        except (ValueError, TypeError, OSError):
+            age = 0.0
+    eff = n * (0.5 ** (age / _REJECT_HALF_LIFE_DAYS)) if age else float(n)
+    return max(0.0, 1.0 - _REJECT_STEP * eff)
 
 
 def score_text(rules: Rules, text: str, filename: str = "",
@@ -823,10 +1134,15 @@ def score_text(rules: Rules, text: str, filename: str = "",
             # Avfärda ordet med en mängduppslagning innan regexen körs.
             if not zones.kan_finnas(kw):
                 continue
+            # Negativ inlärning: ett ord som lett fel väger mindre, och
+            # efter tillräckligt många avvisanden ingenting alls.
+            vikt = float(kw["weight"]) * _reject_factor(kw)
+            if vikt <= 0:
+                continue
             hit, zone, factor = zones.locate(_cached_pattern(kw))
             if not hit:
                 continue
-            total += float(kw["weight"]) * factor
+            total += vikt * factor
             matched.append(kw["text"])
             where[kw["text"]] = zone
             # Namn och kropp överens (matchningsrundan 2026-10-05): ett
@@ -973,39 +1289,141 @@ _TA_SPECIAL = {"Return", "Tab", "Escape", "Up", "Down", "Left", "Right",
                "Shift_L", "Shift_R", "Menu", "F1", "F2", "F3", "F4"}
 
 
+#: Skrivbuffert per widget -> (text, giltig till). Nollställs efter en
+#: kort paus, precis som i en vanlig rullgardin: "p", "pi", "pil" bygger
+#: successivt upp sökordet i stället för att varje tecken söks separat.
+_TA_STATE: Dict[str, Tuple[str, float]] = {}
+_TA_IDLE = 1.2
+
+
+def _ta_state(widget) -> Tuple[str, str]:
+    key = str(widget)
+    buf, until = _TA_STATE.get(key, ("", 0.0))
+    if time.monotonic() > until:
+        buf = ""
+    return key, buf
+
+
+def _ta_remember(widget, buf: str) -> None:
+    key = str(widget)
+    if buf:
+        _TA_STATE[key] = (buf, time.monotonic() + _TA_IDLE)
+    else:
+        _TA_STATE.pop(key, None)
+    if len(_TA_STATE) > 200:          # enkelt skydd i långa sessioner
+        _TA_STATE.clear()
+
+
+def _ta_forget(event) -> None:
+    _ta_remember(event.widget, "")
+
+
+def _ta_seed(widget) -> str:
+    """Pågående sökord när en combobox-rullgardin öppnas.
+
+    Rullgardinens listbox ligger på <combo>.popdown.f.l och får fokus när
+    den öppnas. Utan detta skulle "p" + "i" + "l" börja om på "i".
+    """
+    path = str(widget)
+    if ".popdown." not in path:
+        return ""
+    try:
+        root = widget._root()
+        combo = root.nametowidget(path.split(".popdown.", 1)[0])
+    except Exception:
+        return ""
+    return _search_key(getattr(combo, "_ta_seed", ""))
+
+
 def _ta_combobox(event) -> None:
+    """Skriv "p" -> markeringen hoppar till första P-namnet; "pil" -> PIL.
+
+    Tecknen byggs upp i en buffert (i stället för att läsa hela fältet),
+    så att nästa tangent fortsätter sökordet även sedan fältet fyllts
+    med ett komplett namn.
+    """
     combo = event.widget
     if getattr(combo, "_egen_ta", False):     # dialog med eget beteende
         return
-    if event.keysym in _TA_SPECIAL or event.state & 0x4:   # Ctrl-kombos fria
+    keysym = getattr(event, "keysym", "")
+    if getattr(event, "state", 0) & 0x4:      # Ctrl-kombos fria
+        _ta_remember(combo, "")
         return
-    txt = combo.get().strip().casefold()
-    if not txt:
+    _key, buf = _ta_state(combo)
+    if keysym == "BackSpace":
+        buf = buf[:-1]
+    elif keysym in _TA_SPECIAL:
         return
-    for i, v in enumerate(combo["values"] or ()):
-        if str(v).casefold().startswith(txt):
-            if combo.current() != i:
-                combo.current(i)
+    else:
+        ch = getattr(event, "char", "")
+        if not ch or not ch.isprintable() or ch.isspace():
             return
+        buf += ch.casefold()
+    _ta_remember(combo, buf)
+    values = [str(v) for v in (combo["values"] or ())]
+    if not buf or not values:
+        return
+    idx = _typeahead_index(values, buf, 0)
+    if idx < 0 and len(buf) > 1:
+        # "pp" -> cykla bland P-namnen i stället för att ge upp
+        buf = buf[-1]
+        _ta_remember(combo, buf)
+        idx = _typeahead_index(values, buf, combo.current() + 1)
+    if idx >= 0 and combo.current() != idx:
+        try:
+            combo.current(idx)
+        except Exception:
+            pass
 
 
 def _ta_listbox(event) -> None:
-    if not getattr(event, "char", "") or not event.char.isalnum():
+    """Samma typahead i öppna listor/rullgardiner, med flera tecken.
+
+    Tk kan i vissa <Key>-händelser lämna widgetens namn som en sträng i
+    stället för ett Python-widgetobjekt. Då finns inget säkert sätt att
+    anropa Listbox-API:t; låt Tk hantera tangenten normalt i stället.
+    """
+    lb = getattr(event, "widget", None)
+    if not all(callable(getattr(lb, namn, None)) for namn in
+               ("size", "get", "curselection", "selection_clear",
+                "selection_set")):
         return
-    lb = event.widget
-    n = lb.size()
-    if not n:
+    keysym = getattr(event, "keysym", "")
+    if getattr(event, "state", 0) & 0x4:
+        _ta_remember(lb, "")
         return
-    pref = event.char.casefold()
-    cur = lb.curselection()
-    start = (cur[0] + 1) if cur else 0        # samma bokstav igen = nästa
-    for off in range(n):
-        i = (start + off) % n
-        if str(lb.get(i)).casefold().startswith(pref):
-            lb.selection_clear(0, "end")
-            lb.selection_set(i)
-            lb.see(i)
+    _key, buf = _ta_state(lb)
+    if not buf:
+        buf = _ta_seed(lb)               # fortsätt på sökordet från fältet
+    if keysym == "BackSpace":
+        buf = buf[:-1]
+    elif keysym in _TA_SPECIAL:
+        return
+    else:
+        ch = getattr(event, "char", "")
+        if not ch or not ch.isprintable() or ch.isspace():
             return
+        buf += ch.casefold()
+    _ta_remember(lb, buf)
+    n = lb.size()
+    if not buf or not n:
+        return
+    values = [str(lb.get(i)) for i in range(n)]
+    cur = lb.curselection()
+    cur_i = int(cur[0]) if cur else -1
+    idx = _typeahead_index(values, buf, 0)
+    if idx < 0 and len(buf) > 1:
+        buf = buf[-1]
+        _ta_remember(lb, buf)
+        idx = _typeahead_index(values, buf, cur_i + 1)
+    if idx >= 0:
+        lb.selection_clear(0, "end")
+        lb.selection_set(idx)
+        try:
+            lb.activate(idx)
+        except Exception:
+            pass
+        lb.see(idx)
 
 
 def install_snabbtangenter(root) -> None:
@@ -1013,6 +1431,8 @@ def install_snabbtangenter(root) -> None:
     även widgets som skapas efteråt (dialoger)."""
     root.bind_class("TCombobox", "<KeyRelease>", _ta_combobox, add="+")
     root.bind_class("Listbox", "<Key>", _ta_listbox, add="+")
+    root.bind_class("TCombobox", "<FocusOut>", _ta_forget, add="+")
+    root.bind_class("Listbox", "<FocusOut>", _ta_forget, add="+")
 
 
 # --------------------------------------------------------------------------
@@ -1035,8 +1455,18 @@ _LEARNED_MIN_FILES = 5
 _LEARNED_CAP_TOKENS = 2500
 #: Marginal (log-sannolikhet) som krävs för att modellen ska räknas säker.
 _LEARNED_CONF_MARGIN = 0.25
+#: Hur hårt ett ord som lett fel straffas i modellen. 0 = ingen påverkan.
+_LEARNED_NEG_BETA = 0.5
+#: En uttrycklig granskning/korrigering väger flera gånger tyngre än ett
+#: automatiskt utfall. Antalet faktiska dokument räknas fortfarande separat.
+_LEARNED_MANUAL_WEIGHT = 3
+#: Rankningsbonus för modellens val. Liten med flit: den får flytta
+#: ordningen och marginalen, aldrig beviskraven.
+_LEARNED_BONUS = 0.2
 
 _LEARNED: Optional["LearnedMatcher"] = None
+_LEARNED_LOCK = threading.RLock()
+_LEARNED_HALF_LIFE_DAYS = 730.0
 
 
 def learned_model_path() -> Path:
@@ -1057,15 +1487,52 @@ def learn_tokens(text: str) -> List[str]:
     return [t for t, _ in topp[:_LEARNED_MAX_TOKENS]]
 
 
+def learn_features(extraction: "Extraction") -> List[str]:
+    """Build broad and zone-specific features from an extraction."""
+    body = extraction.text or extraction.combined or ""
+    lines = body.splitlines()
+    zones = (
+        ("body", body, 30),
+        ("header", getattr(extraction, "page_header", "") or _header_zone(body), 20),
+        ("footer", getattr(extraction, "page_footer", "") or "\n".join(lines[-12:]), 15),
+        ("recipient", _recipient_zone(body), 20),
+        ("filename", getattr(extraction, "filename_text", "") or "", 15),
+    )
+    features = list(learn_tokens(body))
+    for zone, text, limit in zones:
+        features.extend(f"{zone}:{token}" for token in learn_tokens(text)[:limit])
+    return list(dict.fromkeys(features))
+
+
+def rejected_learning_features(score: "CategoryScore") -> List[str]:
+    """Target negative feedback at words from the user's identified error zone."""
+    words = getattr(score, "matched", ()) or ()
+    if isinstance(words, str):
+        words = (words,)
+    zone_map = {
+        "sender": "header", "header": "header", "identity": "header",
+        "pagehead": "header", "pagefoot": "footer", "recipient": "recipient",
+        "filename": "filename",
+    }
+    features = []
+    for word in words:
+        zone = zone_map.get(score.zone_of(str(word)), "body")
+        for token in learn_tokens(str(word)):
+            features.extend((token, f"{zone}:{token}"))
+    return list(dict.fromkeys(features))
+
+
 class LearnedMatcher:
     """Ordvikter per kategori, tränad på historikens beslut."""
 
-    def __init__(self, path: Optional[Path] = None):
+    def __init__(self, path: Optional[Path] = None, load: bool = True):
         self.path = Path(path) if path else learned_model_path()
         self.cats: Dict[str, Dict[str, Any]] = {}
         self._sig: Optional[Any] = None
         self._dirty = False
-        self._load()
+        self._load_enabled = load
+        if load:
+            self._load()
 
     def _sig_now(self):
         try:
@@ -1075,6 +1542,8 @@ class LearnedMatcher:
             return None
 
     def _load(self) -> None:
+        if not self._load_enabled or self._dirty:
+            return
         sig = self._sig_now()
         if sig == self._sig and (self.cats or sig is None):
             return
@@ -1083,18 +1552,57 @@ class LearnedMatcher:
         self.cats = {k: v for k, v in cats.items() if isinstance(v, dict)}
         self._sig = sig
 
-    def train(self, category: str, tokens: List[str]) -> None:
+    def train(self, category: str, tokens: List[str],
+              rejected_for: Optional[str] = None,
+              rejected_tokens: Optional[List[str]] = None,
+              incorrect_for: Optional[str] = None,
+              timestamp: Optional[str] = None,
+              evidence_weight: int = 1) -> None:
+        """Träna på ett beslut.
+
+        `rejected_for` = kategorin som gissade fel. Då räknas filens ord
+        som NEGATIVA bevis för den kategorin, så att samma ord inte leder
+        fel igen. `evidence_weight` förstärker uttryckliga användarbeslut,
+        medan `n` fortfarande räknar faktiska dokument för minimiunderlaget.
+        """
         if not category or not tokens:
             return
+        try:
+            weight = max(1, min(5, int(evidence_weight)))
+        except (TypeError, ValueError, OverflowError):
+            weight = 1
+        timestamp = timestamp or now_iso()
         c = self.cats.setdefault(category, {"n": 0, "tot": 0, "w": {}})
+        c["updated"] = timestamp
         c["n"] = int(c.get("n", 0)) + 1
+        c["calibration"] = c.get("calibration", {"correct": 0, "incorrect": 0})
+        c["calibration"]["correct"] = int(c["calibration"].get("correct", 0)) + 1
         w = c.setdefault("w", {})
-        for t in dict.fromkeys(tokens):          # en gång per fil
-            w[t] = int(w.get(t, 0)) + 1
-            c["tot"] = int(c.get("tot", 0)) + 1
+        seen = c.setdefault("last_seen", {})
+        for t in dict.fromkeys(tokens):          # en gång per fil, viktad evidens
+            w[t] = int(w.get(t, 0)) + weight
+            seen[t] = timestamp
+            c["tot"] = int(c.get("tot", 0)) + weight
         if len(w) > _LEARNED_CAP_TOKENS:         # minnestak
             c["w"] = dict(sorted(w.items(), key=lambda kv: -kv[1])
                           [:_LEARNED_CAP_TOKENS])
+        wrong_category = incorrect_for or rejected_for
+        if wrong_category and wrong_category != category:
+            rejected = rejected_tokens if rejected_tokens is not None else tokens
+            neg = self.cats.setdefault(wrong_category, {"n": 0, "tot": 0, "w": {}})
+            neg["updated"] = timestamp
+            calibration = neg.setdefault("calibration", {"correct": 0, "incorrect": 0})
+            calibration["incorrect"] = int(calibration.get("incorrect", 0)) + 1
+            nw = neg.setdefault("neg", {})
+            neg_seen = neg.setdefault("neg_last_seen", {})
+            for t in dict.fromkeys(rejected):
+                nw[t] = int(nw.get(t, 0)) + weight
+                neg_seen[t] = timestamp
+                neg["neg_tot"] = int(neg.get("neg_tot", 0)) + weight
+            if len(nw) > _LEARNED_CAP_TOKENS:
+                neg["neg"] = dict(sorted(nw.items(), key=lambda kv: -kv[1])
+                                  [:_LEARNED_CAP_TOKENS])
+                neg["neg_last_seen"] = {t: neg_seen[t] for t in neg["neg"] if t in neg_seen}
         self._dirty = True
 
     def flush(self) -> None:
@@ -1124,13 +1632,59 @@ class LearnedMatcher:
         vocab = sum(len(c.get("w", {})) for c in kval.values()) or 1
         tk = Counter(tokens)
         ntk = sum(tk.values()) or 1
+        decay_cache: Dict[str, float] = {}
+        current = datetime.now().astimezone()
+
+        def decay(stamp: Any) -> float:
+            if not stamp:
+                return 1.0
+            key = str(stamp)
+            if key in decay_cache:
+                return decay_cache[key]
+            try:
+                seen_at = datetime.fromisoformat(key)
+                if seen_at.tzinfo is None:
+                    seen_at = seen_at.replace(tzinfo=current.tzinfo)
+                age = max(0.0, (current - seen_at).total_seconds() / 86400.0)
+                value = 0.5 ** (age / _LEARNED_HALF_LIFE_DAYS)
+            except (TypeError, ValueError, OverflowError):
+                value = 1.0
+            decay_cache[key] = value
+            return value
+
         res = []
         for namn, c in kval.items():
-            tot = int(c.get("tot", 0)) or 1
-            s = math.log(int(c["n"]) / total)              # prior
             w = c.get("w", {})
+            seen = c.get("last_seen", {}) or {}
+            weights = {token: float(count) * decay(seen.get(token))
+                       for token, count in w.items()}
+            tot = sum(weights.values()) or 1.0
+            s = math.log(int(c["n"]) / total)              # prior
+            calibration = c.get("calibration", {}) or {}
+            right = int(calibration.get("correct", 0))
+            wrong = int(calibration.get("incorrect", 0))
+            reliability = (right + 1) / (right + wrong + 2)
+            s += 0.2 * math.log(reliability / 0.5)
+            neg = c.get("neg", {}) or {}
+            neg_seen = c.get("neg_last_seen", {}) or {}
+            neg_total = sum(float(count) * decay(neg_seen.get(token))
+                            for token, count in neg.items())
+            neg_tot = neg_total or float(c.get("neg_tot", 0) or 0)
             for t, k in tk.items():
-                s += k * math.log((w.get(t, 0) + 1) / (tot + vocab))
+                count = weights.get(t, 0.0)
+                s += k * math.log((count + 1) / (tot + vocab))
+                # Negativ inlärning: jämför hur vanligt ordet är i
+                # kategorins RÄTTA filer med hur vanligt det är i de filer
+                # där kategorin gissade fel. Är det vanligare bland
+                # misstagen straffas det - annars inte alls.
+                if neg_tot:
+                    nw = float(neg.get(t, 0) or 0) * decay(neg_seen.get(t))
+                    if nw:
+                        pos = (count + 1) / (tot + vocab)
+                        negr = (nw + 1) / (neg_tot + vocab)
+                        if negr > pos:
+                            s -= (k * min(math.log(negr / pos), 2.0)
+                                  * _LEARNED_NEG_BETA)
             res.append((s / ntk, namn))
         res.sort(key=lambda x: (-x[0], x[1]))
         topp = res[0]
@@ -1140,17 +1694,148 @@ class LearnedMatcher:
 
 def _learned() -> LearnedMatcher:
     global _LEARNED
-    if _LEARNED is None:
-        _LEARNED = LearnedMatcher()
-    return _LEARNED
+    with _LEARNED_LOCK:
+        if _LEARNED is None:
+            learner = LearnedMatcher()
+            settings = load_settings()
+            if not settings.get("learned_confirmed_only_v1", False):
+                # Äldre versioner tränade även på autosorteringar. Bygg om
+                # profilen från historikens uttryckligen bekräftade val.
+                rebuild_learned_from_history(load_history(), learner)
+                settings["learned_confirmed_only_v1"] = True
+                try:
+                    save_settings(settings)
+                except Exception:
+                    pass
+            _LEARNED = learner
+        return _LEARNED
 
 
 def flush_learned() -> None:
     """Skriv modellen till disk (anropas vid batchslut/avslut)."""
     try:
-        _learned().flush()
+        with _LEARNED_LOCK:
+            _learned().flush()
     except Exception:
         pass
+
+
+def _history_features(event: Dict[str, Any]) -> List[str]:
+    stored = event.get("features") or event.get("tokens") or []
+    return [str(value) for value in stored if value]
+
+
+def _history_evidence_weight(event: Dict[str, Any]) -> int:
+    """Use stored calibration weight, or infer it for older history records."""
+    try:
+        stored = int(event.get("learning_weight", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        stored = 0
+    if stored > 0:
+        return max(1, min(5, stored))
+    return (_LEARNED_MANUAL_WEIGHT
+            if event.get("decided_by") == "user" else 1)
+
+
+def replay_learned_history(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Walk-forward backtest: each event is tested before it is learned."""
+    replay = LearnedMatcher(load=False)
+    ordered = sorted(events, key=lambda e: str(e.get("time", "")))
+    tested = correct = 0
+    per_category: Dict[str, Dict[str, int]] = {}
+    for event in ordered:
+        category = str(event.get("category", "") or "")
+        features = _history_features(event)
+        if (not category or not features
+                or event.get("decided_by") != "user"):
+            continue
+        prediction = replay.predict(features)
+        if prediction is not None:
+            tested += 1
+            is_correct = prediction[0] == category
+            correct += int(is_correct)
+            stats = per_category.setdefault(category, {"tested": 0, "correct": 0})
+            stats["tested"] += 1
+            stats["correct"] += int(is_correct)
+        replay.train(
+            category, features,
+            incorrect_for=str(event.get("corrected_from") or "") or None,
+            rejected_tokens=[str(token) for token in event.get("rejected_features", [])],
+            timestamp=str(event.get("time") or now_iso()),
+            evidence_weight=_history_evidence_weight(event),
+        )
+    return {"tested": tested, "correct": correct,
+            "accuracy": (correct / tested) if tested else None,
+            "categories": per_category}
+
+
+def reset_learned_category(category: str,
+                           matcher: Optional[LearnedMatcher] = None) -> None:
+    learner = matcher or _learned()
+    learner.cats.pop(category, None)
+    learner._dirty = True
+    learner.flush()
+
+
+def restore_learned_category(category: str, events: List[Dict[str, Any]],
+                             matcher: Optional[LearnedMatcher] = None) -> int:
+    """Restore one profile from historical positive and correction signals."""
+    learner = matcher or _learned()
+    learner.cats.pop(category, None)
+    learner._dirty = True
+    count = 0
+    for event in sorted(events, key=lambda e: str(e.get("time", ""))):
+        chosen = str(event.get("category", "") or "")
+        features = _history_features(event)
+        timestamp = str(event.get("time") or now_iso())
+        if (chosen == category and features
+                and event.get("decided_by") == "user"):
+            learner.train(
+                category, features, timestamp=timestamp,
+                evidence_weight=_history_evidence_weight(event))
+            count += 1
+        if (event.get("decided_by") == "user"
+                and event.get("corrected_from") == category):
+            rejected = [str(token) for token in event.get("rejected_features", [])]
+            weight = _history_evidence_weight(event)
+            profile = learner.cats.setdefault(
+                category, {"n": 0, "tot": 0, "w": {}, "neg": {}})
+            calibration = profile.setdefault("calibration", {"correct": 0, "incorrect": 0})
+            calibration["incorrect"] = int(calibration.get("incorrect", 0)) + 1
+            neg = profile.setdefault("neg", {})
+            seen = profile.setdefault("neg_last_seen", {})
+            for token in rejected:
+                neg[token] = int(neg.get(token, 0)) + weight
+                seen[token] = timestamp
+                profile["neg_tot"] = int(profile.get("neg_tot", 0)) + weight
+            profile["updated"] = timestamp
+    learner.flush()
+    return count
+
+
+def rebuild_learned_from_history(events: List[Dict[str, Any]],
+                                 matcher: Optional[LearnedMatcher] = None) -> int:
+    """Replace the saved learner with chronological, replayable history."""
+    learner = matcher or _learned()
+    learner.cats = {}
+    learner._dirty = True
+    count = 0
+    for event in sorted(events, key=lambda e: str(e.get("time", ""))):
+        category = str(event.get("category", "") or "")
+        features = _history_features(event)
+        if (not category or not features
+                or event.get("decided_by") != "user"):
+            continue
+        learner.train(
+            category, features,
+            incorrect_for=str(event.get("corrected_from") or "") or None,
+            rejected_tokens=[str(token) for token in event.get("rejected_features", [])],
+            timestamp=str(event.get("time") or now_iso()),
+            evidence_weight=_history_evidence_weight(event),
+        )
+        count += 1
+    learner.flush()
+    return count
 
 
 #: Hårt golv för automatisk sortering, oavsett strikthetsnivå: har färre
@@ -1242,12 +1927,500 @@ def _auto_blocker(score: CategoryScore, rules: Rules,
     return None
 
 
-def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> Decision:
-    """Avgör om filen kan sorteras automatiskt eller behöver frågas om.
+def _apply_learned_ranking(scores: List[CategoryScore],
+                           lm_pred: Tuple[str, float, int]) -> None:
+    """Låt en säker lärd modell flytta rankningen - aldrig bevisen.
 
-    Sorteringen är avsiktligt försiktig: varje villkor som inte uppfylls
-    skickar filen till granskning i stället för att gissa. Det är alltid
-    billigare att svara på en fråga än att leta rätt på en felsorterad fil.
+    Bonusen räknas in när kategorier jämförs (ordning och marginal) men
+    inte när _auto_blocker prövar beviskraven: den läser fortfarande den
+    regelbaserade poängen. Ett bevisat avsändar-ID får aldrig petas ned,
+    och modellen kan inte uppfinna en kategori som reglerna inte alls
+    matchade - den måste redan finnas bland träffarna.
+    """
+    namn, conf, _antal = lm_pred
+    if conf < _LEARNED_CONF_MARGIN:
+        return
+    target = next((s for s in scores if s.name == namn), None)
+    if target is None:
+        return
+    if scores[0].name != namn and scores[0].is_conclusive:
+        return
+    target.bonus = _LEARNED_BONUS
+    scores.sort(key=lambda s: (-(s.score + s.bonus), s.name))
+
+
+def validate_subfolder_override(value: str) -> Tuple[str, str]:
+    """Normalize a dialog subfolder path and reject absolute/traversal paths."""
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw:
+        return "", ""
+    if (raw.startswith("/") or re.match(r"^[a-zA-Z]:", raw)
+            or any(part.strip() in {".", ".."} for part in raw.split("/"))):
+        return "", "En undermapp måste vara en relativ sökväg under kategorimappen."
+    parts = [safe_folder_name(part) for part in raw.split("/") if part.strip()]
+    if not parts:
+        return "", ""
+    return "/".join(parts), ""
+
+
+def preview_destination_path(base: Optional[Path], subfolder: str,
+                             filename: str) -> Optional[Path]:
+    """Förhandsvisning av målsökvägen i granskningsdialogen.
+
+    Speglar destination_for(): bas + validerade undermappsdelar + filnamn.
+    Rör inga filer. Returnerar None när basen saknas.
+    """
+    if base is None:
+        return None
+    dest = Path(base)
+    cleaned, _error = validate_subfolder_override(subfolder)
+    for part in cleaned.split("/"):
+        if part:
+            dest = dest / safe_folder_name(part)
+    name = str(filename or "").strip()
+    return dest / name if name else dest
+
+
+def exact_support_matches(rules: Rules, extraction: Extraction) -> Dict[str, List[str]]:
+    """Return literal, whole-word support matches from PDF text by category.
+
+    A category is returned only when at least two different, category-exclusive
+    saved support words match exactly, regardless of a lower per-category minimum.
+    A selected category default is an additional required anchor; it may be
+    shared with other categories, but never counts toward the exclusive-word
+    minimum. This deliberately does not use OCR denoising, flexible identifier
+    separators, the filename, learned-model scores, or substring rules.
+    Text is case-folded and whitespace-normalized only; punctuation and the
+    spelling of each support word/phrase must otherwise match exactly.
+    """
+    body = normalize(getattr(extraction, "text", "") or "")
+    if not body:
+        return {}
+    def active_word(kw: Dict[str, Any]) -> str:
+        word = normalize(kw.get("text", ""))
+        if (not word or not kw.get("whole_word", True)
+                or (not any(char.isalpha() for char in word)
+                    and not keyword_strength(word))
+                or float(kw.get("weight", 1.0) or 0.0) <= 0
+                or int(kw.get("rejected", 0) or 0) > 0
+                or _reject_factor(kw) <= 0):
+            return ""
+        return word
+
+    # Shared terms are not category evidence at all: only terms owned by
+    # exactly one enabled category may count toward the two-word threshold.
+    owners: Dict[str, set] = {}
+    for cat in rules.categories:
+        if not cat.get("enabled", True):
+            continue
+        category = str(cat.get("name", ""))
+        for kw in cat.get("keywords", []):
+            word = active_word(kw)
+            if word:
+                owners.setdefault(word, set()).add(category)
+
+    zones = _zones_for(body, "", "", "")
+
+    def exact_present(kw: Dict[str, Any]) -> bool:
+        if not zones.kan_finnas(kw):
+            return False
+        word = normalize(kw.get("text", ""))
+        pattern = _EXACT_PATTERN_CACHE.get(word)
+        if pattern is None:
+            pattern = _kw_pattern({"text": word, "whole_word": True})
+            if len(_EXACT_PATTERN_CACHE) >= 4000:
+                _EXACT_PATTERN_CACHE.clear()
+            _EXACT_PATTERN_CACHE[word] = pattern
+        return bool(pattern.search(body))
+
+    matches: Dict[str, List[str]] = {}
+    for cat in rules.categories:
+        if not cat.get("enabled", True):
+            continue
+        category = str(cat.get("name", ""))
+        found = []
+        seen = set()
+        for kw in cat.get("keywords", []):
+            word = active_word(kw)
+            if (not word or word in seen
+                    or owners.get(word, set()) != {category}):
+                continue
+            seen.add(word)
+            if exact_present(kw):
+                found.append(word)
+        # A user-selected category anchor must also be present. It can be a
+        # shared word, but remains a gate only: it never counts toward the
+        # two different exclusive words required to authorize an auto-move.
+        default_word = normalize(cat.get("default_keyword", ""))
+        if default_word:
+            default_kw = next((kw for kw in cat.get("keywords", [])
+                               if active_word(kw) == default_word), None)
+            if default_kw is None or not exact_present(default_kw):
+                continue
+        # One exact keyword can be coincidental; auto-moves require at least
+        # two distinct user-saved support words, even if the category asks for 1.
+        required = max(2, int(cat.get("min_keywords", 0) or 0))
+        if len(found) >= required:
+            matches[cat["name"]] = found
+    return matches
+
+
+AUTO_MOVE_MANUAL_CONFIRMATIONS = 100
+
+
+def manual_category_confirmations(category: str,
+                                  events: Optional[List[Dict[str, Any]]] = None
+                                  ) -> int:
+    """Count distinct, completed manual sorts previously confirmed by the user."""
+    history = load_history() if events is None else events
+    category_key = str(category).strip().casefold()
+    sources = set()
+    for event in history:
+        if (str(event.get("category", "")).strip().casefold() != category_key
+                or event.get("decided_by") != "user"):
+            continue
+        source = str(event.get("source", "")).strip()
+        if source:
+            sources.add(os.path.normcase(os.path.normpath(source)).casefold())
+    return len(sources)
+
+
+def _normalized_template_bbox(bbox: Any) -> Tuple[float, float, float, float]:
+    """Validate and clamp a template rectangle expressed as page fractions."""
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        raise ValueError("Mallens markerade område är ogiltigt.")
+    try:
+        x0, y0, x1, y1 = (float(value) for value in bbox)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Mallens markerade område är ogiltigt.") from exc
+    if (not all(math.isfinite(value) for value in (x0, y0, x1, y1))
+            or x0 < 0 or y0 < 0 or x1 > 1 or y1 > 1
+            or x1 - x0 < 0.003 or y1 - y0 < 0.003):
+        raise ValueError("Mallens markerade område måste ligga på sidan.")
+    return x0, y0, x1, y1
+
+
+def _pdf_region_text(page: Any, bbox: Any) -> str:
+    """Extract selectable words whose centres fall inside a normalized region."""
+    pymupdf = _open_pymupdf()
+    x0, y0, x1, y1 = _normalized_template_bbox(bbox)
+    page_rect = page.rect
+    clip = pymupdf.Rect(
+        page_rect.x0 + x0 * page_rect.width,
+        page_rect.y0 + y0 * page_rect.height,
+        page_rect.x0 + x1 * page_rect.width,
+        page_rect.y0 + y1 * page_rect.height,
+    )
+    selected = []
+    words = page.get_text("words") or []
+    for word in sorted(words, key=lambda item: tuple(item[5:8])):
+        if len(word) < 5:
+            continue
+        bounds = pymupdf.Rect(word[:4]) * page.rotation_matrix
+        center_x = (bounds.x0 + bounds.x1) / 2
+        center_y = (bounds.y0 + bounds.y1) / 2
+        if (clip.x0 <= center_x <= clip.x1
+                and clip.y0 <= center_y <= clip.y1):
+            selected.append(str(word[4]))
+    return normalize(" ".join(selected))
+
+
+def create_pdf_subfolder_template(path: Path, page_index: int,
+                                  bbox: Any, folder: str) -> Dict[str, Any]:
+    """Capture the exact text within a drawn page region as an optional rule."""
+    cleaned_folder, error = validate_subfolder_override(folder)
+    if error or not cleaned_folder:
+        raise ValueError(error or "Ange en undermapp/dokumenttyp för mallen.")
+    x0, y0, x1, y1 = _normalized_template_bbox(bbox)
+    pymupdf = _open_pymupdf()
+    with pymupdf.open(str(path)) as doc:
+        if not (0 <= int(page_index) < len(doc)):
+            raise ValueError("Den valda PDF-sidan finns inte.")
+        text = _pdf_region_text(doc[int(page_index)], (x0, y0, x1, y1))
+    if not text:
+        raise ValueError(
+            "Rutan innehåller ingen markerbar PDF-text. Rita runt den utskrivna "
+            "rubriken på en textbaserad PDF.")
+    return {
+        "folder": cleaned_folder,
+        "page": int(page_index),
+        "bbox": [x0, y0, x1, y1],
+        "text": text,
+        "enabled": True,
+        "created": now_iso(),
+    }
+
+
+def subfolder_keyword_matches(rules: Rules, category: str,
+                              extraction: Extraction) -> Tuple[set, bool]:
+    """Return mapped folders matched literally and whether active links exist."""
+    cat = rules.get(category)
+    mapping = cat.get("subfolder_keyword_map", {}) if cat else {}
+    if not isinstance(mapping, dict) or not mapping:
+        return set(), False
+    body = normalize(getattr(extraction, "text", "") or "")
+    if not body:
+        return set(), True
+    words = {normalize(kw.get("text", "")): kw for kw in cat.get("keywords", [])}
+    matched_folders = set()
+    active_mappings = 0
+    for raw_word, raw_folder in mapping.items():
+        word = normalize(raw_word)
+        kw = words.get(word)
+        folder, error = validate_subfolder_override(str(raw_folder or ""))
+        if (not word or not kw or error or not folder
+                or not kw.get("whole_word", True)
+                or float(kw.get("weight", 1.0) or 0.0) <= 0
+                or int(kw.get("rejected", 0) or 0) > 0
+                or _reject_factor(kw) <= 0):
+            continue
+        active_mappings += 1
+        pattern = _EXACT_PATTERN_CACHE.get(word)
+        if pattern is None:
+            pattern = _kw_pattern({"text": word, "whole_word": True})
+            if len(_EXACT_PATTERN_CACHE) >= 4000:
+                _EXACT_PATTERN_CACHE.clear()
+            _EXACT_PATTERN_CACHE[word] = pattern
+        if pattern.search(body):
+            matched_folders.add(folder)
+    return matched_folders, bool(active_mappings)
+
+
+def match_subfolder_keyword(rules: Rules, category: str,
+                            extraction: Extraction) -> Tuple[str, bool]:
+    """Resolve exact user-mapped support words to one subfolder or review."""
+    matched_folders, has_mappings = subfolder_keyword_matches(
+        rules, category, extraction)
+    if not has_mappings:
+        return "", False
+    return (next(iter(matched_folders)), True) if len(matched_folders) == 1 else ("", True)
+
+
+def keyword_folder_label(cat: Optional[Dict[str, Any]], text: str) -> str:
+    """Mappkolumnens text för ett stödord: kopplad mapp eller –."""
+    mapping = (cat or {}).get("subfolder_keyword_map", {}) or {}
+    if not isinstance(mapping, dict):
+        return "–"
+    folder = str(mapping.get(normalize(text), "") or "").strip()
+    return folder if folder else "–"
+
+
+def keyword_is_linked(cat: Optional[Dict[str, Any]], text: str) -> bool:
+    """True när stödordet redan är kopplat till en mapp."""
+    return keyword_folder_label(cat, text) != "–"
+
+
+#: Standardordningen på stödordstabellens kolumner. Användaren kan dra
+#: rubrikerna till en egen ordning; den sparas i inställningen
+#: kw_column_order och läses tillbaka vid start.
+KW_COLUMNS = ("word", "kind", "weight", "whole", "hits", "folder", "std")
+
+
+def normalize_column_order(saved: Any,
+                           columns: tuple = KW_COLUMNS) -> List[str]:
+    """Granska en sparad kolumnordning; falla tillbaka på standarden.
+
+    Framtidssäker: en äldre sparad ordning (utan nytillkomna kolumner)
+    behålls som den är och de nya kolumnerna läggs sist - användarens
+    dragordning överlever nya appversioner.
+    """
+    cols = list(columns)
+    if isinstance(saved, (list, tuple)):
+        wanted: List[str] = []
+        for entry in saved:
+            name = str(entry)
+            if name in cols and name not in wanted:
+                wanted.append(name)
+        if wanted:
+            return wanted + [c for c in cols if c not in wanted]
+    return cols
+
+
+def drop_column_at(order: List[str], col: str, widths: List[int],
+                   x: int) -> List[str]:
+    """Flytta kolumnen ``col`` till skarven närmast bildpunkten ``x``.
+
+    ``widths`` är de visade kolumnernas bredder i samma ordning som
+    ``order``. Ogiltig indata lämnar ordningen orörd.
+    """
+    items = list(order or [])
+    if col not in items or len(widths) != len(items):
+        return items
+    try:
+        pos = float(x)
+    except (TypeError, ValueError):
+        return items
+    edges = [0.0]
+    for width in widths:
+        try:
+            number = float(width)
+        except (TypeError, ValueError):
+            number = 0.0
+        edges.append(edges[-1] + max(0.0, number))
+    gap = min(range(len(edges)), key=lambda i: (abs(pos - edges[i]), i))
+    from_index = items.index(col)
+    items.pop(from_index)
+    if from_index < gap:
+        gap -= 1
+    items.insert(max(0, min(len(items), gap)), col)
+    return items
+
+
+def resolve_automatic_subfolder(rules: Rules, category: str,
+                                extraction: Extraction) -> Tuple[str, str]:
+    """Return (folder, error) for configured keyword/template/learned routing."""
+    mapped_targets, has_mappings = subfolder_keyword_matches(
+        rules, category, extraction)
+    if len(mapped_targets) > 1:
+        return "", "Kopplade undermappsstödord pekar på olika mappar."
+    if len(mapped_targets) == 1:
+        return next(iter(mapped_targets)), ""
+    template, has_templates = match_subfolder_template(rules, category, extraction)
+    if has_templates:
+        if template:
+            return template, ""
+        return "", "Områdesmallarna matchar inte entydigt någon undermapp."
+    learned, has_examples = learned_manual_subfolder(category, extraction)
+    if learned:
+        return learned, ""
+    if has_examples:
+        return "", ("Dokumenttypen kan inte placeras säkert i en undermapp "
+                    "utifrån tidigare manuella val.")
+    if has_mappings:
+        return "", "Inget kopplat undermappsstödord matchade filen."
+    return "", ""
+
+
+def match_subfolder_template(rules: Rules, category: str,
+                             extraction: Extraction) -> Tuple[str, bool]:
+    """Return a template target; active templates with no unique match need review."""
+    cat = rules.get(category)
+    if not cat or not cat.get("subfolder_templates_enabled", True):
+        return "", False
+    templates = [item for item in cat.get("subfolder_templates", [])
+                 if isinstance(item, dict) and item.get("enabled", True)]
+    if not templates:
+        return "", False
+    matches = set()
+    try:
+        pymupdf = _open_pymupdf()
+        with pymupdf.open(str(extraction.path)) as doc:
+            page_cache: Dict[int, Any] = {}
+            for template in templates:
+                try:
+                    page_index = int(template.get("page", 0))
+                    bbox = _normalized_template_bbox(template.get("bbox"))
+                    folder, error = validate_subfolder_override(
+                        str(template.get("folder", "")))
+                    expected = normalize(template.get("text", ""))
+                    if (error or not folder or not expected
+                            or not 0 <= page_index < len(doc)):
+                        continue
+                    page = page_cache.setdefault(page_index, doc[page_index])
+                    found = _pdf_region_text(page, bbox)
+                    if expected in found:
+                        matches.add(folder)
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+    except Exception:
+        return "", True
+    return (next(iter(matches)), True) if len(matches) == 1 else ("", True)
+
+
+_SUBFOLDER_MODEL_LOCK = threading.RLock()
+_SUBFOLDER_MODEL_CACHE: Dict[str, Tuple[Tuple[Any, ...], LearnedMatcher,
+                                       Dict[str, int]]] = {}
+
+
+def learned_manual_subfolder(category: str, extraction: Extraction,
+                             events: Optional[List[Dict[str, Any]]] = None
+                             ) -> Tuple[str, bool]:
+    """Predict a manually chosen type folder; empty means review if labels exist.
+
+    Only distinct, explicitly user-confirmed folder choices are training data.
+    At least two types, five examples per type and a confident margin are
+    required; otherwise the caller must leave the file for review.
+    """
+    history = load_history() if events is None else events
+    category_key = str(category).strip().casefold()
+    by_source: Dict[str, Tuple[str, Tuple[str, ...]]] = {}
+    for event in history:
+        if (str(event.get("category", "")).strip().casefold() != category_key
+                or event.get("decided_by") != "user"):
+            continue
+        choice, error = validate_subfolder_override(
+            str(event.get("subfolder_choice", "") or ""))
+        source = str(event.get("source", "")).strip()
+        features = tuple(_history_features(event))
+        if choice and not error and source and features:
+            source_key = os.path.normcase(os.path.normpath(source)).casefold()
+            # Last confirmed correction for the same source wins.
+            by_source[source_key] = (choice, features)
+    if not by_source:
+        return "", False
+
+    signature = tuple(sorted((source, choice, features)
+                             for source, (choice, features) in by_source.items()))
+    with _SUBFOLDER_MODEL_LOCK:
+        cached = _SUBFOLDER_MODEL_CACHE.get(category_key)
+        if cached is not None and cached[0] == signature:
+            model, counts = cached[1], dict(cached[2])
+        else:
+            model = LearnedMatcher(load=False)
+            counts: Dict[str, int] = {}
+            for choice, features in sorted(by_source.values()):
+                model.train(choice, list(features),
+                            evidence_weight=_LEARNED_MANUAL_WEIGHT)
+                counts[choice] = counts.get(choice, 0) + 1
+            _SUBFOLDER_MODEL_CACHE[category_key] = (
+                signature, model, dict(counts))
+
+    if sum(count >= 5 for count in counts.values()) < 2:
+        return "", True
+    features = learn_features(extraction)
+    prediction = model.predict(features, min_files=5)
+    if (prediction is None or prediction[1] < _LEARNED_CONF_MARGIN):
+        return "", True
+    # A high model margin can still come from a shared brand word or class
+    # prior. Require two distinct observed terms that appeared in manual
+    # examples of the predicted type and in no competing type.
+    tokens = {str(feature).split(":", 1)[-1] for feature in features}
+    target = model.cats.get(prediction[0], {}).get("w", {})
+    competing_tokens = set()
+    for label, profile in model.cats.items():
+        if label != prediction[0]:
+            competing_tokens.update(
+                str(feature).split(":", 1)[-1]
+                for feature in profile.get("w", {}))
+    target_tokens = {str(feature).split(":", 1)[-1] for feature in target}
+    distinctive = tokens & (target_tokens - competing_tokens)
+    if len(distinctive) < 2:
+        return "", True
+    return prediction[0], True
+
+
+def exact_auto_category(rules: Rules, decision: Decision) -> str:
+    """Category that may auto-move after exact evidence and 100 user sorts."""
+    if (decision.status != "auto" or decision.best is None
+            or decision.best.only_recipient):
+        return ""
+    matches = exact_support_matches(rules, decision.extraction)
+    if len(matches) != 1:
+        return ""
+    category = next(iter(matches))
+    if (decision.best.name != category
+            or manual_category_confirmations(category)
+            < AUTO_MOVE_MANUAL_CONFIRMATIONS):
+        return ""
+    return category
+
+
+def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> Decision:
+    """Besluta mellan flera exakta stödordsträffar och granskning.
+
+    Minst två olika, kategoriexklusiva bokstavliga helords-/frasträffar och
+    hundra tidigare manuella bekräftelser i kategorin krävs för ``auto``.
+    All annan evidens skickas till granskning.
     """
     if extraction.error and not extraction.text:
         return Decision(extraction.path, extraction, [], "error", extraction.error)
@@ -1258,14 +2431,40 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
                         body=extraction.text or "")
     t = effective_thresholds(settings)
 
-    # N14: modellens syn på filen (om påslagen och tränad).
+    # Självlärande modellen används när den har tillräckligt underlag.
     lm_pred = None
     if settings.get("learned_matching", True):
         try:
-            lm_pred = _learned().predict(
-                learn_tokens(extraction.text or extraction.combined))
+            with _LEARNED_LOCK:
+                lm_pred = _learned().predict(learn_features(extraction))
         except Exception:
             lm_pred = None
+
+    if lm_pred is not None and scores:
+        _apply_learned_ranking(scores, lm_pred)
+
+    # A move is allowed only when at least two different user-owned support
+    # words/phrases, exclusive to one category, occur literally in the document
+    # text with whole-word boundaries. Learned scores and flexible/substring
+    # matches can never authorize a move.
+    exact = exact_support_matches(rules, extraction)
+    if (len(exact) == 1 and scores and scores[0].name in exact
+            and not scores[0].only_recipient):
+        category = scores[0].name
+        matched_words = exact[category]
+        confirmed = manual_category_confirmations(category)
+        if confirmed >= AUTO_MOVE_MANUAL_CONFIRMATIONS:
+            return Decision(
+                extraction.path, extraction, scores, "auto",
+                "Exakta stödordsträffar efter "
+                f"{confirmed} manuella bekräftelser: "
+                + ", ".join(matched_words[:4]))
+        return Decision(
+            extraction.path, extraction, scores, "ask",
+            f"Exakt träff i {category}, men automatflytt aktiveras först "
+            f"efter {AUTO_MOVE_MANUAL_CONFIRMATIONS} manuella filer i kategorin "
+            f"({confirmed}/{AUTO_MOVE_MANUAL_CONFIRMATIONS} bekräftade). "
+            "Välj och bekräfta kategorin manuellt.")
 
     if not scores:
         # Säkerhetsrundan 2026-10-16: den lärda klassificeraren får aldrig
@@ -1279,7 +2478,13 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
         return d
 
     best = scores[0]
-    second = scores[1].score if len(scores) > 1 else 0.0
+    # Jämförelserna nedan använder den effektiva poängen (regelpoäng +
+    # eventuell modellbonus). Beviskraven i _auto_blocker läser däremot
+    # den regelbaserade poängen, så bonusen kan aldrig sänka en tröskel.
+    def _eff(s: CategoryScore) -> float:
+        return s.score + s.bonus
+
+    second = _eff(scores[1]) if len(scores) > 1 else 0.0
 
     def ask(reason: str) -> Decision:
         d = Decision(extraction.path, extraction, scores, "ask", reason)
@@ -1309,9 +2514,9 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
     # avgjord - en konkurrent som nämns i löptexten gör inte dokumentet
     # tvetydigt, hur många gånger den än nämns.
     if len(scores) > 1 and not (proved and not rival_proved):
-        nära = (best.score - second < t["ambiguity_margin"]
+        nära = (_eff(best) - second < t["ambiguity_margin"]
                 or (t["score_ratio"] > 1.0 and second > 0
-                    and best.score < second * t["score_ratio"]))
+                    and _eff(best) < second * t["score_ratio"]))
         if nära and scores[1].only_recipient:
             # 2026-10-15: en tvåa som BARA står som mottagare gör inte
             # dokumentet tvetydigt - vi är kunden hos dem, inte tvärtom.
@@ -1333,16 +2538,16 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
                         scores.sort(key=lambda s2: (s2.name != vinnare,
                                                     -s2.score, s2.name))
                         best = scores[0]
-                        second = scores[1].score
-                    d = Decision(extraction.path, extraction, scores, "auto",
-                                 f"Lärd klassificerare bryter dödläget "
-                                 f"({lm_pred[2]} liknande filer)")
-                    return d
+                        second = _eff(scores[1])
+                    return ask(
+                        f"{best.name} föreslås av inlärningen "
+                        f"({lm_pred[2]} liknande filer); välj och bekräfta "
+                        "mappen själv. Automatisk flyttning är avstängd.")
             # Exakt oavgjort och modellen osäker: kategorin med fler
             # tidigare sorterade filer vinner (enkel historikprior som
             # är aktiv redan från första filen, till skillnad från N14).
             # Även här gäller beviskraven för en ny vinnare (2026-10-16).
-            if abs(best.score - second) < 0.001:
+            if abs(_eff(best) - second) < 0.001:
                 f1 = int((rules.get(best.name) or {}).get("files_sorted", 0) or 0)
                 f2 = int((rules.get(scores[1].name) or {}).get("files_sorted", 0) or 0)
                 if f1 != f2:
@@ -1354,25 +2559,26 @@ def decide(rules: Rules, extraction: Extraction, settings: Dict[str, Any]) -> De
                             scores.sort(key=lambda s2: (s2.name != vinnare,
                                                         -s2.score, s2.name))
                             best = scores[0]
-                            second = scores[1].score
-                        d = Decision(extraction.path, extraction, scores, "auto",
-                                     f"Historik bryter exakt dödläge: {vinnare} "
-                                     f"har {max(f1, f2)} tidigare filer mot "
-                                     f"{min(f1, f2)}")
-                        return d
-            d = ask(f"{best.name} ({best.score:g}) och {scores[1].name} "
+                            second = _eff(scores[1])
+                        return ask(
+                            f"{vinnare} föreslås utifrån tidigare val "
+                            f"({max(f1, f2)} mot {min(f1, f2)} filer); "
+                            "bekräfta mappen innan filen flyttas. "
+                            "Inlärning ensam får aldrig flytta filer.")
+            d = ask(f"{best.name} ({_eff(best):g}) och {scores[1].name} "
                     f"({second:g}) ligger för nära")
             d.learned_hint = (lm_pred[0], lm_pred[2]) if lm_pred else None
             return d
         ratio = t["score_ratio"]
-        if ratio > 1.0 and second > 0 and best.score < second * ratio:
-            d = ask(f"{best.name} ({best.score:g}) är inte {ratio:g} gånger "
+        if ratio > 1.0 and second > 0 and _eff(best) < second * ratio:
+            d = ask(f"{best.name} ({_eff(best):g}) är inte {ratio:g} gånger "
                     f"starkare än {scores[1].name} ({second:g})")
             d.learned_hint = (lm_pred[0], lm_pred[2]) if lm_pred else None
             return d
 
-    d = Decision(extraction.path, extraction, scores, "auto", "")
-    return d
+    return ask(
+        f"{best.name} föreslås utifrån stödorden, men poäng flyttar aldrig "
+        "en fil automatiskt. Välj mapp och bekräfta flytten själv.")
 
 
 # ==========================================================================
@@ -1414,6 +2620,23 @@ def _inuti(barn: Path, förälder: Path) -> bool:
     return len(b) > len(f) and b[:len(f)] == f
 
 
+def processing_worker_count(settings: Optional[Dict[str, Any]] = None) -> int:
+    """Choose safe PDF parallelism, with a predictable low-memory cap."""
+    settings = settings or {}
+    if settings.get("low_memory_mode", False):
+        return 2
+    return max(2, min(8, os.cpu_count() or 2))
+
+
+def processing_batch_size(settings: Optional[Dict[str, Any]], workers: int,
+                           total: int) -> int:
+    """Bound queued PDF jobs in low-memory mode; default mode stays throughput-first."""
+    settings = settings or {}
+    if settings.get("low_memory_mode", False):
+        return max(1, min(max(1, int(total)), max(2, int(workers)) * 2))
+    return max(1, int(total))
+
+
 def list_pdfs(folder: Path, recursive: bool = False,
               excludes=()) -> List[Path]:
     folder = Path(folder)
@@ -1450,6 +2673,93 @@ def list_pdfs(folder: Path, recursive: bool = False,
         except OSError:
             continue
     return sorted(out)
+
+
+def audit_archive(files: List[Path], root: Optional[Path] = None) -> Dict[str, Any]:
+    """Read-only structural/health scan; never moves, repairs or deletes files."""
+    issues: List[Dict[str, str]] = []
+    by_name: Dict[str, List[Path]] = {}
+    by_size: Dict[int, List[Path]] = {}
+    checked = 0
+
+    def add(level: str, kind: str, path: Path, details: str) -> None:
+        issues.append({"level": level, "kind": kind,
+                       "path": str(path), "details": details})
+
+    for path in files:
+        checked += 1
+        by_name.setdefault(path.name.casefold(), []).append(path)
+        try:
+            size = path.stat().st_size
+            by_size.setdefault(size, []).append(path)
+        except OSError as exc:
+            add("error", "Kan inte läsa fil", path, str(exc))
+            continue
+        if size == 0:
+            add("error", "Tom fil", path, "Filen innehåller 0 byte.")
+            continue
+        if not pdf_looks_complete(path):
+            add("error", "PDF verkar ofullständig", path,
+                "PDF-signatur eller avslutande markör saknas.")
+            continue
+        try:
+            extraction = extract(path, max_pages=1, ocr_enabled=False)
+        except Exception as exc:
+            add("error", "PDF kunde inte kontrolleras", path,
+                f"{type(exc).__name__}: {exc}")
+            continue
+        if extraction.error:
+            add("error", "PDF kunde inte öppnas", path, extraction.error)
+        elif extraction.page_count <= 0:
+            add("warning", "Sidantal saknas", path,
+                "PDF-motorn kunde inte räkna dokumentets sidor.")
+        elif not extraction.text.strip():
+            add("info", "Saknar sökbart textlager", path,
+                f"{extraction.page_count} sidor; kan vara en skanning som kräver OCR.")
+
+    for same_name in by_name.values():
+        if len(same_name) > 1:
+            paths = sorted(same_name, key=lambda item: str(item).casefold())
+            add("warning", "Samma filnamn på flera platser", paths[0],
+                "Jämför dessa filer: " + " | ".join(str(path) for path in paths[:8]))
+
+    # Hash only equal-size candidates: exact duplicate detection without
+    # reading every large archive PDF twice.
+    for same_size in by_size.values():
+        if len(same_size) < 2:
+            continue
+        by_hash: Dict[str, List[Path]] = {}
+        for path in same_size:
+            try:
+                by_hash.setdefault(sha256_file(path), []).append(path)
+            except OSError as exc:
+                add("warning", "Dubblettkontroll misslyckades", path, str(exc))
+        for duplicates in by_hash.values():
+            if len(duplicates) > 1:
+                add("warning", "Identiska PDF-filer", duplicates[0],
+                    "Samma SHA-256: " + " | ".join(
+                        str(path) for path in duplicates[:8]))
+
+    if root is not None:
+        try:
+            for directory in Path(root).rglob("*"):
+                if directory.is_symlink() or not directory.is_dir():
+                    continue
+                try:
+                    if next(directory.iterdir(), None) is None:
+                        add("info", "Tom mapp", directory,
+                            "Mappen är tom; ta bort den bara om den inte behövs.")
+                except OSError as exc:
+                    add("warning", "Mappen kunde inte kontrolleras", directory,
+                        str(exc))
+        except OSError as exc:
+            issues.append({"level": "warning", "kind": "Arkivmappar kunde inte listas",
+                           "path": str(root), "details": str(exc)})
+
+    issues.sort(key=lambda item: (
+        {"error": 0, "warning": 1, "info": 2}.get(item["level"], 3),
+        item["path"].casefold(), item["kind"].casefold()))
+    return {"checked": checked, "issues": issues}
 
 
 def pdf_looks_complete(path: Path) -> bool:
@@ -1599,10 +2909,14 @@ class DiskTextCache:
     """
 
     MAX_ENTRIES = 1500
+    MAX_BYTES = 512 * 1024 * 1024
+    MAX_AGE_DAYS = 30
+    _KEY_RE = re.compile(r"^[0-9a-f]{40}\.json$")
 
     def __init__(self) -> None:
         self.dir = config_dir() / "cache"
         self._puts = 0
+        self._lock = threading.RLock()
 
     @staticmethod
     def _hash(path: Path) -> Optional[str]:
@@ -1612,42 +2926,149 @@ class DiskTextCache:
         import hashlib
         return hashlib.sha1(repr(key).encode("utf-8")).hexdigest()
 
+    def _discard(self, path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def get(self, path: Path) -> Optional[Extraction]:
         kh = self._hash(path)
         if kh is None:
             return None
-        try:
-            with open(self.dir / (kh + ".json"), "r", encoding="utf-8") as fh:
-                d = json.load(fh)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            return None
-        if not d.get("text"):
-            return None
-        return Extraction.from_cache_dict(path, d)
+        cache_file = self.dir / (kh + ".json")
+        with self._lock:
+            try:
+                with open(cache_file, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                try:
+                    from pdfsorter_read import EXTRACTION_CACHE_SCHEMA
+                except ImportError:
+                    EXTRACTION_CACHE_SCHEMA = None
+                if (not isinstance(data, dict) or not data.get("text")
+                        or data.get("extract_schema") != EXTRACTION_CACHE_SCHEMA):
+                    self._discard(cache_file)
+                    return None
+                extraction = Extraction.from_cache_dict(path, data)
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError,
+                    TypeError, ValueError, KeyError):
+                self._discard(cache_file)
+                return None
+            # mtime används som senaste-aktivitet i smartfiltret. En cache
+            # som faktiskt träffar ska inte rensas bara för att den skrevs
+            # för länge sedan.
+            try:
+                os.utime(cache_file, None)
+            except OSError:
+                pass
+            return extraction
 
     def put(self, path: Path, ext: Extraction) -> None:
         kh = self._hash(path)
         if kh is None or not ext.text:
             return
-        try:
-            self.dir.mkdir(parents=True, exist_ok=True)
-            with open(self.dir / (kh + ".json"), "w", encoding="utf-8") as fh:
-                json.dump(ext.to_cache_dict(), fh, ensure_ascii=False)
-        except OSError:
-            return
-        # Enkel städning var hundrade skrivning: behåll de nyaste.
-        self._puts += 1
-        if self._puts % 100 == 0:
+        with self._lock:
             try:
-                filer = sorted(self.dir.glob("*.json"),
-                               key=lambda p: p.stat().st_mtime)
-                while len(filer) > self.MAX_ENTRIES:
-                    filer.pop(0).unlink(missing_ok=True)
+                self.dir.mkdir(parents=True, exist_ok=True)
+                with open(self.dir / (kh + ".json"), "w", encoding="utf-8") as fh:
+                    json.dump(ext.to_cache_dict(), fh, ensure_ascii=False)
             except OSError:
-                pass
+                return
+            # Kapaciteten hålls även mellan de dagliga rensningarna.
+            self._puts += 1
+            if self._puts % 100 == 0:
+                self.cleanup()
+
+    def cleanup(self, now: Optional[float] = None) -> Dict[str, int]:
+        """Smart rensning: gammal/oanvänd cache först, aldrig annat än cache.
+
+        Poster som inte använts på 30 dagar tas bort. Därefter begränsas
+        kvarvarande data till 1 500 poster och 512 MiB genom att äldst
+        använda poster ryker först. Andra filer i cachemappen lämnas orörda.
+        """
+        now = time.time() if now is None else float(now)
+        cutoff = now - self.MAX_AGE_DAYS * 86400
+        removed_age = 0
+        removed_limit = 0
+        removed_bytes = 0
+        errors = 0
+        with self._lock:
+            entries = []
+            try:
+                self.dir.mkdir(parents=True, exist_ok=True)
+                for path in self.dir.iterdir():
+                    if not path.is_file() or not self._KEY_RE.fullmatch(path.name):
+                        continue
+                    try:
+                        stat = path.stat()
+                        if stat.st_mtime < cutoff:
+                            try:
+                                path.unlink()
+                                removed_age += 1
+                                removed_bytes += stat.st_size
+                            except FileNotFoundError:
+                                continue
+                            except OSError:
+                                errors += 1
+                                entries.append((path, stat.st_mtime, stat.st_size))
+                        else:
+                            entries.append((path, stat.st_mtime, stat.st_size))
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        errors += 1
+            except OSError:
+                return {"removed_age": 0, "removed_limit": 0,
+                        "removed_bytes": 0, "remaining": 0,
+                        "remaining_bytes": 0, "errors": 1}
+
+            entries.sort(key=lambda item: (item[1], item[0].name))
+            total_bytes = sum(item[2] for item in entries)
+            kunde_inte_tas_bort = []
+            while (len(entries) > self.MAX_ENTRIES
+                   or total_bytes > self.MAX_BYTES):
+                item = entries.pop(0)
+                path, _mtime, size = item
+                try:
+                    path.unlink()
+                    removed_limit += 1
+                    removed_bytes += size
+                    total_bytes -= size
+                except FileNotFoundError:
+                    total_bytes -= size
+                except OSError:
+                    errors += 1
+                    # Försök trimma nästa äldsta; rapportera denna som kvar.
+                    kunde_inte_tas_bort.append(item)
+                    total_bytes -= size
+            entries.extend(kunde_inte_tas_bort)
+            return {"removed_age": removed_age,
+                    "removed_limit": removed_limit,
+                    "removed_bytes": removed_bytes,
+                    "remaining": len(entries),
+                    "remaining_bytes": sum(item[2] for item in entries),
+                    "errors": errors}
 
 
 DISK_CACHE = DiskTextCache()
+
+
+def disk_cache_cleanup_due(last_cleanup: str,
+                           now: Optional[datetime] = None) -> bool:
+    """True när den beständiga cachen inte har smart-rensats på 24 timmar."""
+    if not last_cleanup:
+        return True
+    try:
+        senast = datetime.fromisoformat(str(last_cleanup))
+        nu = now or datetime.now()
+        if senast.tzinfo is not None:
+            senast = senast.astimezone().replace(tzinfo=None)
+        if nu.tzinfo is not None:
+            nu = nu.astimezone().replace(tzinfo=None)
+        elapsed = (nu - senast).total_seconds()
+        return elapsed < 0 or elapsed >= 86400
+    except (TypeError, ValueError, OverflowError):
+        return True
 
 
 def read_pdf(path: Path, settings: Dict[str, Any],
@@ -1685,19 +3106,159 @@ class SortEngine:
 
     def __init__(self, rules: Rules, settings: Dict[str, Any],
                  log: Optional[Callable[[str, str], None]] = None,
-                 conflict_asker: Optional[Callable[[Path, Path, str], str]] = None):
+                 conflict_asker: Optional[Callable[[Path, Path, str], str]] = None,
+                 locked_file_asker: Optional[Callable[[Path], bool]] = None):
         self.rules = rules
         self.settings = settings
         self.log = log or (lambda msg, level="info": None)
         #: REQ-N4: anropas när en dubblett upptäcks och returnerar
         # "replace" eller "rename". None (headless) = behåll båda + logga.
         self.conflict_asker = conflict_asker
+        self.locked_file_asker = locked_file_asker
         self.lock = threading.RLock()
         self.stats = Counter()
         # Debouncad rules.save (snabbare batch, mindre I/O-hack): högst en
         # skrivning per sekund; resten sparas vid flush_rules().
         self._last_rules_save = 0.0
         self._rules_dirty = False
+        # Innehållsindex byggs en gång per målmapp och uppdateras efter varje
+        # lyckad sortering. Det gör att olika filnamn/kategorier ändå jämförs
+        # utan att hasha hela arkivet för varje inkommande PDF.
+        self._content_index_root: Optional[Path] = None
+        self._content_index: Dict[int, List[Tuple[Path, Tuple[int, int]]]] = {}
+        self._content_hash_cache: Dict[Path, Tuple[Tuple[int, int], str]] = {}
+        self._content_fingerprint_index: Dict[str, List[Path]] = {}
+        self._content_fingerprint_path: Optional[Path] = None
+        self._persisted_content_fingerprints: Optional[Dict[str, Dict[str, Any]]] = None
+        self._content_index_at = 0.0
+        self._invoice_index_lock = threading.RLock()
+        self._invoice_index: Optional[Dict[str, Dict[str, Any]]] = None
+        self._invoice_index_dirty = False
+
+    def _load_invoice_index(self) -> Dict[str, Dict[str, Any]]:
+        if self._invoice_index is not None:
+            return self._invoice_index
+        raw = _read_json(json_dir() / "invoice_index.json", {})
+        entries = raw.get("entries", {}) if isinstance(raw, dict) else {}
+        self._invoice_index = {
+            str(path): item for path, item in entries.items()
+            if isinstance(path, str) and isinstance(item, dict)
+        } if isinstance(entries, dict) else {}
+        return self._invoice_index
+
+    def _save_invoice_index(self) -> None:
+        with self._invoice_index_lock:
+            if not self._invoice_index_dirty:
+                return
+            try:
+                _write_json(json_dir() / "invoice_index.json", {
+                    "schema": 1, "entries": self._load_invoice_index()})
+                self._invoice_index_dirty = False
+            except Exception as exc:
+                self.log(f"Kunde inte spara fakturadubblettindex: {exc}", "warn")
+
+    def _remember_invoice_identity(self, path: Path,
+                                   identity: Optional[Dict[str, Any]]) -> None:
+        if not identity:
+            return
+        try:
+            resolved = str(Path(path).resolve())
+            stat = Path(path).stat()
+        except OSError:
+            return
+        with self._invoice_index_lock:
+            self._load_invoice_index()[resolved] = {
+                "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                "supplier": normalize(str(identity.get("supplier", ""))),
+                "identity": dict(identity),
+            }
+            self._invoice_index_dirty = True
+            self._save_invoice_index()
+
+    def _invoice_identity_for_path(self, path: Path,
+                                   supplier: str) -> Optional[Dict[str, Any]]:
+        try:
+            resolved = str(path.resolve())
+            stat = path.stat()
+        except OSError:
+            return None
+        with self._invoice_index_lock:
+            entries = self._load_invoice_index()
+            cached = entries.get(resolved)
+            if (cached and cached.get("size") == stat.st_size
+                    and cached.get("mtime_ns") == stat.st_mtime_ns
+                    and normalize(str(cached.get("supplier", "")))
+                    == normalize(supplier)
+                    and isinstance(cached.get("identity"), dict)):
+                return cached["identity"] or None
+
+            # Read old archive items without starting new OCR work. Existing
+            # memory/disk cache entries may already contain OCR; text-native
+            # PDFs remain fast to index. New incoming files use their normal
+            # OCR settings before reaching this check.
+            read_settings = dict(self.settings)
+            read_settings["ocr_enabled"] = False
+            read_settings["max_pages_text"] = min(
+                8, max(1, int(read_settings.get("max_pages_text", 8) or 8)))
+            extraction = read_pdf(path, read_settings)
+            identity = extract_invoice_identity(extraction.text, supplier)
+            entries[resolved] = {
+                "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                "supplier": normalize(supplier),
+                "identity": identity or {},
+            }
+            self._invoice_index_dirty = True
+            return identity
+
+    def _find_invoice_duplicate(self, decision: Decision
+                                ) -> Optional[Dict[str, Any]]:
+        best = decision.best
+        if best is None:
+            return None
+        identity = extract_invoice_identity(decision.extraction.text, best.name)
+        if not identity:
+            return None
+        cat = self.rules.get(best.name)
+        if not cat:
+            return None
+        output_value = str(self.settings.get("output_dir", "") or "").strip()
+        if not output_value:
+            return None
+        output = Path(output_value)
+        base = output / safe_folder_name(cat["folder"])
+        if not base.is_dir():
+            return None
+        try:
+            source = decision.path.resolve()
+        except OSError:
+            source = decision.path
+        candidates = []
+        try:
+            for path in base.rglob("*"):
+                if not path.is_file() or path.suffix.casefold() != ".pdf":
+                    continue
+                try:
+                    if path.resolve() == source:
+                        continue
+                    candidates.append((path.stat().st_mtime_ns, path))
+                except OSError:
+                    continue
+        except OSError:
+            return None
+        # Check recent files first; the local index makes subsequent checks
+        # cheap and includes app-sorted invoices from earlier sessions.
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for _mtime, path in candidates[:200]:
+            previous = self._invoice_identity_for_path(path, best.name)
+            if previous and invoice_identity_matches(identity, previous):
+                self._save_invoice_index()
+                return {"identity": identity, "path": str(path),
+                        "amount_minor": identity["amount_minor"],
+                        "currency": identity["currency"],
+                        "invoice_number": identity["invoice_number"],
+                        "supplier": best.name}
+        self._save_invoice_index()
+        return None
 
     def _rules_save(self) -> None:
         now = time.time()
@@ -1737,6 +3298,61 @@ class SortEngine:
             pass
         with LogContext("tid", f"analys {path.name}"):
             ext = read_pdf(path, self.settings)
+            pdf_diagnostics = list(getattr(ext, "pdf_diagnostics", []) or [])
+            if pdf_diagnostics:
+                warning_count = sum(
+                    int(row.get("count", 1) or 1)
+                    for row in pdf_diagnostics if row.get("level") != "error")
+                motor_error_count = sum(
+                    int(row.get("count", 1) or 1)
+                    for row in pdf_diagnostics if row.get("level") == "error")
+                engines = ", ".join(sorted({
+                    str(row.get("engine", "PDF")) for row in pdf_diagnostics
+                }))
+                if ext.text:
+                    summary = (
+                        f"PDF-läsning {path.name}: text kunde ändå läsas; "
+                        f"{warning_count} varningar och {motor_error_count} "
+                        f"reservmotorfel ({engines}).")
+                    summary_level = "warn"
+                else:
+                    summary = (
+                        f"PDF-läsning misslyckades för {path.name}: "
+                        f"{warning_count} varningar, {motor_error_count} motorfel "
+                        f"({engines}). {ext.error or 'Ingen text kunde läsas.'}")
+                    summary_level = "err"
+                self.log(summary, summary_level)
+                for row in pdf_diagnostics[:8]:
+                    engine = str(row.get("engine", "PDF"))
+                    message = str(row.get("message", ""))
+                    count = max(1, int(row.get("count", 1) or 1))
+                    motor_failed = row.get("level") == "error"
+                    label = ("reservmotorfel" if ext.text else "motorfel") \
+                        if motor_failed else "återhämtningsbar varning"
+                    repeated = f" (upprepades {count} gånger)" if count > 1 else ""
+                    self.log(
+                        f"PDF-detalj · {path.name} · {engine} · {label}: "
+                        f"{message}{repeated}",
+                        "warn" if ext.text or not motor_failed else "err")
+                if len(pdf_diagnostics) > 8:
+                    self.log(
+                        f"PDF-detalj · {path.name}: "
+                        f"{len(pdf_diagnostics) - 8} ytterligare unika meddelanden "
+                        "hopslagna i sammanfattningen.", "info")
+                if hasattr(ext, "pdf_diagnostics"):
+                    ext.pdf_diagnostics.clear()
+            if getattr(ext, "ocr_pages", None):
+                page_notes = []
+                for page in ext.ocr_pages:
+                    number = page.get("page", len(page_notes) + 1)
+                    if int(page.get("chars", 0) or 0) <= 0:
+                        page_notes.append(f"sida {number}: ingen text")
+                    else:
+                        confidence = float(page.get("confidence", -1) or -1)
+                        score = f"{confidence:.0f}%" if confidence >= 0 else "okänd konfidens"
+                        page_notes.append(f"sida {number}: {score}")
+                self.log(f"OCR per sida för {path.name}: "
+                         + "; ".join(page_notes), "info")
             # Säkerhetsrundan 2026-10-16: fingeravtryck på exakt de byte
             # som analyserades. apply() vägrar flytta filen om den hunnit
             # ändras sedan dess (skanner/synk som fortfarande skriver) -
@@ -1751,15 +3367,36 @@ class SortEngine:
                 return Decision(path, ext, [], "ignored",
                                 f"Ignorerad: {reason}")
             with self.lock:
-                return decide(self.rules, ext, self.settings)
+                decision = decide(self.rules, ext, self.settings)
+            breaks = getattr(ext, "document_breaks", [])
+            if breaks and decision.status not in ("error", "ignored"):
+                plats = ", ".join(str(page) for page in breaks)
+                varning = ("PDF:en verkar innehålla flera dokument; "
+                           f"möjliga nya dokument börjar på sida {plats}. "
+                           "Granska och dela PDF:en före sortering.")
+                decision.status = "ask"
+                decision.reason = (f"{decision.reason} · {varning}"
+                                   if decision.reason else varning)
+            if decision.status not in ("error", "ignored"):
+                duplicate = self._find_invoice_duplicate(decision)
+                if duplicate:
+                    decision.invoice_duplicate = duplicate
+                    decision.status = "ask"
+                    duplicate_reason = (
+                        "Möjlig dubblettfaktura: samma leverantör/kategori, fakturanummer "
+                        "och belopp finns redan i arkivet. Kontrollera innan du "
+                        "sparar; appen tar inte bort någon fil.")
+                    decision.reason = (f"{decision.reason} · {duplicate_reason}"
+                                       if decision.reason else duplicate_reason)
+            return decision
 
     # -- verkställ ---------------------------------------------------------
     def subfolder_for(self, extraction: Extraction,
                       template: str = "") -> Tuple[str, Optional[date], str]:
         """Räkna ut undermappen för en fil.
 
-        Returnerar (relativ sökväg, använt datum, källa). Allt tomt när
-        datumsorteringen är avstängd - då beter sig appen exakt som förut.
+        Returnerar (relativ sökväg, använt datum, källa). Årsmappen
+        används som standard även när datummall saknas eller är avstängd.
         """
         s = self.settings
         sub, when, källa = "", None, ""
@@ -1771,33 +3408,63 @@ class SortEngine:
                 if when is None:
                     reserv = s.get("date_fallback", "none")
                     if reserv == "unknown":
-                        return "Utan datum", None, "saknas"
-                    if reserv == "filedate":
+                        sub, källa = "Utan datum", "saknas"
+                    elif reserv == "filedate":
                         try:
-                            when = date.fromtimestamp(
-                                extraction.path.stat().st_mtime)
+                            when = date.fromtimestamp(extraction.path.stat().st_mtime)
                             källa = "filens tid"
-                        except OSError:
-                            return "", None, ""
-                    else:
-                        when = None
+                        except (OSError, ValueError, OverflowError):
+                            pass
                 if when is not None:
                     sub = render_subfolder(mall, when)
-        # N16 (ANVÄNDARORDER 2026-10-15): årsmapp från filens eget
-        # datum, automatiskt. Året tas från det ÄLDSTA av ändrat/skapat
-        # (kopian bevarar ursprungligt ändringsdatum men får nytt
-        # skapelsedatum - min av dem är året användaren menar).
-        if not sub and s.get("year_subfolder", True):
-            try:
-                st = extraction.path.stat()
-                ts = min(st.st_mtime,
-                         getattr(st, "st_ctime", st.st_mtime))
-                when = date.fromtimestamp(ts)
-                sub = str(when.year)
-                källa = "fil-datum"
-            except (OSError, ValueError, OverflowError):
-                pass
+
+        # The selected destination always gets a year directory, including
+        # custom date templates and the explicit "Utan datum" fallback.
+        if s.get("year_subfolder", True):
+            year = when.year if when is not None else None
+            if year is None:
+                try:
+                    st = extraction.path.stat()
+                    timestamp = min(st.st_mtime, getattr(st, "st_ctime", st.st_mtime))
+                    when = date.fromtimestamp(timestamp)
+                    year = when.year
+                    if not källa:
+                        källa = "fil-datum"
+                except (OSError, ValueError, OverflowError):
+                    pass
+            if year is not None:
+                levels = [level for level in sub.split("/")
+                          if level and level != str(year)]
+                sub = "/".join([str(year), *levels])
         return sub, when, källa
+
+    def destination_for(self, decision: Decision, category: str,
+                        subfolder_override: str = "", *,
+                        automatic: bool = False) -> Tuple[Optional[Path], str]:
+        """Resolve the same output path used by apply(), without touching files."""
+        cat = self.rules.get(category)
+        if not cat:
+            return None, "Kategorin finns inte längre."
+        if automatic and not subfolder_override:
+            subfolder_override, error = resolve_automatic_subfolder(
+                self.rules, category, decision.extraction)
+            if error:
+                return None, error
+        sub, _when, _source = self.subfolder_for(
+            decision.extraction, cat.get("subfolder", ""))
+        category_sub, error = validate_subfolder_override(
+            cat.get("subfolder_path", ""))
+        if error:
+            return None, error
+        manual_sub, error = validate_subfolder_override(subfolder_override)
+        if error:
+            return None, error
+        parts = [part for part in (sub, category_sub, manual_sub) if part]
+        folder = Path(self.settings["output_dir"]) / safe_folder_name(cat["folder"])
+        for part in "/".join(parts).split("/"):
+            if part:
+                folder /= safe_folder_name(part)
+        return folder / decision.path.name, ""
 
     def _fil_ändrad(self, decision: Decision) -> bool:
         """Har filen på disk andra byte än den som analyserades?
@@ -1818,12 +3485,220 @@ class SortEngine:
         except OSError:
             return True
 
+    @staticmethod
+    def _content_signature(path: Path) -> Tuple[int, int]:
+        st = path.stat()
+        return st.st_size, getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+
+    def _load_content_fingerprints(self) -> Dict[str, Dict[str, Any]]:
+        if self._persisted_content_fingerprints is not None:
+            return self._persisted_content_fingerprints
+        try:
+            self._content_fingerprint_path = json_dir() / "content_fingerprints.json"
+            data = _read_json(self._content_fingerprint_path, {})
+        except Exception:
+            # Dubblettindexet är en optimering; nekad config-sökväg eller
+            # korrupt cache får aldrig stoppa själva filsorteringen.
+            self._content_fingerprint_path = None
+            data = {}
+        entries = data.get("entries", {}) if isinstance(data, dict) else {}
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        if isinstance(entries, dict):
+            for path, item in entries.items():
+                if (isinstance(path, str) and isinstance(item, dict)
+                        and re.fullmatch(r"[0-9a-f]{64}",
+                                         str(item.get("sha256", "")))):
+                    try:
+                        cleaned[path] = {
+                            "size": int(item["size"]),
+                            "mtime_ns": int(item["mtime_ns"]),
+                            "sha256": str(item["sha256"]),
+                        }
+                    except (KeyError, TypeError, ValueError):
+                        continue
+        self._persisted_content_fingerprints = cleaned
+        return cleaned
+
+    def _save_content_fingerprints(self) -> None:
+        entries = self._load_content_fingerprints()
+        if self._content_fingerprint_path is None:
+            return
+        try:
+            _write_json(self._content_fingerprint_path,
+                        {"schema_version": 1, "entries": entries})
+        except Exception as exc:
+            self.log(f"Kunde inte spara dubblettindexet: {exc}", "warn")
+
+    def _refresh_content_index(self, out_root: Path, force: bool = False) -> None:
+        """Indexera PDF-sökvägar efter storlek; SHA-256 räknas först vid behov."""
+        root = Path(out_root).resolve()
+        now = time.monotonic()
+        if (not force and self._content_index_root == root
+                and now - self._content_index_at < 15.0):
+            return
+        index: Dict[int, List[Tuple[Path, Tuple[int, int]]]] = {}
+        fingerprint_index: Dict[str, List[Path]] = {}
+        persisted = self._load_content_fingerprints()
+        try:
+            if root.is_dir():
+                for base, _dirs, names in os.walk(root):
+                    for name in names:
+                        if Path(name).suffix.casefold() != ".pdf":
+                            continue
+                        path = Path(base) / name
+                        try:
+                            sig = self._content_signature(path)
+                            index.setdefault(sig[0], []).append((path, sig))
+                            key = str(path.resolve())
+                            stored = persisted.get(key)
+                            if stored and (stored["size"], stored["mtime_ns"]) == sig:
+                                digest = stored["sha256"]
+                                self._content_hash_cache[path] = (sig, digest)
+                                fingerprint_index.setdefault(digest, []).append(path)
+                        except OSError:
+                            continue
+        except OSError:
+            pass
+        self._content_index_root = root
+        self._content_index = index
+        self._content_fingerprint_index = fingerprint_index
+        self._content_index_at = now
+        live = {path for entries in index.values() for path, _sig in entries}
+        self._content_hash_cache = {
+            path: entry for path, entry in self._content_hash_cache.items()
+            if path in live
+        }
+
+    def _cached_sha256(self, path: Path, signature: Tuple[int, int]) -> str:
+        hit = self._content_hash_cache.get(path)
+        if hit and hit[0] == signature:
+            return hit[1]
+        digest = sha256_file(path)
+        self._content_hash_cache[path] = (signature, digest)
+        return digest
+
+    def _find_content_duplicate(self, out_root: Path, source: Path
+                                ) -> Tuple[Optional[Path], Optional[str]]:
+        """Hitta identiskt PDF-innehåll var som helst i målmappens träd."""
+        try:
+            src_sig = self._content_signature(source)
+            src_hash = sha256_file(source)
+        except OSError:
+            return None, None
+        self._refresh_content_index(out_root)
+        for candidate in self._content_fingerprint_index.get(src_hash, []):
+            if candidate.exists() and candidate.resolve() != source.resolve():
+                return candidate, src_hash
+        src_resolved = source.resolve()
+        for candidate, _indexed_sig in self._content_index.get(src_sig[0], []):
+            try:
+                if candidate.resolve() == src_resolved:
+                    continue
+                current_sig = self._content_signature(candidate)
+                if current_sig[0] != src_sig[0]:
+                    continue
+                digest = self._cached_sha256(candidate, current_sig)
+                if digest == src_hash:
+                    return candidate, src_hash
+            except OSError:
+                continue
+        return None, src_hash
+
+    def _remember_content_file(self, path: Optional[Path], digest: str = "") -> None:
+        if not path:
+            return
+        try:
+            path = Path(path).resolve()
+            sig = self._content_signature(path)
+            if digest:
+                self._content_hash_cache[path] = (sig, digest)
+                persisted = self._load_content_fingerprints()
+                persisted[str(path)] = {
+                    "size": sig[0], "mtime_ns": sig[1], "sha256": digest,
+                }
+                self._save_content_fingerprints()
+                self._content_fingerprint_index.setdefault(digest, []).append(path)
+            if self._content_index_root is not None:
+                bucket = self._content_index.setdefault(sig[0], [])
+                if not any(p == path for p, _old in bucket):
+                    bucket.append((path, sig))
+        except OSError:
+            pass
+
+    def _forget_content_file(self, path: Path) -> None:
+        try:
+            resolved = Path(path).resolve()
+        except OSError:
+            resolved = Path(path)
+        persisted = self._load_content_fingerprints()
+        persisted.pop(str(resolved), None)
+        self._content_hash_cache.pop(resolved, None)
+        for digest, paths in list(self._content_fingerprint_index.items()):
+            remaining = [candidate for candidate in paths if candidate != resolved]
+            if remaining:
+                self._content_fingerprint_index[digest] = remaining
+            else:
+                self._content_fingerprint_index.pop(digest, None)
+        for size, entries in list(self._content_index.items()):
+            remaining = [entry for entry in entries if entry[0].resolve() != resolved]
+            if remaining:
+                self._content_index[size] = remaining
+            else:
+                self._content_index.pop(size, None)
+        self._save_content_fingerprints()
+
+    def _place_file(self, src: Path, out_root: Path, folder: str,
+                    action: str, on_conflict: str, dry_run: bool,
+                    subfolder: str) -> Tuple[bool, str, Optional[Path]]:
+        """Förvarna om låsta filer och försök flytten efter användarens svar."""
+        asker = self.locked_file_asker
+        if action != "copy" and not dry_run and is_file_locked(src):
+            if asker is None or not asker(src):
+                return False, ("Filen är låst och lämnades kvar. Stäng den "
+                               "i programmet där den är öppen."), None
+            if is_file_locked(src):
+                return False, ("Filen är fortfarande låst och lämnades kvar. "
+                               "Stäng den och försök igen."), None
+
+        result = place_file(src, out_root, folder, action=action,
+                            on_conflict=on_conflict, dry_run=dry_run,
+                            subfolder=subfolder)
+        ok, msg, target = result
+        # Låset kan uppstå mellan förkontrollen och flytten. Fråga då också
+        # innan nästa (eventuellt lyckade) försök.
+        if (not ok and action != "copy" and not dry_run and asker is not None
+                and "låst" in msg.casefold() and asker(src)):
+            if is_file_locked(src):
+                return False, ("Filen är fortfarande låst och lämnades kvar. "
+                               "Stäng den och försök igen."), None
+            return place_file(src, out_root, folder, action=action,
+                              on_conflict=on_conflict, dry_run=dry_run,
+                              subfolder=subfolder)
+        return result
+
     def apply(self, decision: Decision, category: str, matched: List[str],
-              decided_by: str = "auto", learned: Optional[List[str]] = None) -> Tuple[bool, str]:
+              decided_by: str = "auto", learned: Optional[List[str]] = None,
+              cancel_event: Optional[threading.Event] = None,
+              subfolder_override: str = "") -> Tuple[bool, str]:
         # Hela verkställandet serialiseras: parallella sorteringstrådar får
         # aldrig tävla om målnamn (REQ-D2 - filer skrivs aldrig över).
         s = self.settings
         with self.lock:
+            if cancel_event is not None and cancel_event.is_set():
+                return False, "Avbruten innan filen flyttades; den ligger kvar."
+            if (decided_by in {"auto", "rescan"}
+                    and exact_auto_category(self.rules, decision) != category):
+                self.stats["left"] += 1
+                return False, ("Automatisk flyttning kräver minst två olika "
+                               "exakta stödord som inte delas med andra kategorier "
+                               "och hundra tidigare manuella bekräftelser där. "
+                               "Filen ligger kvar för granskning.")
+            if decided_by in {"auto", "rescan"} and not subfolder_override:
+                subfolder_override, routing_error = resolve_automatic_subfolder(
+                    self.rules, category, decision.extraction)
+                if routing_error:
+                    self.stats["left"] += 1
+                    return False, routing_error + " Filen lämnas för granskning."
             if not s.get("dry_run", False) and self._fil_ändrad(decision):
                 self.stats["left"] += 1
                 return False, ("Filen ändrades efter analysen - lämnas "
@@ -1833,11 +3708,23 @@ class SortEngine:
             folder = cat["folder"]
             mall = cat.get("subfolder", "")
             sub, when, källa = self.subfolder_for(decision.extraction, mall)
+            category_sub, category_error = validate_subfolder_override(
+                cat.get("subfolder_path", ""))
+            if category_error:
+                self.stats["left"] += 1
+                return False, f"Kategorins standardundermapp är ogiltig: {category_error}"
+            manual_sub, sub_error = validate_subfolder_override(subfolder_override)
+            if sub_error:
+                self.stats["left"] += 1
+                return False, sub_error
+            sub = "/".join(part for part in (sub, category_sub, manual_sub) if part)
 
             # -- REQ-N4: dubblettkontroll innan något rör disken --
             on_conflict = s.get("on_conflict", "rename")
             conflict = ""
             same_content_file: Optional[Path] = None
+            source_hash = ""
+            remove_duplicate_after_place = False
             if not s.get("dry_run", False):
                 dest_dir = Path(s["output_dir"]) / safe_folder_name(folder)
                 if sub:
@@ -1846,28 +3733,26 @@ class SortEngine:
                             dest_dir = dest_dir / safe_folder_name(nivå)
                 namnkrock = dest_dir / decision.path.name
                 if namnkrock.exists():
-                    conflict = "name"
-                elif decision.path.exists() and dest_dir.is_dir():
-                    # Innehållsdubblett med annat namn: samma storlek är
-                    # förfiltret, hashen är beviset.
                     try:
-                        src_st = decision.path.stat()
-                        src_sha = sha256_file(decision.path)
-                        for cand in dest_dir.iterdir():
-                            try:
-                                if (cand.is_file()
-                                        and cand.stat().st_size == src_st.st_size
-                                        and sha256_file(cand) == src_sha):
-                                    same_content_file = cand
-                                    conflict = "content"
-                                    break
-                            except OSError:
-                                continue
+                        same_source_path = (namnkrock.resolve()
+                                            == decision.path.resolve())
                     except OSError:
-                        pass
+                        same_source_path = False
+                    if not same_source_path:
+                        conflict = "name"
+                elif decision.path.exists():
+                    # Innehållsdubblett var som helst under vald målmapp,
+                    # även om filnamn, kategori eller årsmapp skiljer sig.
+                    same_content_file, source_hash = self._find_content_duplicate(
+                        Path(s["output_dir"]), decision.path)
+                    if same_content_file is not None:
+                        conflict = "content"
                 if conflict:
+                    dialog_target = (same_content_file
+                                     if conflict == "content" and same_content_file
+                                     else namnkrock)
                     if self.conflict_asker is not None:
-                        svar = self.conflict_asker(decision.path, namnkrock, conflict)
+                        svar = self.conflict_asker(decision.path, dialog_target, conflict)
                     else:
                         svar = "rename"
                         self.log(f"Dubblett upptäckt ({conflict}) - "
@@ -1876,16 +3761,18 @@ class SortEngine:
                         self.stats["left"] += 1
                         return False, "Överhoppad - dubblettfrågan avbröts"
                     if svar == "replace":
-                        on_conflict = "overwrite"
                         if conflict == "content" and same_content_file is not None:
-                            try:
-                                same_content_file.unlink()
-                            except OSError:
-                                on_conflict = "rename"
+                            # Den nya kopian måste finnas på plats innan den
+                            # gamla tas bort. Ett lås/full disk får aldrig
+                            # göra att användarens enda kopia försvinner.
+                            remove_duplicate_after_place = True
+                            on_conflict = "rename"
+                        else:
+                            on_conflict = "overwrite"
                     else:
                         on_conflict = "rename"
 
-            ok, msg, target = place_file(
+            ok, msg, target = self._place_file(
                 decision.path, Path(s["output_dir"]), folder,
                 action=s.get("action", "move"),
                 on_conflict=on_conflict,
@@ -1893,33 +3780,74 @@ class SortEngine:
                 subfolder=sub,
             )
             if not ok:
-                self.stats["error"] += 1
+                if "lämnades kvar" in msg:
+                    self.stats["left"] += 1
+                else:
+                    self.stats["error"] += 1
                 return False, msg
+            if (remove_duplicate_after_place and same_content_file is not None
+                    and Path(target).resolve() != same_content_file.resolve()):
+                try:
+                    same_content_file.unlink()
+                    self._forget_content_file(same_content_file)
+                except OSError as exc:
+                    self.log(f"Ersättningen är sparad men den äldre dubbletten "
+                             f"kunde inte tas bort ({same_content_file.name}): {exc}",
+                             "warn")
             if not s.get("dry_run", False) and s.get("tag_pdf_metadata", True):
                 try:
                     tag_pdf_metadata(Path(target), category)
                 except Exception:
                     pass
+            invoice_key = (extract_invoice_identity(
+                decision.extraction.text, category)
+                if not s.get("dry_run", False) else None)
+            if not s.get("dry_run", False):
+                self._remember_content_file(Path(target), source_hash)
+                self._remember_invoice_identity(Path(target), invoice_key)
             # Filen ligger inte kvar på sin gamla plats - släpp den ur cachen
             # så att minnet inte fylls av poster som aldrig kan träffa igen.
             TEXT_CACHE.forget(decision.path)
 
             if not s.get("dry_run", False):
                 self.rules.register_hit(category, matched)
-                self._rules_save()
                 best = decision.best
-                # N14: varje beslut blir träningsdata (AC-14.4) - även
-                # användarens korrigeringar, eftersom kategorin här är
-                # det slutgiltiga valet.
+                # Negativ inlärning (2026-10-20): rättade användaren en
+                # automatisk gissning ska den felaktiga kategorin lära sig
+                # av misstaget - dess stödord väger mindre nästa gång och
+                # den lärda modellen får negativa bevis. Utan detta blev
+                # bara det rätta valet starkare och samma ord kunde leda
+                # fel om och om igen.
+                wrong = ""
+                if (decided_by == "user" and best is not None
+                        and best.name != category):
+                    wrong = best.name
+                    self.rules.register_reject(wrong, best.matched)
+                self._rules_save()
+                # Självlärning bygger bara på användarens uttryckliga val
+                # och rättelser. Autosorteringar och omskanningar är aldrig
+                # facit, även när filen faktiskt flyttades.
                 toks = learn_tokens(decision.extraction.text
                                     or decision.extraction.combined)
-                if s.get("learned_matching", True):
+                features = learn_features(decision.extraction)
+                rejected_features = (rejected_learning_features(best)
+                                     if wrong and best else [])
+                if decided_by == "user":
                     try:
-                        _learned().train(category, toks)
+                        with _LEARNED_LOCK:
+                            _learned().train(
+                                category, features, incorrect_for=wrong or None,
+                                rejected_tokens=rejected_features,
+                                evidence_weight=_LEARNED_MANUAL_WEIGHT,
+                            )
                     except Exception:
                         pass
                 append_history({
                     "tokens": toks,
+                    "features": features,
+                    "rejected_features": rejected_features,
+                    "match_zones": ({w: best.zone_of(w) for w in best.matched}
+                                    if best else {}),
                     "time": now_iso(),
                     "action": s.get("action", "move"),
                     "source": str(decision.path),
@@ -1932,18 +3860,27 @@ class SortEngine:
                     "matched": matched,
                     "used_ocr": decision.extraction.used_ocr,
                     "decided_by": decided_by,
+                    "learning_weight": (
+                        _LEARNED_MANUAL_WEIGHT if decided_by == "user" else 1),
+                    "corrected_from": wrong or None,
                     "learned": learned or [],
                     "date": when.isoformat() if when else None,
                     "date_source": källa,
                     "subfolder": sub,
+                    "subfolder_choice": manual_sub if decided_by == "user" else "",
+                    "invoice_identity": invoice_key,
                     "conflict": conflict or None,
                 })
             self.stats["sorted"] += 1
             return True, str(target)
 
-    def send_to_unmatched(self, decision: Decision) -> Tuple[bool, str]:
+    def send_to_unmatched(self, decision: Decision,
+                          cancel_event: Optional[threading.Event] = None
+                          ) -> Tuple[bool, str]:
         """Flytta till _Osorterat om en sådan mapp är konfigurerad."""
         with self.lock:
+            if cancel_event is not None and cancel_event.is_set():
+                return False, "Avbruten innan filen flyttades; den ligger kvar."
             if (not self.settings.get("dry_run", False)
                     and self._fil_ändrad(decision)):
                 self.stats["left"] += 1
@@ -1953,11 +3890,13 @@ class SortEngine:
             if not folder:
                 self.stats["left"] += 1
                 return False, "Lämnad i inmappen"
-            ok, msg, target = place_file(
+            subfolder, _when, _source = self.subfolder_for(decision.extraction)
+            ok, msg, target = self._place_file(
                 decision.path, Path(self.settings["output_dir"]), folder,
                 action=self.settings.get("action", "move"),
                 on_conflict=self.settings.get("on_conflict", "rename"),
                 dry_run=bool(self.settings.get("dry_run", False)),
+                subfolder=subfolder,
             )
             if ok and not self.settings.get("dry_run", False):
                 append_history({
@@ -1970,6 +3909,7 @@ class SortEngine:
                     "matched": [],
                     "used_ocr": decision.extraction.used_ocr,
                     "decided_by": "unmatched",
+                    "subfolder": subfolder,
                     "learned": [],
                 })
             self.stats["unmatched"] += 1
@@ -2154,11 +4094,15 @@ try:
     set_app_user_model_id = _sys_mod.set_app_user_model_id
     autostart_supported = _sys_mod.autostart_supported
     autostart_enabled = _sys_mod.autostart_enabled
+    autostart_session_available = _sys_mod.autostart_session_available
     set_autostart = _sys_mod.set_autostart
     sync_autostart = _sys_mod.sync_autostart
+    effective_autostart = _sys_mod.effective_autostart
     create_desktop_shortcut = _sys_mod.create_desktop_shortcut
     install_helpers = _sys_mod.install_helpers
     tray_available = _sys_mod.tray_available
+    tray_backend_name = _sys_mod.tray_backend_name
+    tray_hidden_start_safe = _sys_mod.tray_hidden_start_safe
     TrayIcon = _sys_mod.TrayIcon
     HELP_CONTENT = _sys_mod.HELP_CONTENT
     help_as_text = _sys_mod.help_as_text
@@ -2169,6 +4113,10 @@ try:
     session_path = _sys_mod.session_path
     session_dir = _sys_mod.session_dir
     latest_session_log = _sys_mod.latest_session_log
+    mark_error_code_resolved = _sys_mod.mark_error_code_resolved
+    list_error_codes = _sys_mod.list_error_codes
+    purge_resolved_error_codes = _sys_mod.purge_resolved_error_codes
+    auto_resolve_stale_codes = _sys_mod.auto_resolve_stale_codes
     install_excepthooks = _sys_mod.install_excepthooks
     close_session = _sys_mod.close_session
     set_process_dpi_aware = _sys_mod.set_process_dpi_aware
@@ -2209,11 +4157,17 @@ except Exception as _sys_err:                       # noqa: BLE001
     def autostart_enabled() -> bool:
         return False
 
+    def autostart_session_available() -> bool:
+        return True
+
     def set_autostart(enabled: bool) -> Tuple[bool, str]:
         return False, "pdfsorter_system.py saknas - autostart går inte att ställa in"
 
     def sync_autostart(want: bool) -> Tuple[bool, str]:
         return False, "pdfsorter_system.py saknas - autostart går inte att ställa in"
+
+    def effective_autostart(_settings: dict) -> Tuple[bool, bool]:
+        return False, False
 
     def create_desktop_shortcut() -> Tuple[bool, str]:
         return False, "pdfsorter_system.py saknas - kan inte skapa genväg"
@@ -2249,6 +4203,12 @@ except Exception as _sys_err:                       # noqa: BLE001
 
     def tray_available() -> bool:
         return False
+
+    def tray_backend_name() -> str:
+        return ""
+
+    def tray_hidden_start_safe() -> Tuple[bool, str]:
+        return False, "pdfsorter_system.py saknas"
 
     TrayIcon = None                                  # type: ignore[assignment]
 
@@ -2287,6 +4247,18 @@ except Exception as _sys_err:                       # noqa: BLE001
 
     def latest_session_log():
         return None
+
+    def mark_error_code_resolved(_code, _note=""):
+        return False
+
+    def list_error_codes():
+        return []
+
+    def purge_resolved_error_codes():
+        return {"koder": [], "block": 0, "samlat": 0}
+
+    def auto_resolve_stale_codes(_days=0):
+        return []
 
     def install_excepthooks() -> None:
         return None
@@ -2393,14 +4365,17 @@ except ImportError as _theme_err:   # noqa: F401
             self.f_mono_bold = ("TkFixedFont", 9, "bold")
             # Registrera stilnamnen tomma, annars kraschar widgetarna
             for name in ("Card.TFrame", "CardInner.TFrame", "Shadow.TFrame",
-                         "Sunk.TFrame", "Status.TFrame"):
+                         "Sunk.TFrame", "Status.TFrame", "Topbar.TFrame",
+                         "Hero.TFrame", "Step.TFrame"):
                 self.style.configure(name)
             for name in ("Card.TLabel", "CardMuted.TLabel", "CardHead.TLabel",
-                         "CardTitle.TLabel", "CardKey.TLabel", "Muted.TLabel",
+                         "CardTitle.TLabel", "CardHuge.TLabel", "CardKey.TLabel", "Muted.TLabel",
                          "Faint.TLabel", "Title.TLabel", "Head.TLabel",
                          "Huge.TLabel", "Section.TLabel", "Ok.TLabel",
                          "Warn.TLabel", "Err.TLabel", "Status.TLabel",
-                         "PillMuted.TLabel"):
+                         "PillMuted.TLabel", "PillAccent.TLabel",
+                         "BrandTitle.TLabel", "BrandSub.TLabel",
+                         "HeroTitle.TLabel", "HeroText.TLabel"):
                 self.style.configure(name)
             for name in ("Accent.TButton", "Danger.TButton", "Link.TButton",
                          "CardLink.TButton"):
@@ -2517,6 +4492,294 @@ def open_externally(path: Path) -> None:
         session_error("ui", exc)
 
 
+def rules_transfer_dir(kind: str) -> Path:
+    """Return and create the dedicated category-rules import/export folder."""
+    if kind not in {"imports", "exports"}:
+        raise ValueError("kind must be 'imports' or 'exports'")
+    folder = Path(config_dir()) / kind
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def validate_rules_transfer(data: Any) -> Tuple[List[Dict[str, Any]], str]:
+    """Granska en importerad regelfil. Returnerar (kategorier, feltext)."""
+    if not isinstance(data, dict):
+        return [], "Filen är inte en giltig regelfil."
+    raw = data.get("categories")
+    if not isinstance(raw, list) or not raw:
+        return [], "Filen innehöll inga kategorier."
+    incoming = Rules(data)
+    if not incoming.categories:
+        return [], "Filen innehöll inga giltiga kategorier."
+    return incoming.categories, ""
+
+
+def _write_pdf_copy(destination: Path, write_to_temp: Callable[[Path], None]) -> Path:
+    """Write a PDF beside its destination, then atomically publish the copy."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{destination.stem}-", suffix=".tmp.pdf",
+        dir=str(destination.parent))
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        write_to_temp(temp_path)
+        os.replace(temp_path, destination)
+    except Exception:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return destination
+
+
+def rotate_pdf_copy(source: Path, destination: Path, degrees: int) -> Path:
+    """Create a vector-preserving rotated PDF copy; never modify source."""
+    source, destination = Path(source), Path(destination)
+    angle = int(degrees) % 360
+    if angle not in (90, 180, 270):
+        raise ValueError("Rotation must be 90, 180 or 270 degrees")
+    if source.resolve() == destination.resolve():
+        raise ValueError("Choose a new filename; the original must remain unchanged")
+
+    def write(temp_path: Path) -> None:
+        from pypdf import PdfReader, PdfWriter
+        writer = PdfWriter()
+        with source.open("rb") as source_stream:
+            reader = PdfReader(source_stream)
+            for page in reader.pages:
+                page.rotate(angle)
+                writer.add_page(page)
+            if reader.metadata:
+                metadata = {str(k): str(v) for k, v in reader.metadata.items()
+                            if k and v is not None}
+                if metadata:
+                    writer.add_metadata(metadata)
+            with temp_path.open("wb") as output_stream:
+                writer.write(output_stream)
+
+    return _write_pdf_copy(destination, write)
+
+
+def rotate_pdf_with_backup(source: Path, degrees: int) -> Tuple[Path, Path]:
+    """Atomically replace a PDF with its rotated copy after making a backup.
+
+    The backup is kept beside the source with a non-.pdf suffix, so the inbox
+    watcher does not mistake it for another document.
+    """
+    source = Path(source)
+    if source.is_symlink():
+        raise ValueError("Choose the PDF file itself, not a symbolic link")
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    angle = int(degrees) % 360
+    if angle not in (90, 180, 270):
+        raise ValueError("Rotation must be 90, 180 or 270 degrees")
+    backup_path = unique_target(source.with_name(
+        f"{source.name}.backup-{datetime.now():%Y%m%d-%H%M%S}.bak"))
+    rotated_fd, rotated_name = tempfile.mkstemp(
+        prefix=f".{source.stem}-rotated-", suffix=".pdf", dir=str(source.parent))
+    os.close(rotated_fd)
+    rotated_path = Path(rotated_name)
+    backup_fd, backup_name = tempfile.mkstemp(
+        prefix=f".{source.name}-backup-", suffix=".tmp", dir=str(source.parent))
+    os.close(backup_fd)
+    backup_temp = Path(backup_name)
+    try:
+        original_hash = sha256_file(source)
+        shutil.copy2(source, backup_temp)
+        if (sha256_file(source) != original_hash
+                or sha256_file(backup_temp) != original_hash):
+            raise RuntimeError(
+                "PDF changed while its backup was being created; original was not replaced")
+        # Rotate the exact snapshot that will serve as the backup, not a
+        # possibly changing source file.
+        rotate_pdf_copy(backup_temp, rotated_path, angle)
+        if sha256_file(source) != original_hash:
+            raise RuntimeError(
+                "PDF changed during rotation; original was not replaced")
+        os.replace(backup_temp, backup_path)
+        if sha256_file(source) != original_hash:
+            raise RuntimeError(
+                "PDF changed before the rotated copy could be installed")
+        os.replace(rotated_path, source)
+        return source, backup_path
+    finally:
+        for temporary in (rotated_path, backup_temp):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def deskew_pdf_copy(source: Path, destination: Path,
+                    degrees: Optional[float] = None, dpi: int = 216) -> Path:
+    """Create a per-page deskewed copy, or apply a fixed angle; source stays untouched."""
+    source, destination = Path(source), Path(destination)
+    angle = None if degrees is None else float(degrees)
+    if angle is not None and not -15.0 <= angle <= 15.0:
+        raise ValueError("Deskew angle must be between -15 and +15 degrees")
+    if source.resolve() == destination.resolve():
+        raise ValueError("Choose a new filename; the original must remain unchanged")
+    if not has_pymupdf():
+        raise RuntimeError("Rätning kräver PyMuPDF")
+
+    def write(temp_path: Path) -> None:
+        import io
+        from PIL import Image
+        fitz = _open_pymupdf()
+        scale = max(1.0, min(4.0, float(dpi) / 72.0))
+        resampling = getattr(Image, "Resampling", Image).BICUBIC
+        with fitz.open(str(source)) as original:
+            output = fitz.open()
+            try:
+                for page in original:
+                    page_scale = _bounded_render_zoom(page.rect, scale)
+                    pix = page.get_pixmap(
+                        matrix=fitz.Matrix(page_scale, page_scale), alpha=False)
+                    with Image.open(io.BytesIO(pix.tobytes("png"))) as opened:
+                        image = opened.convert("RGB")
+                    correction = (angle if angle is not None else
+                                 float(_deskew_angle(image, max_angle=5.0, steps=11)))
+                    correction = max(-15.0, min(15.0, correction))
+                    corrected = image.rotate(
+                        correction, resample=resampling, expand=True, fillcolor="white")
+                    payload = io.BytesIO()
+                    corrected.save(payload, format="PNG", optimize=True)
+                    new_page = output.new_page(
+                        width=corrected.width / page_scale,
+                        height=corrected.height / page_scale)
+                    new_page.insert_image(new_page.rect, stream=payload.getvalue())
+                try:
+                    metadata = {k: v for k, v in original.metadata.items()
+                                if k in {"title", "author", "subject", "keywords",
+                                         "creator", "producer", "creationDate",
+                                         "modDate", "trapped"} and v}
+                    if metadata:
+                        output.set_metadata(metadata)
+                except Exception:
+                    pass
+                output.save(str(temp_path), garbage=3, deflate=True)
+            finally:
+                output.close()
+
+    return _write_pdf_copy(destination, write)
+
+
+def error_next_step(exc: BaseException) -> str:
+    """Return one safe, practical next step for common user-facing failures."""
+    err_no = getattr(exc, "errno", None)
+    if isinstance(exc, PermissionError) or err_no in (13, 1):
+        return ("Stäng program som kan ha filen öppen och kontrollera att du "
+                "har läs-/skrivbehörighet till mappen.")
+    if isinstance(exc, FileNotFoundError) or err_no == 2:
+        return ("Kontrollera att filen eller mappen inte har flyttats eller "
+                "bytt namn och uppdatera sedan listan.")
+    if err_no == 28:
+        return "Frigör diskutrymme på målenheten och försök igen."
+    if err_no in (16, 32, 33):
+        return "Stäng PDF:en i andra program och försök igen."
+    if isinstance(exc, ImportError):
+        return "Kör den officiella uppdateraren eller be administratören reparera installationen."
+    message = str(exc).casefold()
+    if any(term in message for term in ("changed during", "changed while",
+                                        "changed before")):
+        return "Filen ändrades under arbetet. Stäng program som redigerar den och försök igen."
+    if any(term in message for term in ("not a pdf", "invalid pdf", "pdf header")):
+        return "Kontrollera att filen verkligen är en giltig PDF; originalet har inte ändrats."
+    if "no space" in message or "disk full" in message:
+        return "Frigör diskutrymme på målenheten och försök igen."
+    return "Kontrollera filen och målmappen; originalfilen lämnas kvar om åtgärden misslyckas."
+
+
+def create_pdf_split_copies(path: Path, break_pages: List[int],
+                            output_dir: Path) -> List[Path]:
+    """Skapa separata PDF-kopior vid föreslagna sidstarter.
+
+    Sidnummer i break_pages är 1-baserade. Originalfilen öppnas endast för
+    läsning; alla deldokument skrivs först till temporärfiler och flyttas
+    sedan till unika målnamn. Misslyckas något steg lämnas originalet orört
+    och redan skapade delkopior rullas tillbaka.
+    """
+    if not has_pymupdf():
+        raise RuntimeError("Delning kräver PyMuPDF (pymupdf).")
+    pymupdf = _open_pymupdf()
+    source = Path(path)
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    temporaries: List[Path] = []
+    reserved: List[Path] = []
+    created: List[Path] = []
+    document = None
+    try:
+        document = pymupdf.open(str(source))
+        total = len(document)
+        starts = sorted({int(page) for page in break_pages
+                         if 1 < int(page) <= total})
+        if not starts:
+            raise ValueError("Inga giltiga sidgränser att dela vid.")
+        boundaries = [0, *(page - 1 for page in starts), total]
+        ranges = list(zip(boundaries[:-1], boundaries[1:]))
+        if len(ranges) < 2 or any(first >= last for first, last in ranges):
+            raise ValueError("Sidgränserna gav inga giltiga dokumentdelar.")
+
+        for first, last in ranges:
+            fd, temp_name = tempfile.mkstemp(
+                prefix=".arkivpiloten-split-", suffix=".pdf", dir=destination)
+            os.close(fd)
+            temporary = Path(temp_name)
+            temporaries.append(temporary)
+            part = pymupdf.open()
+            try:
+                part.insert_pdf(document, from_page=first, to_page=last - 1)
+                try:
+                    part.set_metadata(document.metadata or {})
+                except Exception:
+                    pass
+                part.save(str(temporary), garbage=3, deflate=True)
+            finally:
+                part.close()
+            check = pymupdf.open(str(temporary))
+            try:
+                if len(check) != last - first:
+                    raise IOError("En delad PDF fick fel sidantal.")
+            finally:
+                check.close()
+
+        for part_no, temporary in enumerate(temporaries, 1):
+            base = destination / f"{source.stem} - del {part_no}.pdf"
+            target = None
+            for _attempt in range(10000):
+                candidate = unique_target(base)
+                try:
+                    fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                                 0o666)
+                except FileExistsError:
+                    continue
+                os.close(fd)
+                target = candidate
+                reserved.append(target)
+                break
+            if target is None:
+                raise FileExistsError(f"Kunde inte skapa ett unikt namn för {base.name}")
+            os.replace(temporary, target)
+            reserved.remove(target)
+            created.append(target)
+        return created
+    except Exception:
+        for output in (*created, *reserved, *temporaries):
+            try:
+                output.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    finally:
+        if document is not None:
+            document.close()
+
+
 def human_size(n: float) -> str:
     for unit in ("B", "kB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -2525,32 +4788,192 @@ def human_size(n: float) -> str:
     return f"{n:.1f} GB"
 
 
-def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None:
-    """Anpassa fönstret till skärmstorleken (ANVÄNDARORDER 2026-08-26).
+def _review_preview_height(dialog_height: int) -> int:
+    """Use a compact page thumbnail on short displays, larger on tall ones."""
+    try:
+        height = int(dialog_height)
+    except (TypeError, ValueError):
+        height = 720
+    return max(160, min(440, int((height - 300) * 0.60)))
 
-    Fönstret blir aldrig större än skärmen, centreras, och minsta storlek
-    krymps på små skärmar så att inget fönster blir oåtkomligt. På en stor
-    skärm får fönstret sin tänkta storlek; på en liten anpassas den nedåt.
+
+def _preview_render_zoom(win) -> float:
+    """Rendera förhandsvisningen skarpare på HiDPI-skärmar.
+
+    Basen 1.4 (~100 dpi) räcker på vanliga skärmar; på tätare skärmar
+    skalas upp linjärt till högst dubbelt. Minnesgränsen sköts fortfarande
+    av _bounded_render_zoom vid själva renderingen.
     """
     try:
-        sw = win.winfo_screenwidth()
-        sh = win.winfo_screenheight()
+        dpi = float(win.winfo_fpixels("1i"))
     except Exception:
-        sw, sh = want_w + 240, want_h + 240
-    w = min(want_w, sw - 120)
-    h = min(want_h, sh - 100)
-    w = max(w, min(min_w, sw - 20), 640)
-    h = max(h, min(min_h, sh - 20), 480)
-    win.minsize(min(min_w, sw - 20), min(min_h, sh - 20))
+        dpi = 96.0
+    if not dpi > 0:
+        dpi = 96.0
+    return 1.4 * min(2.0, max(1.0, dpi / 96.0))
+
+
+def _existing_subfolder_choices(base: Optional[Path]) -> List[str]:
+    """Return safe existing subfolders up to two levels below ``base``."""
+    if base is None:
+        return []
+    try:
+        if not base.is_dir():
+            return []
+        root = base.resolve()
+        choices = []
+        first_level = sorted(base.iterdir(), key=lambda item: item.name.casefold())
+        for first in first_level:
+            if first.is_symlink() or not first.is_dir():
+                continue
+            resolved = first.resolve()
+            if not resolved.is_relative_to(root):
+                continue
+            choices.append(first.relative_to(base).as_posix())
+            try:
+                second_level = sorted(
+                    first.iterdir(), key=lambda item: item.name.casefold())
+            except OSError:
+                continue
+            for second in second_level:
+                if second.is_symlink() or not second.is_dir():
+                    continue
+                if second.resolve().is_relative_to(root):
+                    choices.append(second.relative_to(base).as_posix())
+        return choices
+    except OSError:
+        return []
+
+
+def _is_year_dir_name(name: str) -> bool:
+    """Är ett mappnamn under kategoriroten ett årsled (2025, Utan datum)?"""
+    text = str(name or "")
+    return text == "Utan datum" or (len(text) == 4 and text.isdigit())
+
+
+def _sibling_year_subfolder_choices(root: Optional[Path],
+                                    base: Optional[Path]) -> List[str]:
+    """Undermappsförslag från filens eget år plus alla andra år.
+
+    En undermapp som skapats under ett år ska föreslås även för filer
+    från andra år i samma kategori. Egets års val ligger först; övriga
+    år fyller på med sådant som saknas. Mappar som inte är årsled
+    (t.ex. äldre manuella mappar direkt under roten) genomsöks inte.
+    """
+    own = _existing_subfolder_choices(base)
+    if root is None or base is None:
+        return own
+    try:
+        rel = Path(base).relative_to(Path(root))
+    except (ValueError, OSError):
+        return own
+    if not rel.parts:
+        return own
+    current, rest = rel.parts[0], rel.parts[1:]
+    try:
+        siblings = sorted(Path(root).iterdir(),
+                          key=lambda item: item.name.casefold())
+    except OSError:
+        return own
+    seen = set(own)
+    extra: List[str] = []
+    for sibling in siblings:
+        if sibling.name == current or not _is_year_dir_name(sibling.name):
+            continue
+        if sibling.is_symlink() or not sibling.is_dir():
+            continue
+        candidate = sibling.joinpath(*rest) if rest else sibling
+        for choice in _existing_subfolder_choices(candidate):
+            if choice not in seen:
+                seen.add(choice)
+                extra.append(choice)
+    return own + sorted(extra, key=str.casefold)
+
+
+def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None:
+    """Storleksanpassa och centrera ett fönster inom den synliga skärmen.
+
+    Minsta mått anpassas också till små skärmar. Innehåll som inte ryms ska
+    i första hand kunna rullas eller visas med radbrytning, inte klippas bort.
+    """
+    try:
+        sw = max(320, int(win.winfo_screenwidth()))
+        sh = max(320, int(win.winfo_screenheight()))
+    except Exception:
+        sw, sh = max(320, want_w + 80), max(320, want_h + 120)
+    margin_x = min(48, max(8, sw // 40))
+    margin_y = min(72, max(8, sh // 30))
+    avail_w = max(1, sw - 2 * margin_x)
+    avail_h = max(1, sh - 2 * margin_y)
+    min_w_fit = min(max(1, min_w), avail_w)
+    min_h_fit = min(max(1, min_h), avail_h)
+    w = max(min_w_fit, min(max(1, want_w), avail_w))
+    h = max(min_h_fit, min(max(1, want_h), avail_h))
+    try:
+        win.minsize(min_w_fit, min_h_fit)
+    except Exception:
+        pass
+    try:
+        # Användaren ska inte kunna dra fönstret större än skärmen:
+        # då hamnar knappraden utanför och går varken att se eller nå.
+        win.maxsize(avail_w, avail_h)
+    except Exception:
+        pass
     x = max(0, (sw - w) // 2)
     y = max(0, (sh - h) // 2)
     win.geometry(f"{w}x{h}+{x}+{y}")
     session_log("fönster", f"Geometri: skärm {sw}x{sh}, fönster {w}x{h}+{x}+{y} "
-                f"(önskat {want_w}x{want_h}, min {min_w}x{min_h})")
+                f"(önskat {want_w}x{want_h}, min {min_w_fit}x{min_h_fit})")
+
+
+def _maximize_window(win) -> bool:
+    """Maximera ett fönster; falla tillbaka på skärmfyllande geometri.
+
+    Tk använder ``zoomed`` på Windows och flera Linux-fönsterhanterare.
+    Andra system kan erbjuda ``-zoomed`` eller sakna båda; sista reserven
+    placerar fönstret mot skärmens övre vänstra hörn och använder hela ytan.
+    """
+    try:
+        win.state("zoomed")
+        return True
+    except Exception:
+        pass
+    try:
+        win.attributes("-zoomed", True)
+        return True
+    except Exception:
+        pass
+    try:
+        width = max(320, int(win.winfo_screenwidth()))
+        height = max(320, int(win.winfo_screenheight()))
+        win.geometry(f"{width}x{height}+0+0")
+        return True
+    except Exception:
+        return False
+
+
+def _maximize_after_map(win, event=None) -> None:
+    """Be operativsystemet maximera när ett fönster faktiskt visas.
+
+    Vissa fönsterhanterare ignorerar ``state('zoomed')`` innan det första
+    visningseventet. Schemalägg därför maximering efter Map/återställning,
+    men låt avsiktlig minimering till aktivitetsfältet vara ifred.
+    """
+    if event is not None and getattr(event, "widget", win) is not win:
+        return
+    try:
+        if win.state() == "iconic":
+            return
+    except Exception:
+        pass
+    try:
+        win.after_idle(lambda: _maximize_window(win))
+    except Exception:
+        _maximize_window(win)
 
 
 # --------------------------------------------------------------------------
-# Granskningsdialogen - kärnan: 10 stödord att bocka i
+# Granskningsdialogen - kärnan: stödord att själv välja och spara
 # --------------------------------------------------------------------------
 
 #: Widgetklasser som är inmatningsfält: mushjulet får aldrig ändra deras
@@ -2558,15 +4981,112 @@ def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None
 _FIELD_CLASSES = {"TCombobox", "TSpinbox", "TEntry", "Entry",
                   "Spinbox", "Text"}
 
+#: Widgets som rullar sig SJÄLVA. När mushjulet är över en sådan ska
+#: fliken inte rulla - då skulle listan hoppa undan i stället för att
+#: rulla, och i en rullgardin skulle hjulet byta värde.
+_SELF_SCROLLING = {"Listbox", "Text", "Treeview", "TCombobox", "TSpinbox",
+                   "TEntry", "Entry", "Spinbox", "Canvas"}
 
-def _dialog_wheel(inner_canvas, outer_canvas, is_inner, event):
+
+def _widget_scrolls_itself(widget) -> bool:
+    """Rullar widgeten (eller en förälder) sig själv?
+
+    Går uppåt i widgetträdet: en etikett inne i en Listbox har klassen
+    TLabel, men det är listan som ska rulla. Utan den här kontrollen
+    rullade hela inställningsfliken när man försökte rulla i en lista.
+    """
+    while widget is not None:
+        try:
+            klass = widget.winfo_class()
+        except Exception:
+            return False
+        if klass in _SELF_SCROLLING:
+            return True
+        widget = getattr(widget, "master", None)
+    return False
+
+
+def _wheel_steps(event) -> int:
+    """Mushjulets riktning som antal steg (+1 ned, -1 upp).
+
+    macOS rapporterar ibland ±1 per hack och Windows ±120 - därför bara
+    tecknet, aldrig storleken. X11 använder Button-4/5 utan delta.
+    """
+    try:
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta:
+            return -1 if delta > 0 else 1
+        num = getattr(event, "num", 0)
+        if num == 4:
+            return -1
+        if num == 5:
+            return 1
+        return 0
+    except Exception:
+        return 0
+
+
+#: Appen som äger de rullbara flikarna. En ENDA bindning på "all" räcker,
+#: och den får bara läggas till en gång per rotfönster - annars rullar
+#: fliken dubbelt så långt för varje gång bindningen lagts till.
+_TAB_WHEEL_APP = None
+
+
+def _tab_wheel(event):
+    """Mushjul: rulla den flik pekaren står över (annars ingenting)."""
+    app = _TAB_WHEEL_APP
+    if app is None:
+        return ""
+    return app._tab_wheel_scroll(event)
+
+
+def _bind_tab_wheel(root) -> None:
+    """Lägg mushjulsbindningen på rotfönstret - en gång."""
+    if root is None or getattr(root, "_tab_wheel_bound", False):
+        return
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        try:
+            root.bind_all(seq, _tab_wheel, add="+")
+        except Exception:
+            return
+    try:
+        root._tab_wheel_bound = True
+    except Exception:
+        pass
+
+
+def _reinstall_tab_wheel() -> None:
+    """Koppla tillbaka flikens mushjul efter att en dialog stängt sig.
+
+    Granskningsdialogen avregistrerar alla "all"-bindningar när den stängs
+    (``unbind_all`` tar även våra), så utan det här slutar rullningen
+    fungera så fort man svarat på en fråga.
+    """
+    app = _TAB_WHEEL_APP
+    if app is None:
+        return
+    root = getattr(app, "root", None)
+    if root is None:
+        return
+    try:
+        root._tab_wheel_bound = False
+    except Exception:
+        return
+    _bind_tab_wheel(root)
+
+
+def _dialog_wheel(inner_canvas, outer_canvas, is_inner, event,
+                  dropdown_open: bool = False):
     """Mushjul i granskningsdialogen (ANVÄNDARORDER 2026-08-26):
 
     * över inmatningsfält (rullgardin/spinn/entry/text): "break" utan
       någon rullning - hjulet får aldrig ändra ett fältvärde;
     * över stödordslistan: rullar listan;
-    * överallt annars i fönstret: rullar hela fönstret (yttre canvas).
+    * överallt annars i fönstret: rullar hela fönstret (yttre canvas);
+    * medan kategorirullgardinen är öppen: hjulet gör ingenting.
     """
+    if dropdown_open:
+        return "break"
     try:
         cls = event.widget.winfo_class()
     except Exception:
@@ -2588,7 +5108,7 @@ def _dialog_wheel(inner_canvas, outer_canvas, is_inner, event):
 
 
 class ReviewDialog:
-    """Visar 10 föreslagna stödord för en osäker fil.
+    """Visar upp till 25 föreslagna stödord för en osäker fil.
 
     Resultat i self.result:
         None                                   - avbrutet/hoppa över
@@ -2599,23 +5119,34 @@ class ReviewDialog:
     def __init__(self, parent, decision: Decision, rules: Rules,
                  candidates: List[Candidate], index: int = 1, total: int = 1,
                  theme=None, preview: bool = False,
-                 suggested_sender: str = ""):
+                 suggested_sender: str = "",
+                 subfolder_base_resolver: Optional[Callable[[str], Path]] = None,
+                 subfolder_choices_resolver: Optional[Callable[[str], List[str]]] = None,
+                 ui_language: str = "sv"):
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk, self.ttk, self.messagebox = tk, ttk, messagebox
+        self.filedialog, self.simpledialog = filedialog, simpledialog
         self.theme = theme
         self.C = theme.c if theme else COLORS
         self.decision = decision
         self.rules = rules
         self.candidates = candidates
+        self.subfolder_base_resolver = subfolder_base_resolver
+        self.subfolder_choices_resolver = subfolder_choices_resolver
+        self.ui_language = ui_language
         self.result: Optional[Dict[str, Any]] = None
 
         self.win = tk.Toplevel(parent)
+        self._icon_ref = brand_window(self.win)
         self.win.configure(background=self.C["bg"])
         self.win.after(80, lambda: dark_titlebar(
             self.win, bool(getattr(self.theme, "dark", False))))
         self.win.title(f"Osäker fil — {index} av {total}")
         self.win.transient(parent)
-        _fit_geometry(self.win, 1000, 940, 860, 760)
+        # Use most of the available screen for the two-column review layout;
+        # _fit_geometry clamps both dimensions on smaller displays.
+        _fit_geometry(self.win, 1440, 960, 760, 600)
+        self._preview_max_height = _review_preview_height(self.win.winfo_height())
         self.win.columnconfigure(0, weight=1)
         self.win.rowconfigure(0, weight=1)
 
@@ -2631,7 +5162,12 @@ class ReviewDialog:
         self._outer_sb.grid(row=0, column=1, sticky="ns")
         self._outer.grid(row=0, column=0, sticky="nsew")
         self._all = ttk.Frame(self._outer, style="TFrame")
-        self._all.columnconfigure(0, weight=1)
+        # Left: keyword choices. Right: file details, preview and destination.
+        # Equal tracks keep the keyword rows readable without squeezing the
+        # category controls or long file metadata.
+        self._all.columnconfigure(0, weight=1, uniform="review-columns")
+        self._all.columnconfigure(1, weight=1, uniform="review-columns")
+        self._all.rowconfigure(0, weight=1)
         self._all_id = self._outer.create_window((0, 0), window=self._all,
                                                  anchor="nw")
         self._all.bind("<Configure>",
@@ -2643,14 +5179,75 @@ class ReviewDialog:
 
         pad = dict(padx=14, pady=(10, 0))
         ext = decision.extraction
+        wrap_widgets = []
+        self._review_two_columns = True
+        keyword_canvas = None
+        category_combo = None
+
+        def review_text_width() -> int:
+            # Use the full content width in the stacked fallback, and just
+            # the right-hand track in the side-by-side layout.
+            width = self._all.winfo_width()
+            if self._review_two_columns:
+                width = width // 2 - 28
+            else:
+                width -= 48
+            return max(220, min(900, width))
+
+        def wrapped_label(parent, **options):
+            options["wraplength"] = review_text_width()
+            label = ttk.Label(parent, **options)
+            wrap_widgets.append(label)
+            return label
+
+        def resize_wrapped_text(_event=None):
+            width = review_text_width()
+            for label in wrap_widgets:
+                try:
+                    label.configure(wraplength=width)
+                except Exception:
+                    pass
+            if keyword_canvas is not None:
+                # Give the keyword list as much of the visible height as is
+                # practical, while keeping its own scrollbar for long PDFs.
+                height = max(140, min(440, self.win.winfo_height() - 420))
+                try:
+                    keyword_canvas.configure(height=height)
+                except Exception:
+                    pass
+            preview_height = _review_preview_height(self.win.winfo_height())
+            if preview_height != self._preview_max_height:
+                self._preview_max_height = preview_height
+                if getattr(self, "_prev_pil", None):
+                    try:
+                        self.win.after_idle(
+                            lambda: self._prev_show(self._prev_page))
+                    except Exception:
+                        pass
+            if category_combo is not None:
+                # Keep the editable folder field inside its current column.
+                track = self._all.winfo_width()
+                if self._review_two_columns:
+                    track //= 2
+                char_width = max(16, min(44, (track - 190) // 8))
+                try:
+                    category_combo.configure(width=char_width)
+                except Exception:
+                    pass
+
+        self.win.bind("<Configure>", resize_wrapped_text, add="+")
 
         # -- filinfo -------------------------------------------------------
         head = ttk.Frame(self._all, style="Card.TFrame")
-        head.grid(row=0, column=0, sticky="ew", **pad)
+        head.grid(row=0, column=1, sticky="ew", **pad)
         head.columnconfigure(0, weight=1)
 
-        ttk.Label(head, text=decision.path.name, style="CardTitle.TLabel"
-                  ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 0))
+        wrapped_label(head, text=decision.path.name,
+                      style="CardTitle.TLabel", justify="left").grid(
+                          row=0, column=0, sticky="w", padx=16, pady=(14, 0))
+        ttk.Label(head, text=f"{index} / {total}",
+                  style="PillMuted.TLabel").grid(
+                      row=0, column=1, sticky="e", padx=16, pady=(14, 0))
         try:
             size = human_size(decision.path.stat().st_size)
         except OSError:
@@ -2665,7 +5262,7 @@ class ReviewDialog:
         else:
             info += "  ·  textlager"
         ttk.Label(head, text=info, style="CardMuted.TLabel").grid(
-            row=1, column=0, sticky="w", padx=16)
+            row=1, column=0, columnspan=2, sticky="w", padx=16)
 
         best, second = decision.best, decision.runner_up
         if best:
@@ -2682,9 +5279,10 @@ class ReviewDialog:
                          f"föreslår: {hint[0]} ({hint[1]} liknande filer)")
             else:
                 guess = "Ingen kategori matchade den här filen"
-        ttk.Label(head, text=guess, style="Card.TLabel",
-                  foreground=self.C["warn"]
-                  ).grid(row=2, column=0, sticky="w", padx=16, pady=(10, 0))
+        wrapped_label(head, text=guess, style="PillWarn.TLabel",
+                      justify="left").grid(
+                          row=2, column=0, columnspan=2, sticky="w",
+                          padx=16, pady=(10, 0))
 
         # Var i dokumentet träffarna låg - förklarar ofta tveksamheten
         if best and best.matched:
@@ -2692,54 +5290,238 @@ class ReviewDialog:
                 f"{w} {ZONE_LABELS.get(best.zone_of(w), '')}"
                 for w in best.matched[:3])
             ttk.Label(head, text=f"Träffar: {var_txt}", style="CardMuted.TLabel"
-                      ).grid(row=4, column=0, sticky="w", padx=16, pady=(2, 14))
+                      ).grid(row=4, column=0, columnspan=2, sticky="w",
+                             padx=16, pady=(2, 14))
         if decision.reason and best:
-            ttk.Label(head, text="→ " + decision.reason,
-                      style="CardMuted.TLabel").grid(row=3, column=0,
-                                                     sticky="w", padx=16)
+            wrapped_label(head, text="→ " + decision.reason,
+                          style="CardMuted.TLabel", justify="left").grid(
+                              row=3, column=0, columnspan=2, sticky="w",
+                              padx=16)
+        explanation = category_explanation(best, getattr(decision, "learned_hint", None))
+        if explanation:
+            wrapped_label(head, text=explanation, style="CardMuted.TLabel",
+                          justify="left").grid(
+                              row=5, column=0, columnspan=2, sticky="w",
+                              padx=16, pady=(2, 10))
 
-        ttk.Separator(self._all).grid(row=1, column=0, sticky="ew", padx=14, pady=(10, 0))
+        next_row = 6
+        duplicate = getattr(decision, "invoice_duplicate", None)
+        if duplicate:
+            wrapped_label(
+                head,
+                text=("Möjlig dubblettfaktura. Kontrollera innan du sparar; "
+                      "ingen fil tas bort automatiskt."),
+                style="PillWarn.TLabel", justify="left").grid(
+                    row=next_row, column=0, columnspan=2, sticky="w",
+                    padx=16, pady=(6, 2))
+            next_row += 1
+            amount_minor = int(duplicate.get("amount_minor", 0) or 0)
+            decimal = "." if self.ui_language == "en" else ","
+            amount = f"{amount_minor // 100}{decimal}{amount_minor % 100:02d}"
+            currency = str(duplicate.get("currency", ""))
+            if self.ui_language == "en":
+                details = (
+                    f"Supplier/category: {duplicate.get('supplier', '')}  ·  "
+                    f"Invoice number: {duplicate.get('invoice_number', '')}  ·  "
+                    f"Amount: {amount} {currency}  ·  "
+                    f"Earlier file: {duplicate.get('path', '')}")
+            else:
+                details = (
+                    f"Leverantör/kategori: {duplicate.get('supplier', '')}  ·  "
+                    f"Fakturanummer: {duplicate.get('invoice_number', '')}  ·  "
+                    f"Belopp: {amount} {currency}  ·  "
+                    f"Tidigare fil: {duplicate.get('path', '')}")
+            wrapped_label(head, text=details, style="CardMuted.TLabel",
+                          justify="left").grid(
+                              row=next_row, column=0, columnspan=2,
+                              sticky="w", padx=16, pady=(0, 8))
+            next_row += 1
+        split_pages = getattr(ext, "document_breaks", [])
+        if split_pages:
+            page_list = ", ".join(str(page) for page in split_pages)
+            wrapped_label(
+                head,
+                text=("⚠ PDF:en verkar innehålla flera dokument. "
+                      f"Möjliga nya dokument börjar på sida {page_list}. "
+                      "Öppna PDF:en och granska/dela vid dessa sidgränser "
+                      "innan du sorterar hela filen."),
+                style="PillWarn.TLabel", justify="left").grid(
+                    row=next_row, column=0, columnspan=2, sticky="w",
+                    padx=16, pady=(4, 8))
+            next_row += 1
+            ttk.Button(
+                head, text="Skapa separata PDF-kopior…",
+                command=self._split_suggested).grid(
+                    row=next_row, column=0, sticky="w",
+                    padx=16, pady=(0, 10))
+            next_row += 1
+        ocr_pages = getattr(ext, "ocr_pages", []) or []
+        if ocr_pages:
+            details = []
+            for page in ocr_pages:
+                number = int(page.get("page", len(details) + 1) or len(details) + 1)
+                chars = int(page.get("chars", 0) or 0)
+                confidence = float(page.get("confidence", -1) or -1)
+                if chars <= 0:
+                    line = f"Sida {number}: ingen läsbar text hittades"
+                else:
+                    score = f"{confidence:.0f}%" if confidence >= 0 else "okänd konfidens"
+                    snippet = " ".join(str(page.get("preview", "")).split())[:100]
+                    line = f"Sida {number}: {score} · {snippet}"
+                rotation = int(page.get("rotation", 0) or 0)
+                if rotation:
+                    line += f" · automatisk rotation {rotation}° rättad"
+                details.append(line)
+            scanned = len(ocr_pages)
+            total_pages = int(getattr(ext, "page_count", 0) or 0)
+            coverage = (f"{scanned} av {total_pages} sidor" if total_pages
+                        and scanned < total_pages else f"{scanned} sidor")
+            self._ocr_detail_lines = details
+            ttk.Label(head, text=f"OCR-avläsning: {coverage}",
+                      style="CardMuted.TLabel").grid(
+                          row=next_row, column=0, sticky="w",
+                          padx=16, pady=(2, 0))
+            ttk.Button(
+                head, text="Visa resultat per sida…",
+                command=self._show_ocr_details).grid(
+                    row=next_row + 1, column=0, sticky="w",
+                    padx=16, pady=(4, 10))
+            next_row += 2
 
-        # -- förhandsvisning (REQ-N7, FRAMSKJUTEN) ---------------------------
-        # Koden finns kvar men är AVSTÄNGD som standard tills beställaren
-        # säger till (settings["preview_in_dialog"]).
+        # Högerkolumnens ordning: filinfo, mappval, förhandsvisning.
+        # Mappvalet ("Befintlig ...", "Skapa ny ...", undermapp, målsökväg)
+        # ska synas utan rullning; förhandsvisningen ligger under och kan
+        # rullas fram vid behov.
         row_box = 2
+        row_sep = 1
+        row_prev = -1
+        row_end = 3
+        if preview:
+            row_box, row_sep, row_prev = 1, 2, 3
+            row_end = 4
+
+        self._review_separator = ttk.Separator(self._all)
+        self._review_separator.grid(row=row_sep, column=1, sticky="ew", padx=14, pady=(10, 0))
+
+        # -- kompakt sidförhandsvisning och PDF-verktyg --------------------
+        prev = None
         if preview:
             prev = ttk.Frame(self._all, style="Card.TFrame")
-            prev.grid(row=2, column=0, sticky="ew", padx=14, pady=(10, 0))
+            prev.grid(row=row_prev, column=1, sticky="ew", padx=14, pady=(10, 0))
             prev.columnconfigure(0, weight=1)
             prev.rowconfigure(1, weight=1)
-            self._prev_status = ttk.Label(prev, text="Läser in förhandsvisning…",
-                                          style="CardMuted.TLabel")
+            self._prev_status = ttk.Label(
+                prev, text="Laddar förhandsvisning från original-PDF…",
+                style="CardHead.TLabel")
             self._prev_status.grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
-            self._prev_img = tk.Label(prev, background=self.C["surface_sunk"],
-                                      anchor="nw")
+            self._prev_img = tk.Canvas(
+                prev, background=self.C["surface_sunk"], highlightthickness=0,
+                borderwidth=0, cursor="crosshair")
             self._prev_img.grid(row=1, column=0, sticky="nsew", padx=12, pady=8)
+            self._prev_img.bind("<ButtonPress-1>", self._template_draw_start)
+            self._prev_img.bind("<B1-Motion>", self._template_draw_motion)
+            self._prev_img.bind("<ButtonRelease-1>", self._template_draw_end)
+            self._template_drawing = False
+            self._template_rect = None
+            self._template_start = None
+            self._template_target = ""
+            self._prev_display_size = (0, 0)
             nav = ttk.Frame(prev, style="CardInner.TFrame")
             nav.grid(row=1, column=1, sticky="ns", padx=(0, 8), pady=8)
             self._prev_pil: List[Any] = []
             self._prev_pages: List[Any] = []
             self._prev_page = 0
-            ttk.Button(nav, text="‹", width=3,
+            self._prev_rotation = 0
+            ttk.Button(nav, text="‹", width=4,
                        command=lambda: self._prev_show(self._prev_page - 1)).pack(pady=2)
-            self._prev_info = ttk.Label(nav, text="–", style="CardMuted.TLabel")
+            self._prev_info = ttk.Label(nav, text="Sida –", style="PillAccent.TLabel")
             self._prev_info.pack(pady=2)
-            ttk.Button(nav, text="›", width=3,
+            ttk.Button(nav, text="›", width=4,
                        command=lambda: self._prev_show(self._prev_page + 1)).pack(pady=2)
+            rotate_left = ttk.Button(
+                nav, text="↶ 90°", width=6,
+                command=lambda: self._rotate_preview(90))
+            rotate_left.pack(pady=(8, 2))
+            rotate_right = ttk.Button(
+                nav, text="↷ 90°", width=6,
+                command=lambda: self._rotate_preview(-90))
+            rotate_right.pack(pady=2)
+            self._preview_tool_buttons = [rotate_left, rotate_right]
+            tools = ttk.Frame(prev, style="CardInner.TFrame")
+            tools.grid(row=2, column=0, columnspan=2, sticky="ew",
+                       padx=12, pady=(0, 6))
+            tools.columnconfigure(0, weight=1)
+            tools.columnconfigure(1, weight=1)
+            for index, (text, command) in enumerate((
+                    ("Spara i originalet…", self._replace_original_with_rotation),
+                    ("Spara roterad kopia som…", self._save_rotated_copy),
+                    ("Räta skannad kopia…", self._save_deskewed_copy))):
+                button = ttk.Button(tools, text=text, command=command)
+                button.grid(row=index // 2, column=index % 2, sticky="ew",
+                            padx=4, pady=2)
+                self._preview_tool_buttons.append(button)
+            if not has_pymupdf():
+                for button in self._preview_tool_buttons:
+                    button.state(["disabled"])
+            ttk.Button(
+                tools, text="Öppna hela original-PDF:en i läsare",
+                command=lambda path=decision.path: open_externally(path)
+            ).grid(row=2, column=0, columnspan=2, sticky="w",
+                   padx=4, pady=(4, 2))
+            template_bar = ttk.Frame(prev, style="CardInner.TFrame")
+            template_bar.grid(row=3, column=0, columnspan=2, sticky="ew",
+                              padx=12, pady=(0, 6))
+            template_bar.columnconfigure(0, weight=1)
+            self.var_use_subfolder_templates = tk.BooleanVar(value=True)
+            self._template_toggle = ttk.Checkbutton(
+                template_bar, text="Använd ritade dokumentmallar",
+                variable=self.var_use_subfolder_templates,
+                command=self._toggle_subfolder_templates)
+            self._template_toggle.grid(row=0, column=0, sticky="w", padx=4)
+            self._template_create_button = ttk.Button(
+                template_bar, text="Rita mall för vald undermapp…",
+                command=self._start_template_drawing)
+            self._template_create_button.grid(row=0, column=1, sticky="e", padx=4)
+            if not has_pymupdf():
+                self._template_toggle.state(["disabled"])
+                self._template_create_button.state(["disabled"])
+            preview_note = ttk.Label(
+                prev,
+                text=("Förhandsvisningen läser original-PDF:en. Roteringsknapparna "
+                      "ändrar bara visningen tills du väljer en spara-åtgärd. "
+                      "Rätning skapar en separat bildkopia. Mallar är frivilliga: "
+                      "rita runt en rubrik för att söka efter samma text och område "
+                      "i kommande PDF:er."),
+                style="CardMuted.TLabel", wraplength=review_text_width(),
+                justify="left")
+            wrap_widgets.append(preview_note)
+            preview_note.grid(row=4, column=0, columnspan=2,
+                              sticky="w", padx=12, pady=(0, 8))
             self._start_preview_load()
-            row_box = 3
 
         # -- stödordslistan ------------------------------------------------
-        box = ttk.LabelFrame(self._all,
-                             text="  Välj de stödord som hör till rätt kategori  ")
-        box.grid(row=row_box, column=0, sticky="nsew", padx=14, pady=(12, 0))
+        # Stödorden ligger kvar i vänsterkolumnen medan filinfo, mappval
+        # och förhandsvisning visas i högerkolumnen.
+        box = ttk.Frame(self._all, style="Card.TFrame")
+        box.grid(row=0, column=0, rowspan=row_end, sticky="nsew",
+                 padx=14, pady=(10, 10))
         box.columnconfigure(0, weight=1)
-        box.rowconfigure(0, weight=1)
+        box.rowconfigure(2, weight=1)
+        ttk.Label(box, text="STÖDORD OCH TRÄFFAR",
+                  style="CardHead.TLabel").grid(
+                      row=0, column=0, sticky="w", padx=14, pady=(12, 0))
+        ttk.Label(box,
+                  text=("Välj bland upp till 25 förslag. Typ och antal träffar visas "
+                        "bredvid varje ord; stapeln visar relativ relevans. Inget "
+                        "väljs eller sparas automatiskt."),
+                  style="CardMuted.TLabel", wraplength=600, justify="left").grid(
+                      row=1, column=0, sticky="w", padx=14, pady=(2, 4))
 
         # Fast höjd på inre listan: den rullar själv, medan resten av
         # fönstret rullas av den yttre canvasen.
-        canvas = tk.Canvas(box, height=300, highlightthickness=0, borderwidth=0,
+        canvas = tk.Canvas(box, height=360, highlightthickness=0, borderwidth=0,
                            background=self.C["surface"])
+        keyword_canvas = canvas
         scroll = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
         self._canvas_scroll = scroll
         self.inner = ttk.Frame(canvas, style="CardInner.TFrame")
@@ -2748,8 +5530,9 @@ class ReviewDialog:
         win_id = canvas.create_window((0, 0), window=self.inner, anchor="nw")
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win_id, width=e.width))
         canvas.configure(yscrollcommand=scroll.set)
-        canvas.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
-        scroll.grid(row=0, column=1, sticky="ns", pady=6)
+        canvas.grid(row=2, column=0, sticky="nsew", padx=(10, 0),
+                    pady=(4, 10))
+        scroll.grid(row=2, column=1, sticky="ns", pady=(4, 10))
 
         def _in_inner(w) -> bool:
             """Pekar händelsen inuti stödordslistan (canvas + dess barn)?"""
@@ -2760,7 +5543,9 @@ class ReviewDialog:
             return False
 
         def _wheel(event):
-            return _dialog_wheel(canvas, self._outer, _in_inner, event)
+            return _dialog_wheel(
+                canvas, self._outer, _in_inner, event,
+                dropdown_open=self._popdown_open())
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.win.bind_all(seq, _wheel)
         self._canvas = canvas
@@ -2768,13 +5553,24 @@ class ReviewDialog:
         self.vars: List[Tuple[Any, str]] = []
         self._build_rows()
 
-        ttk.Button(box, text="+ Eget ord…",
-                   command=self._add_own).grid(row=1, column=0, sticky="w", padx=10, pady=(0, 8))
+        ttk.Button(box, text="+ Lägg till eget stödord…", style="CardLink.TButton",
+                   command=self._add_own).grid(
+                       row=3, column=0, sticky="w", padx=12, pady=(0, 10))
 
         # -- kategori ------------------------------------------------------
-        catbox = ttk.LabelFrame(self._all, text="  Kategori / mapp  ")
-        catbox.grid(row=row_box + 1, column=0, sticky="ew", padx=14, pady=(12, 0))
+        catbox = ttk.Frame(self._all, style="Card.TFrame")
+        catbox.grid(row=row_box, column=1, sticky="ew", padx=14,
+                    pady=(12, 10))
         catbox.columnconfigure(1, weight=1)
+        ttk.Label(catbox, text="VART SKA FILEN SPARAS?",
+                  style="CardHead.TLabel").grid(
+                      row=0, column=0, columnspan=2, sticky="w",
+                      padx=14, pady=(12, 0))
+        ttk.Label(catbox,
+                  text="Välj en befintlig mapp eller skapa en ny. Ditt val kan läras in.",
+                  style="CardMuted.TLabel").grid(
+                      row=1, column=0, columnspan=2, sticky="w",
+                      padx=14, pady=(2, 8))
 
         self.guess_name = guess_category_name(candidates)
         # Har ingen kategori träffat väljer vi "Ny mapp" med ett gissat namn,
@@ -2782,30 +5578,165 @@ class ReviewDialog:
         start_mode = "existing" if (best and best.name in rules.names()) else (
             "new" if self.guess_name or not rules.names() else "existing")
         self.mode = tk.StringVar(value=start_mode)
-        ttk.Radiobutton(catbox, text="Befintlig:", value="existing", variable=self.mode,
-                        command=self._sync).grid(row=0, column=0, sticky="w", padx=8, pady=6)
-        self.combo = ttk.Combobox(catbox, values=rules.names(), state="normal")
+        ttk.Radiobutton(catbox, text="Befintlig mapp:", value="existing",
+                        variable=self.mode, style="Card.TRadiobutton",
+                        command=self._sync).grid(
+                            row=2, column=0, sticky="w", padx=14, pady=6)
+        self._all_categories = list(rules.names())
+        # Skriv vanlig fritext direkt i fältet: listan filtreras medan man
+        # skriver, och en unik träff kan väljas med Enter.
+        self.combo = ttk.Combobox(catbox, values=self._all_categories,
+                                  state="normal", width=44, takefocus=True)
+        category_combo = self.combo
         if best and best.name in rules.names():
             self.combo.set(best.name)
-        elif rules.names():
-            self.combo.current(0)
+        else:
+            # Välj aldrig den översta kategorin automatiskt: om ingen
+            # tydlig gissning finns ska Enter inte kunna flytta dit av misstag.
+            self.combo.set("")
         self.combo.bind("<<ComboboxSelected>>", self._combo_chosen)
-        # Sökbar med typeahead: skriv "d" -> hoppar direkt till första
-        # kategorin som börjar på D; upp/ner bläddrar utan att röra andra
-        # fält; hjulet rullar bara fönstret (se _dialog_wheel).
-        # Egen typahead (växlar även till "ny mapp" vid okänt namn);
-        # klassbindningen hoppar över pga _egen_ta. Upp/ner lokalt.
+        if hasattr(self, "var_use_subfolder_templates"):
+            self.combo.bind("<<ComboboxSelected>>",
+                            self._sync_subfolder_template_toggle, add="+")
+            # Själva synken körs först efter att new_entry finns (längre
+            # ned) - _category() läser det fältet i "new"-läget och
+            # dialogen kraschade här för filer utan kategoriträff.
+        # Sökbar rullgardin: skriv några tecken -> listan filtreras och
+        # visar bara matchande kategorier (början på namnet först).
+        # Enter väljer första/unika träffen, Escape återställer listan.
+        # Egen sökning i stället för klassbindningens "hoppa till första
+        # prefix" (klassbindningen hoppar över pga _egen_ta).
         self.combo._egen_ta = True
-        self.combo.bind("<KeyRelease>", self._combo_typeahead)
+        self.combo.bind("<KeyPress>", self._combo_keypress_search)
+        self.combo.bind("<KeyRelease>", self._combo_search)
+        self.combo.bind("<Return>", self._combo_pick)
+        self.combo.bind("<Escape>", self._combo_reset)
+        self.combo.bind("<FocusIn>", self._combo_focus_in)
+        self.combo.bind("<FocusOut>", self._combo_focus_out)
+        self.combo.bind("<Button-1>", self._combo_schedule_popup_bind, add="+")
         self.combo.bind("<Down>", self._combo_navigate)
         self.combo.bind("<Up>", self._combo_navigate)
-        self.combo.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=6)
+        # Mushjulet får ALDRIG byta kategori. När listan är stängd rullas
+        # dialogen; medan den är öppen är mushjulet avstängt helt.
+        for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.combo.bind(_seq, self._combo_wheel)
+        self.combo.grid(row=2, column=1, sticky="ew", padx=(8, 14), pady=6)
 
-        ttk.Radiobutton(catbox, text="Ny mapp:", value="new", variable=self.mode,
-                        command=self._sync).grid(row=1, column=0, sticky="w", padx=8, pady=(0, 8))
+        # Egen sökträfflista: den visas medan man skriver men tar aldrig
+        # tangentbordsfokus, så "l" följt av "i" fortsätter i sökrutan.
+        self._combo_suggest_frame = ttk.Frame(catbox, style="CardInner.TFrame")
+        self._combo_suggest_frame.grid(row=3, column=1, sticky="ew",
+                                       padx=(8, 14), pady=(0, 6))
+        self._combo_suggest_frame.columnconfigure(0, weight=1)
+        self._combo_suggest_list = tk.Listbox(
+            self._combo_suggest_frame, height=4, takefocus=False,
+            exportselection=False, activestyle="none",
+            font=getattr(self.theme, "f_base", ("TkDefaultFont", 10)),
+            background=self.C["surface"], foreground=self.C["text"],
+            selectbackground=self.C["accent"],
+            selectforeground=self.C["text_invert"],
+            highlightthickness=1, highlightbackground=self.C["border"],
+            highlightcolor=self.C["accent"], borderwidth=0, relief="flat",
+        )
+        self._combo_suggest_list.grid(row=0, column=0, sticky="nsew")
+        self._combo_suggest_scroll = ttk.Scrollbar(
+            self._combo_suggest_frame, orient="vertical",
+            command=self._combo_suggest_list.yview)
+        self._combo_suggest_scroll.grid(row=0, column=1, sticky="ns")
+        self._combo_suggest_list.configure(
+            yscrollcommand=self._combo_suggest_scroll.set)
+        self._combo_suggest_list.bind("<Button-1>",
+                                      self._combo_suggest_click)
+        for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self._combo_suggest_list.bind(_seq, self._combo_suggestion_wheel)
+        self._combo_suggest_frame.grid_remove()
+        self._combo_suggest_index = None
+
+        # Liten hjälprad: visar vad sökningen hittar och vad Enter gör.
+        self._combo_hint_lbl = ttk.Label(catbox, text="",
+                                        style="CardMuted.TLabel",
+                                        wraplength=review_text_width(), justify="left")
+        wrap_widgets.append(self._combo_hint_lbl)
+        self._combo_show_hint()
+
+        # Undermappsvalet ligger direkt under kategoriväljaren, inte längst
+        # ned i dialogkortet. Kontrollerna bryts om till flera rader på smal skärm.
+        subrow = ttk.Frame(catbox, style="CardInner.TFrame")
+        subrow.grid(row=4, column=0, columnspan=2, sticky="ew",
+                    padx=14, pady=(4, 6))
+        for column in range(3):
+            subrow.columnconfigure(column, weight=1, uniform="subfolder-actions")
+        ttk.Label(subrow, text="Undermapp för den här PDF:en",
+                  style="CardKey.TLabel").grid(
+                      row=0, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        self.var_subfolder = tk.StringVar(value="")
+        self.subfolder_combo = ttk.Combobox(
+            subrow, textvariable=self.var_subfolder, values=(), state="normal")
+        self.subfolder_entry = self.subfolder_combo
+        # Målsökvägen uppdateras live medan användaren skriver/väljer.
+        self.var_subfolder.trace_add(
+            "write", lambda *_: self._update_destination_preview())
+        self.subfolder_combo.grid(row=1, column=0, columnspan=3,
+                                  sticky="ew", pady=(0, 5))
+        subfolder_actions = [
+            ttk.Button(subrow, text="Välj befintlig…",
+                       command=self._browse_subfolder),
+            ttk.Button(subrow, text="Skapa ny undermapp…",
+                       command=self._create_subfolder),
+            ttk.Button(subrow, text="Standard",
+                       command=lambda: self.var_subfolder.set("")),
+        ]
+        for index, button in enumerate(subfolder_actions):
+            button.grid(row=2, column=index, sticky="ew",
+                        padx=(0 if index == 0 else 3, 0 if index == 2 else 3),
+                        pady=2)
+
+        last_subfolder_columns = None
+
+        def layout_subfolder_actions(_event=None):
+            nonlocal last_subfolder_columns
+            width = max(1, subrow.winfo_width())
+            columns = 3 if width >= 680 else 2 if width >= 440 else 1
+            if columns == last_subfolder_columns:
+                return
+            last_subfolder_columns = columns
+            for column in range(3):
+                subrow.columnconfigure(column, weight=0, uniform="")
+            for column in range(columns):
+                subrow.columnconfigure(
+                    column, weight=1, uniform="subfolder-actions")
+            for index, button in enumerate(subfolder_actions):
+                row, column = divmod(index, columns)
+                button.grid_configure(row=2 + row, column=column,
+                                     sticky="ew", padx=3, pady=2)
+
+        subrow.bind("<Configure>", layout_subfolder_actions, add="+")
+        self.win.after_idle(layout_subfolder_actions)
+
+        self.lbl_subfolder_hint = ttk.Label(
+            catbox, text="", style="CardMuted.TLabel",
+            wraplength=review_text_width(), justify="left")
+        wrap_widgets.append(self.lbl_subfolder_hint)
+        self.lbl_subfolder_hint.grid(
+            row=5, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 5))
+        # Hela målsökvägen syns innan användaren bekräftar flytten.
+        self.lbl_destination = ttk.Label(
+            catbox, text="", style="Card.TLabel",
+            wraplength=review_text_width(), justify="left")
+        wrap_widgets.append(self.lbl_destination)
+        self.lbl_destination.grid(
+            row=6, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 5))
+        self._combo_hint_lbl.grid(row=7, column=0, columnspan=2, sticky="w",
+                                  padx=14, pady=(0, 6))
+
+        ttk.Radiobutton(catbox, text="Skapa ny kategori:", value="new",
+                        variable=self.mode, style="Card.TRadiobutton",
+                        command=self._sync).grid(
+                            row=8, column=0, sticky="w", padx=14, pady=(0, 8))
         self.new_entry = ttk.Entry(catbox)
-        self.new_entry.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(0, 8))
-        self.new_entry.bind("<KeyRelease>", lambda e: self.mode.set("new"))
+        self.new_entry.grid(row=8, column=1, sticky="ew",
+                            padx=(8, 14), pady=(0, 8))
+        self.new_entry.bind("<KeyRelease>", self._new_name_changed)
         if self.guess_name:
             self.new_entry.insert(0, self.guess_name)
         if suggested_sender and not (best and best.name in rules.names()):
@@ -2816,35 +5747,152 @@ class ReviewDialog:
                       text=f"🔎 Uppslag via org.nr: {suggested_sender}"
                            " - kontrollera namnet innan du sparar",
                       style="CardMuted.TLabel").grid(
-                          row=2, column=0, columnspan=2, sticky="w",
-                          padx=8, pady=(0, 6))
+                          row=9, column=0, columnspan=2, sticky="w",
+                          padx=14, pady=(0, 6))
+        # "Ny mapp"-fältet ska vara låst när "Befintlig" är förvalt.
+        self._sync()
+        if hasattr(self, "var_use_subfolder_templates"):
+            self._sync_subfolder_template_toggle()
+        ttk.Label(
+            catbox,
+            text="Alla stödord du väljer sparas för framtida exakta matchningar.",
+            style="CardMuted.TLabel").grid(
+                row=10, column=0, columnspan=2, sticky="w",
+                padx=14, pady=(4, 12))
+        self._update_subfolder_hint()
 
-        self.save_rule = tk.BooleanVar(value=True)
-        ttk.Checkbutton(catbox, variable=self.save_rule,
-                        text="Spara valda ord som regel (matchar automatiskt nästa gång)"
-                        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+        def layout_review_columns(_event=None):
+            # Keep the requested left/right arrangement whenever both
+            # columns can remain usable. On a narrow or snapped window, stack
+            # all sections instead of clipping their controls off-screen.
+            wide = self._outer.winfo_width() >= 760
+            if wide == self._review_two_columns:
+                resize_wrapped_text()
+                return
+            self._review_two_columns = wide
+            for row in range(6):
+                self._all.rowconfigure(row, weight=0)
+            if wide:
+                self._all.rowconfigure(0, weight=1)
+                head.grid_configure(row=0, column=1, columnspan=1,
+                                    sticky="ew", **pad)
+                self._review_separator.grid_configure(
+                    row=row_sep, column=1, columnspan=1,
+                    sticky="ew", padx=14, pady=(10, 0))
+                if prev is not None:
+                    prev.grid_configure(row=row_prev, column=1, columnspan=1,
+                                        sticky="ew", padx=14, pady=(10, 0))
+                catbox.grid_configure(row=row_box, column=1, columnspan=1,
+                                      sticky="ew", padx=14, pady=(12, 10))
+                box.grid_configure(row=0, column=0, rowspan=row_end,
+                                   columnspan=1, sticky="nsew",
+                                   padx=14, pady=(10, 10))
+            else:
+                self._all.rowconfigure(row_end, weight=1)
+                head.grid_configure(row=0, column=0, columnspan=2,
+                                    sticky="ew", **pad)
+                self._review_separator.grid_configure(
+                    row=row_sep, column=0, columnspan=2,
+                    sticky="ew", padx=14, pady=(10, 0))
+                if prev is not None:
+                    prev.grid_configure(row=row_prev, column=0, columnspan=2,
+                                        sticky="ew", padx=14, pady=(10, 0))
+                catbox.grid_configure(row=row_box, column=0, columnspan=2,
+                                      sticky="ew", padx=14, pady=(12, 10))
+                box.grid_configure(row=row_end, column=0, rowspan=1,
+                                   columnspan=2, sticky="nsew",
+                                   padx=14, pady=(10, 10))
+            resize_wrapped_text()
+
+        self._all.bind("<Configure>", layout_review_columns, add="+")
+        self.win.after_idle(layout_review_columns)
+        # Every file starts with its filename/status visible at the top, even
+        # if the canvas scrollregion changed while the columns were settling.
+        self.win.after(30, lambda: self._outer.yview_moveto(0))
 
         # -- knappar (ligger utanför rullytan, alltid synliga) -------------
         btns = ttk.Frame(self.win)
         btns.grid(row=1, column=0, sticky="ew", padx=14, pady=12)
         btns.columnconfigure(2, weight=1)
-        ttk.Button(btns, text="Förhandsgranska PDF",
-                   command=lambda: open_externally(decision.path)).grid(row=0, column=0)
-        ttk.Button(btns, text="Hoppa över",
-                   command=self._skip).grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(btns, text="Ignorera filen",
-                   command=self._ignore_file).grid(row=0, column=2, padx=8)
-        ttk.Button(btns, text="Lägg i _Osorterat",
-                   command=self._unmatched).grid(row=0, column=3, padx=(0, 8))
+        actions = [
+            ttk.Button(btns, text="Förhandsgranska PDF",
+                       command=lambda: open_externally(decision.path)),
+            ttk.Button(btns, text="Vänta med den här", command=self._defer),
+            ttk.Button(btns, text="Ignorera filen", command=self._ignore_file),
+            ttk.Button(btns, text="Lägg i _Osorterat", command=self._unmatched),
+        ]
         ok = ttk.Button(btns, text="Spara & flytta", style="Accent.TButton",
                         command=self._ok)
-        ok.grid(row=0, column=4)
+        actions.append(ok)
+        for col in range(5):
+            btns.columnconfigure(col, weight=1)
+
+        self._stop_review_button = ttk.Button(
+            btns, text="Avsluta granskning", command=self._stop_review)
+        stop_hint = ttk.Label(
+            btns, text=("Avsluta: den här och återstående filer blir kvar i kön. "
+                        "Snabbtangenter: Ctrl+S spara, Ctrl+U osorterat, "
+                        "Esc lämna kvar, Alt+←/→ byt sida."),
+            style="CardMuted.TLabel", wraplength=520, justify="left")
+
+        self._review_buttons_compact = None
+        def layout_review_buttons(_event=None):
+            compact = btns.winfo_width() < 780
+            if compact == self._review_buttons_compact:
+                return
+            self._review_buttons_compact = compact
+            if compact:
+                for index, button in enumerate(actions):
+                    button.grid_configure(row=index // 3, column=index % 3,
+                                          columnspan=1, sticky="ew",
+                                          padx=4, pady=3)
+                stop_row = 2
+                stop_hint.configure(wraplength=max(180, btns.winfo_width() - 170))
+                self._stop_review_button.grid_configure(
+                    row=stop_row, column=0, columnspan=1, sticky="w",
+                    padx=4, pady=(8, 0))
+                stop_hint.grid_configure(row=stop_row, column=1,
+                                         columnspan=2, sticky="w",
+                                         padx=4, pady=(8, 0))
+            else:
+                for index, button in enumerate(actions):
+                    button.grid_configure(row=0, column=index, columnspan=1,
+                                          sticky="ew", padx=(0 if index == 0 else 6, 0),
+                                          pady=0)
+                stop_hint.configure(wraplength=560)
+                self._stop_review_button.grid_configure(
+                    row=1, column=0, columnspan=1, sticky="w",
+                    padx=0, pady=(10, 0))
+                stop_hint.grid_configure(row=1, column=1, columnspan=4,
+                                         sticky="w", padx=8, pady=(10, 0))
+
+        btns.bind("<Configure>", layout_review_buttons, add="+")
+        self.win.after_idle(layout_review_buttons)
+        self.win.after_idle(resize_wrapped_text)
         ok.focus_set()
 
         self._sync()
         self.win.protocol("WM_DELETE_WINDOW", self._skip)
         self.win.bind("<Escape>", lambda e: self._skip())
-        self.win.bind("<Return>", lambda e: self._ok())
+        self.win.bind("<Return>", self._dialog_return)
+
+        def save_shortcut(_event=None):
+            self._ok()
+            return "break"
+
+        def unsorted_shortcut(_event=None):
+            self._unmatched()
+            return "break"
+
+        def preview_page_shortcut(delta: int):
+            if getattr(self, "_prev_pil", None):
+                self._prev_show(self._prev_page + delta)
+            return "break"
+
+        self.win.bind("<Control-s>", save_shortcut)
+        self.win.bind("<Control-u>", unsorted_shortcut)
+        self.win.bind("<Alt-Left>", lambda _e: preview_page_shortcut(-1))
+        self.win.bind("<Alt-Right>", lambda _e: preview_page_shortcut(1))
         self.win.update_idletasks()
         try:
             self.win.grab_set()
@@ -2852,6 +5900,12 @@ class ReviewDialog:
             pass
 
     # -- rader ------------------------------------------------------------
+    @staticmethod
+    def _candidate_count_note(cand: Candidate) -> str:
+        count = max(0, int(cand.count or 0))
+        noun = "träff" if count == 1 else "träffar"
+        return f"{cand.label} · {count} {noun}"
+
     def _build_rows(self) -> None:
         ttk, tk = self.ttk, self.tk
         for child in self.inner.winfo_children():
@@ -2862,17 +5916,15 @@ class ReviewDialog:
 
         if not self.candidates:
             ttk.Label(self.inner, text="Inga stödord kunde tas fram ur filen.\n"
-                                       "Använd \"+ Eget ord…\" eller välj bara en mapp.",
+                                       "Skriv in ett eget stödord eller välj en mapp.",
                       style="CardMuted.TLabel").grid(row=0, column=0, columnspan=4,
                                                  sticky="w", padx=10, pady=10)
             return
 
         top = max((c.score for c in self.candidates), default=1.0) or 1.0
         for i, cand in enumerate(self.candidates):
-            # Förbocka de starkaste identifierarna - avsändaren i
-            # brevhuvudet, org.nr, VAT och domän är nästan alltid rätt.
-            strong = ("sender", "orgnr", "vat", "company", "domain")
-            var = tk.BooleanVar(value=(i < 3 and cand.kind in strong))
+            # Appen föreslår men väljer aldrig stödord åt användaren.
+            var = tk.BooleanVar(value=False)
             self.vars.append((var, cand.text))
             ttk.Checkbutton(self.inner, variable=var, text=cand.display,
                             style="Card.TCheckbutton"
@@ -2889,14 +5941,99 @@ class ReviewDialog:
             spår.grid_propagate(False)
             tk.Frame(spår, width=int(BAR_WIDTH * andel), height=8,
                      background=self.C["accent"]).place(x=0, y=0)
-            note = cand.label
-            if cand.count > 1:
-                note += f", {cand.count} ggr"
+            note = self._candidate_count_note(cand)
             owners = [o for o in self.rules.keyword_owners(cand.text)]
             if owners:
                 note += "  ⚠ finns i " + ", ".join(owners[:2])
             ttk.Label(self.inner, text=note, style="CardMuted.TLabel"
                       ).grid(row=i, column=2, sticky="w", padx=(10, 14))
+
+    def _show_ocr_details(self) -> None:
+        """Visa OCR-resultat i ett separat läsbart fönster utan att tränga undan valen."""
+        details = getattr(self, "_ocr_detail_lines", [])
+        if not details:
+            return
+        tk, ttk, *_ = _tk()
+        win = tk.Toplevel(self.win)
+        win._icon_ref = brand_window(win)
+        win.title("OCR-avläsning per sida")
+        win.configure(background=self.C["bg"])
+        win.transient(self.win)
+        _fit_geometry(win, 820, 680, 560, 380)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(1, weight=1)
+        ttk.Label(
+            win,
+            text="Texten nedan är automatisk OCR-avläsning. Kontrollera osäkra delar mot original-PDF:en.",
+            style="CardMuted.TLabel", wraplength=760, justify="left",
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        body = ttk.Frame(win, style="Card.TFrame")
+        body.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 8))
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        text = tk.Text(
+            body, wrap="word", state="normal", padx=12, pady=10,
+            background=self.C["surface"], foreground=self.C["text"],
+            insertbackground=self.C["text"], relief="flat", borderwidth=0,
+            font=getattr(self.theme, "f_base", ("TkDefaultFont", 10)),
+        )
+        scroll = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        text.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        text.insert("1.0", "\n\n".join(details))
+        text.configure(state="disabled")
+        ttk.Button(win, text="Stäng", command=win.destroy).grid(
+            row=2, column=0, sticky="e", padx=16, pady=(0, 14))
+        win.bind("<Escape>", lambda _event: win.destroy())
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+
+    def _split_suggested(self) -> None:
+        """Skapa användarvalda delkopior; original-PDF:en lämnas orörd."""
+        breaks = getattr(self.decision.extraction, "document_breaks", [])
+        if not breaks:
+            return
+        output = self.filedialog.askdirectory(
+            parent=self.win, title="Välj mapp för separata PDF-kopior",
+            initialdir=str(self.decision.path.parent),
+        )
+        if not output:
+            return
+        pages = int(getattr(self.decision.extraction, "page_count", 0)
+                    or len(getattr(self.decision.extraction, "page_starts", []))
+                    or max(breaks))
+        ranges = []
+        first = 1
+        for boundary in [*breaks, pages + 1]:
+            last = int(boundary) - 1
+            ranges.append(f"sida {first}" if first == last
+                          else f"sidor {first}–{last}")
+            first = int(boundary)
+        if not self.messagebox.askyesno(
+                APP_NAME,
+                f"Skapa {len(ranges)} separata PDF-kopior ({'; '.join(ranges)}) i vald mapp?\n\n"
+                "Originalfilen lämnas oförändrad.",
+                parent=self.win):
+            return
+        try:
+            files = create_pdf_split_copies(
+                self.decision.path, breaks, Path(output))
+            self.messagebox.showinfo(
+                APP_NAME,
+                f"Skapade {len(files)} separata PDF-kopior.\n\n"
+                + "\n".join(str(path) for path in files)
+                + "\n\nOriginalfilen är oförändrad.",
+                parent=self.win,
+            )
+        except Exception as exc:
+            self.messagebox.showerror(
+                APP_NAME,
+                f"PDF:en kunde inte delas. Originalfilen är oförändrad.\n\n{exc}",
+                parent=self.win,
+            )
 
     # -- förhandsvisning (REQ-N7) -----------------------------------------
     def _start_preview_load(self) -> None:
@@ -2904,10 +6041,13 @@ class ReviewDialog:
         direkt och bilderna dyker upp när de är klara."""
         if not has_pymupdf():
             self._prev_status.configure(
-                text="Förhandsvisningen kräver pymupdf - knappen "
-                     "Förhandsgranska PDF öppnar filen externt.")
+                text="Original-PDF kan öppnas i läsare nedan. "
+                     "Inbäddad förhandsvisning kräver PyMuPDF.")
             return
         path = self.decision.path
+        # Räkna ut zoomen i huvudtråden: Tk-anrop är inte trådsäkra och
+        # load() körs i bakgrunden.
+        render_zoom = _preview_render_zoom(self.win)
 
         def load():
             bilder = []
@@ -2917,7 +6057,11 @@ class ReviewDialog:
                 pymupdf = _open_pymupdf()
                 with pymupdf.open(str(path)) as doc:
                     for i in range(min(3, len(doc))):
-                        pix = doc[i].get_pixmap(matrix=pymupdf.Matrix(1.4, 1.4))
+                        page = doc[i]
+                        preview_zoom = _bounded_render_zoom(page.rect, render_zoom)
+                        pix = page.get_pixmap(
+                            matrix=pymupdf.Matrix(preview_zoom, preview_zoom),
+                            alpha=False)
                         bilder.append(_PILImage.open(
                             _io.BytesIO(pix.tobytes("png"))))
             except Exception:
@@ -2937,11 +6081,115 @@ class ReviewDialog:
                     text="Kunde inte förhandsvisa den här filen.")
                 return
             self._prev_pil = bilder
-            self._prev_status.configure(
-                text=f"Förhandsvisning - {len(bilder)} av sidorna:")
+            total_pages = int(getattr(self.decision.extraction, "page_count", 0) or 0)
+            self._prev_total_pages = max(total_pages, len(bilder))
+            shown_pages = len(bilder)
+            total = self._prev_total_pages
+            if total > shown_pages:
+                label = f"Original-PDF · visar de första {shown_pages} av {total} sidorna"
+            elif total == 1:
+                label = "Original-PDF · 1 sida"
+            else:
+                label = f"Original-PDF · {total} sidor"
+            self._prev_status.configure(text=label)
             self._prev_show(0)
         except Exception:
             pass
+
+    def _rotate_preview(self, degrees: int) -> None:
+        """Rotate the current preview; original file is never changed."""
+        self._prev_rotation = (getattr(self, "_prev_rotation", 0) + degrees) % 360
+        self._prev_show(getattr(self, "_prev_page", 0))
+
+    def _replace_original_with_rotation(self) -> None:
+        angle = int(getattr(self, "_prev_rotation", 0)) % 360
+        if angle == 0:
+            self.messagebox.showinfo(
+                APP_NAME, "Rotera förhandsvisningen först. Ingen fil har ändrats.",
+                parent=self.win)
+            return
+        source = self.decision.path
+        if not self.messagebox.askyesno(
+                "Ersätt original-PDF?",
+                "Spara den valda rotationen direkt i originalfilen?\n\n"
+                "ArkivPiloten skapar först en återställningsbar .bak-kopia "
+                "bredvid originalet. Fortsätta?", parent=self.win):
+            return
+        try:
+            # Preview rotation is counter-clockwise; PDF /Rotate is clockwise.
+            saved, backup = rotate_pdf_with_backup(source, -angle)
+            self.messagebox.showinfo(
+                APP_NAME,
+                f"Originalet har roterats och sparats:\n{saved}\n\n"
+                f"Säkerhetskopia:\n{backup}\n\n"
+                "Återställ vid behov genom att byta säkerhetskopians namn så "
+                "att det slutar på .pdf.", parent=self.win)
+        except Exception as exc:
+            self.messagebox.showerror(
+                APP_NAME,
+                f"Kunde inte spara rotationen i originalet. Filen har inte "
+                f"ersatts om inte åtgärden slutfördes.\n\n{exc}\n\n"
+                f"Nästa steg: {error_next_step(exc)}", parent=self.win)
+
+    def _save_rotated_copy(self) -> None:
+        angle = int(getattr(self, "_prev_rotation", 0)) % 360
+        if angle == 0:
+            self.messagebox.showinfo(
+                APP_NAME, "Rotera förhandsvisningen först. Originalfilen är oförändrad.",
+                parent=self.win)
+            return
+        source = self.decision.path
+        default_name = f"{source.stem} - roterad.pdf"
+        target = self.filedialog.asksaveasfilename(
+            parent=self.win, title="Spara roterad kopia",
+            initialdir=str(source.parent), initialfile=default_name,
+            defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+        if not target:
+            return
+        if Path(target).suffix.lower() != ".pdf":
+            target = str(Path(target).with_suffix(".pdf"))
+        try:
+            # Pillow preview rotations are counter-clockwise; PDF /Rotate is clockwise.
+            saved = rotate_pdf_copy(source, Path(target), -angle)
+            self.messagebox.showinfo(
+                APP_NAME,
+                f"Roterad kopia sparad:\n{saved}\n\nOriginalfilen är oförändrad.",
+                parent=self.win)
+        except Exception as exc:
+            self.messagebox.showerror(
+                APP_NAME,
+                f"Kunde inte spara den roterade kopian. Originalfilen är oförändrad.\n\n"
+                f"{exc}\n\nNästa steg: {error_next_step(exc)}", parent=self.win)
+
+    def _save_deskewed_copy(self) -> None:
+        if not self.messagebox.askyesno(
+                APP_NAME,
+                "ArkivPiloten uppskattar lutningen separat för varje sida och "
+                "bildbehandlar dem till en ny PDF-kopia. Text kan då inte längre "
+                "markeras/sökas i kopian och länkar/formulär följer inte med.\n\n"
+                "Originalet rörs inte. Fortsätta med den här filen?", parent=self.win):
+            return
+        source = self.decision.path
+        target = self.filedialog.asksaveasfilename(
+            parent=self.win, title="Spara rätad kopia",
+            initialdir=str(source.parent),
+            initialfile=f"{source.stem} - rätad.pdf",
+            defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+        if not target:
+            return
+        if Path(target).suffix.lower() != ".pdf":
+            target = str(Path(target).with_suffix(".pdf"))
+        try:
+            saved = deskew_pdf_copy(source, Path(target))
+            self.messagebox.showinfo(
+                APP_NAME,
+                f"Rätad kopia sparad:\n{saved}\n\nOriginalfilen är oförändrad.",
+                parent=self.win)
+        except Exception as exc:
+            self.messagebox.showerror(
+                APP_NAME,
+                f"Kunde inte räta PDF-kopian. Originalfilen är oförändrad.\n\n"
+                f"{exc}\n\nNästa steg: {error_next_step(exc)}", parent=self.win)
 
     def _prev_show(self, i: int) -> None:
         """Visa sida i (0-baserat). PhotoImage skapas i huvudtråden och
@@ -2950,15 +6198,166 @@ class ReviewDialog:
             if not self._prev_pil or not (0 <= i < len(self._prev_pil)):
                 return
             self._prev_page = i
-            from PIL import ImageTk
+            from PIL import Image, ImageTk
             pil = self._prev_pil[i].copy()
-            pil.thumbnail((760, 300))
+            rotation = int(getattr(self, "_prev_rotation", 0)) % 360
+            if rotation:
+                pil = pil.rotate(rotation, expand=True, fillcolor="white")
+            content_width = max(1, self._all.winfo_width())
+            thumb_width = (content_width // 2 - 100
+                           if getattr(self, "_review_two_columns", False)
+                           else content_width - 80)
+            # LANCZOS i stället för förvald NEAREST: texten i bilden blir
+            # tydligt skarpare, särskilt på HiDPI-skärmar.
+            pil.thumbnail((max(160, min(760, thumb_width)),
+                           getattr(self, "_preview_max_height", 160)),
+                          resample=Image.LANCZOS)
             foto = ImageTk.PhotoImage(pil)
-            self._prev_pages.append(foto)      # behåll referensen
-            self._prev_img.configure(image=foto)
-            self._prev_info.configure(text=f"{i + 1}/{len(self._prev_pil)}")
+            self._prev_pages[:] = [foto]       # behåll bara aktuell sida
+            self._prev_display_size = pil.size
+            self._prev_img.delete("all")
+            self._prev_img.configure(width=pil.width, height=pil.height)
+            self._prev_img.create_image(0, 0, image=foto, anchor="nw",
+                                        tags=("preview",))
+            self._prev_info.configure(
+                text=f"Sida {i + 1}/{len(self._prev_pil)} · {rotation}°")
         except Exception:
             pass
+
+    def _sync_subfolder_template_toggle(self, _event=None) -> None:
+        variable = getattr(self, "var_use_subfolder_templates", None)
+        if variable is None:
+            return
+        category = self._category()
+        cat = self.rules.get(category) if category else None
+        variable.set(bool(cat.get("subfolder_templates_enabled", True))
+                     if cat else True)
+
+    def _toggle_subfolder_templates(self) -> None:
+        category = self._category()
+        cat = self.rules.get(category) if category else None
+        if cat is None:
+            return
+        cat["subfolder_templates_enabled"] = bool(
+            self.var_use_subfolder_templates.get())
+        self.rules.save()
+
+    def _start_template_drawing(self) -> None:
+        if getattr(self, "_template_drawing", False):
+            self._template_drawing = False
+            self._template_start = None
+            self._prev_status.configure(text="Mallritning avbröts.")
+            return
+        if not getattr(self, "_prev_pil", None):
+            self.messagebox.showinfo(
+                APP_NAME, "Vänta tills PDF-förhandsvisningen har lästs in.",
+                parent=self.win)
+            return
+        if int(getattr(self, "_prev_rotation", 0)) % 360:
+            self.messagebox.showinfo(
+                APP_NAME, "Återställ förhandsvisningens rotation till 0° innan "
+                "du ritar en mall. Original-PDF:en ändras inte.", parent=self.win)
+            return
+        folder = str(self.var_subfolder.get() or "").strip()
+        if not folder:
+            folder = self.simpledialog.askstring(
+                "Undermapp för områdesmallen",
+                "Vilken dokumenttyp/undermapp ska den här texten identifiera?",
+                parent=self.win) or ""
+        folder, error = validate_subfolder_override(folder)
+        if error or not folder:
+            if error:
+                self.messagebox.showwarning(APP_NAME, error, parent=self.win)
+            return
+        self.var_subfolder.set(folder)
+        self._template_target = folder
+        self._template_drawing = True
+        self._template_start = None
+        self._template_rect = None
+        self._prev_status.configure(
+            text=f"Dra en ruta runt rubriken för ‘{folder}’. Släpp för att spara mallen.")
+
+    def _template_draw_start(self, event):
+        if not getattr(self, "_template_drawing", False):
+            return ""
+        width, height = getattr(self, "_prev_display_size", (0, 0))
+        if not (0 <= event.x <= width and 0 <= event.y <= height):
+            return "break"
+        self._template_start = (event.x, event.y)
+        if self._template_rect is not None:
+            self._prev_img.delete(self._template_rect)
+        self._template_rect = self._prev_img.create_rectangle(
+            event.x, event.y, event.x, event.y,
+            outline=self.C["accent"], width=2, dash=(4, 2),
+            tags=("template-selection",))
+        return "break"
+
+    def _template_draw_motion(self, event):
+        if (not getattr(self, "_template_drawing", False)
+                or self._template_start is None or self._template_rect is None):
+            return ""
+        width, height = self._prev_display_size
+        x = max(0, min(width, event.x))
+        y = max(0, min(height, event.y))
+        start_x, start_y = self._template_start
+        self._prev_img.coords(self._template_rect, start_x, start_y, x, y)
+        return "break"
+
+    def _template_draw_end(self, event):
+        if (not getattr(self, "_template_drawing", False)
+                or self._template_start is None):
+            return ""
+        width, height = self._prev_display_size
+        x = max(0, min(width, event.x))
+        y = max(0, min(height, event.y))
+        x0, x1 = sorted((self._template_start[0], x))
+        y0, y1 = sorted((self._template_start[1], y))
+        self._template_drawing = False
+        if width <= 0 or height <= 0 or x1 - x0 < 8 or y1 - y0 < 8:
+            self._prev_status.configure(text="Rutan var för liten. Rita en större ruta.")
+            return "break"
+        bbox = (x0 / width, y0 / height, x1 / width, y1 / height)
+        self._save_drawn_subfolder_template(bbox)
+        return "break"
+
+    def _save_drawn_subfolder_template(self, bbox) -> None:
+        category = self._category()
+        if not category:
+            self.messagebox.showwarning(
+                APP_NAME, "Välj först en kategori för dokumentmallen.",
+                parent=self.win)
+            return
+        try:
+            template = create_pdf_subfolder_template(
+                self.decision.path, self._prev_page, bbox,
+                self._template_target)
+        except Exception as exc:
+            self.messagebox.showwarning(
+                APP_NAME, f"Kunde inte skapa mallen:\n{exc}", parent=self.win)
+            self._prev_status.configure(
+                text="Mallen sparades inte. Kontrollera att rutan täcker markerbar text.")
+            return
+        snippet = template["text"][:180]
+        if len(template["text"]) > 180:
+            snippet += "…"
+        if not self.messagebox.askyesno(
+                "Spara dokumentmall?",
+                f"Undermapp: {template['folder']}\n"
+                f"Text som känns igen: {snippet}\n\n"
+                "Framtida PDF:er skickas hit endast om samma text hittas i "
+                "samma sidområde. Osäkra eller motstridiga träffar granskas. "
+                "Spara mallen?", parent=self.win):
+            self._prev_status.configure(text="Mallritningen sparades inte.")
+            return
+        cat = self.rules.get(category)
+        if cat is None:
+            return
+        cat.setdefault("subfolder_templates", []).append(template)
+        cat["subfolder_templates_enabled"] = True
+        self.rules.save()
+        self.var_use_subfolder_templates.set(True)
+        self._prev_status.configure(
+            text=f"Områdesmall sparad för {category} → {template['folder']}.")
 
     def _add_own(self) -> None:
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
@@ -2970,55 +6369,826 @@ class ReviewDialog:
         text = normalize(word)
         if any(t == text for _, t in self.vars):
             return
+        selected_before = set(self._chosen())
         self.candidates.append(Candidate(text, word.strip(), "word", 1, 0.01))
         self._build_rows()
-        if self.vars:
-            self.vars[-1][0].set(True)
+        for var, candidate_text in self.vars:
+            if candidate_text in selected_before or candidate_text == text:
+                var.set(True)
+
+    def _subfolder_base(self) -> Optional[Path]:
+        category = self._category()
+        if not category or self.subfolder_base_resolver is None:
+            return None
+        try:
+            return Path(self.subfolder_base_resolver(category)).resolve()
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _browse_subfolder(self) -> None:
+        """Välj en befintlig mapp under den beräknade kategori/år-mappen."""
+        base = self._subfolder_base()
+        if base is None:
+            self.messagebox.showinfo(
+                APP_NAME, "Välj först en kategori för att bläddra bland undermappar.",
+                parent=self.win)
+            return
+        if not base.is_dir():
+            self.messagebox.showinfo(
+                APP_NAME,
+                "Det finns ännu inga undermappar här. Använd ‘Skapa ny…’ "
+                "eller skriv ett relativt mappnamn.", parent=self.win)
+            return
+        chosen = self.filedialog.askdirectory(
+            parent=self.win, title="Välj undermapp",
+            initialdir=str(base), mustexist=True)
+        if not chosen:
+            return
+        try:
+            relative = Path(chosen).resolve().relative_to(base)
+        except (OSError, ValueError):
+            self.messagebox.showerror(
+                APP_NAME, "Välj en mapp inuti den valda kategori/år-mappen.",
+                parent=self.win)
+            return
+        if relative == Path("."):
+            self.var_subfolder.set("")
+            return
+        value, error = validate_subfolder_override(relative.as_posix())
+        if error:
+            self.messagebox.showerror(APP_NAME, error, parent=self.win)
+            return
+        self.var_subfolder.set(value)
+
+    def _create_subfolder(self) -> None:
+        """Skriv namnet/sökvägen på en ny undermapp; den skapas vid flytt."""
+        _tk_mod, _ttk, _filedialog, _messagebox, simpledialog = _tk()
+        value = simpledialog.askstring(
+            APP_NAME,
+            "Ange en undermapp relativt kategori/år (exempel: Fakturor/2025). "
+            "Den skapas när du bekräftar ‘Spara & flytta’:",
+            initialvalue=self.var_subfolder.get(), parent=self.win)
+        if value is None:
+            return
+        cleaned, error = validate_subfolder_override(value)
+        if error:
+            self.messagebox.showerror(APP_NAME, error, parent=self.win)
+            return
+        self.var_subfolder.set(cleaned)
+
+    def _new_name_changed(self, event=None) -> None:
+        self.mode.set("new")
+        self._update_subfolder_hint()
+
+    def _refresh_subfolder_options(self) -> None:
+        """Populate the review dropdown with safe existing subfolders."""
+        combo = getattr(self, "subfolder_combo", None)
+        if combo is None:
+            return
+        choices: List[str] = []
+        resolver = getattr(self, "subfolder_choices_resolver", None)
+        if resolver is not None:
+            try:
+                resolved = resolver(self._category())
+                choices = list(resolved) if resolved else []
+            except Exception:
+                choices = []
+        if not choices:
+            choices = _existing_subfolder_choices(self._subfolder_base())
+        variable = getattr(self, "var_subfolder", None)
+        current = str(variable.get() if variable is not None else "").strip()
+        if current and current not in choices:
+            choices.insert(0, current)
+        try:
+            combo.configure(values=choices)
+        except Exception:
+            pass
+
+    def _update_destination_preview(self) -> None:
+        """Visa hela målsökvägen (bas + undermapp + filnamn) före flytt."""
+        label = getattr(self, "lbl_destination", None)
+        if label is None:
+            return
+        category = self._category()
+        if not category:
+            label.configure(text="Välj en kategori för att se målsökvägen.")
+            return
+        dest = preview_destination_path(
+            self._subfolder_base(), self.var_subfolder.get(),
+            self.decision.path.name)
+        if dest is None:
+            label.configure(text="Välj en kategori för att se målsökvägen.")
+        else:
+            label.configure(text=f"Sparas till: {dest}")
+
+    def _update_subfolder_hint(self) -> None:
+        self._update_destination_preview()
+        label = getattr(self, "lbl_subfolder_hint", None)
+        if label is None:
+            return
+        self._refresh_subfolder_options()
+        category = self._category()
+        if not category:
+            label.configure(text="Välj en kategori för att se standardplatsen.")
+            return
+        base = self._subfolder_base()
+        if base is None:
+            label.configure(
+                text=("Välj eller skriv en dokumenttyp, till exempel Transaktioner "
+                      "eller Utbetalningar. En ny undermapp skapas först när du "
+                      "bekräftar ‘Spara & flytta’.")
+            )
+            return
+        label.configure(
+            text=(f"Basplats: {base} · välj en befintlig undermapp i listan eller "
+                  "skriv en ny. Listan visar undermappar från alla år i kategorin; "
+                  "den skapas under det här årets mapp när du bekräftar flytten."))
 
     def _sync(self) -> None:
         # Rullgardinen är alltid skrivbar/sökbar; bara "Ny mapp"-fältet
         # växlas mellan aktivt och inaktivt.
         is_new = self.mode.get() == "new"
-        self.new_entry.configure(state="normal" if is_new else "disabled")
+        entry = getattr(self, "new_entry", None)
+        if entry is not None:
+            entry.configure(state="normal" if is_new else "disabled")
+        update_hint = getattr(self, "_update_subfolder_hint", None)
+        if update_hint is not None:
+            update_hint()
+
+    def _combo_show_hint(self, text: str = "") -> None:
+        """Liten hjälprad under fältet: vad sökningen hittade och vad
+        Enter gör. Gör beteendet begripligt även när listan är stängd."""
+        lbl = getattr(self, "_combo_hint_lbl", None)
+        if lbl is None:
+            return
+        q = str(text or "").strip()
+        if not q:
+            antal = len(self._all_categories)
+            msg = (f"{antal} mappar · skriv för att söka; Enter väljer; "
+                   "Esc visar alla."
+                   if antal else
+                   "Inga mappar än – skriv ett namn för att skapa en.")
+            lbl.configure(text=msg)
+            return
+        träffar, nivå = _rank_categories(q, self._all_categories)
+        n = len(träffar)
+        if nivå == "prefix":
+            msg = (f"{n} träffar · fortsätt skriva eller välj med ↑/↓ + Enter. "
+                   "Esc visar alla mappar.")
+        elif nivå == "word":
+            msg = (f"{n} mappar har ett ord som börjar med ”{q}” · "
+                   "välj aktivt med piltangenterna. Esc visar alla mappar.")
+        elif nivå == "contains":
+            msg = (f"{n} mappar innehåller ”{q}” · välj aktivt med ↑/↓. "
+                   "Esc visar alla mappar.")
+        else:
+            msg = (f"Ingen mapp matchar ”{q}” – Enter fyller i namnet som ny "
+                   "mapp. Esc visar alla mappar.")
+        lbl.configure(text=msg)
+
+    def _suggest_mapped_subfolder(self) -> None:
+        """Prefill a uniquely mapped type after the user confirms a category."""
+        category = self._category()
+        cat = self.rules.get(category) if category else None
+        if not cat:
+            return
+        previous = getattr(self, "_mapped_subfolder_suggestion", "")
+        if previous and self.var_subfolder.get() == previous:
+            self.var_subfolder.set("")
+        self._mapped_subfolder_suggestion = ""
+        mapped, has_mappings = match_subfolder_keyword(
+            self.rules, category, self.decision.extraction)
+        if mapped:
+            if not self.var_subfolder.get().strip():
+                self.var_subfolder.set(mapped)
+                self._mapped_subfolder_suggestion = mapped
+                self._update_subfolder_hint()
+        elif has_mappings:
+            label = getattr(self, "lbl_subfolder_hint", None)
+            if label is not None:
+                label.configure(text=("Flera eller inga kopplade stödord avgör "
+                                     "undermappen. Välj den manuellt före flytt."))
 
     def _combo_chosen(self, event=None) -> None:
+        self.combo._replace_on_type = True
         self.mode.set("existing")
+        self._sync()
         self.new_entry.delete(0, "end")
+        self._suggest_mapped_subfolder()
+        # Efter valet ska nästa sökning börja från hela kategorilistan.
+        self.combo["values"] = self._all_categories
+        self.combo._ta_seed = ""
+        self._combo_render_suggestions([])
+        self._combo_show_hint()
 
-    def _combo_typeahead(self, event=None) -> None:
-        if event is not None and event.keysym in (
-                "Up", "Down", "Return", "Escape", "Tab",
-                "BackSpace", "Delete", "Left", "Right"):
+    def _combo_prepare_search(self, event=None) -> None:
+        """Starta en ny sökning genom att ersätta en förvald mapp vid typing."""
+        if not getattr(self.combo, "_replace_on_type", False) or event is None:
             return
-        val = self.combo.get()
-        names = self.rules.names()
-        jump, exact = _typeahead_match(val, names)
-        if jump:
-            if not exact and jump != val:
-                self.combo.set(jump)
-            self.mode.set("existing")
-            self.new_entry.delete(0, "end")
+        if getattr(event, "state", 0) & 0x4:  # behåll Ctrl+A/C/V m.m.
+            return
+        keysym = getattr(event, "keysym", "")
+        char = getattr(event, "char", "")
+        if char and char.isprintable():
+            self.combo.delete(0, "end")
+            self.combo._replace_on_type = False
+        elif keysym in ("BackSpace", "Delete"):
+            self.combo.delete(0, "end")
+            self.combo._replace_on_type = False
+            return "break"
+
+    def _combo_keypress_search(self, event=None):
+        """Handle printable keys explicitly while the native dropdown is open.
+
+        Some Tk/Windows combinations send key events to the editable field and
+        others to the popdown listbox. Routing both through the same search
+        state prevents typing from being swallowed by the native popup.
+        """
+        if event is None:
+            return
+        if not self._popdown_open():
+            return self._combo_prepare_search(event)
+        state = int(getattr(event, "state", 0) or 0)
+        if state & (0x4 | 0x8):  # keep Ctrl/Alt shortcuts native
+            return
+        keysym = str(getattr(event, "keysym", "") or "")
+        if keysym == "BackSpace":
+            text = ("" if getattr(self.combo, "_replace_on_type", False)
+                    else self.combo.get()[:-1])
+        elif keysym == "Delete":
+            # Let the editable field perform native forward-delete; its
+            # KeyRelease binding will refresh the open result list.
+            return
+        elif keysym in ("Return", "Escape", "Tab", "Up", "Down", "Left",
+                        "Right", "Home", "End", "Prior", "Next", "Shift_L",
+                        "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R"):
+            return
         else:
-            # Skrivet namn finns inte -> blir nytt mappnamn.
-            self.mode.set("new")
+            char = str(getattr(event, "char", "") or "")
+            if not char or not char.isprintable():
+                return
+            text = ("" if getattr(self.combo, "_replace_on_type", False)
+                    else self.combo.get())
+            text += char
+        self.combo.set(text)
+        self.combo._replace_on_type = False
+        try:
+            self.combo.icursor("end")
+        except Exception:
+            pass
+        self._combo_search(keep_popup=True)
+        return "break"
+
+    def _combo_render_suggestions(self, names: List[str]) -> None:
+        """Visa aktuella träffar under fältet utan att flytta skrivfokus."""
+        box = self._combo_suggest_list
+        box.delete(0, "end")
+        self._combo_suggest_index = None
+        for name in names:
+            box.insert("end", name)
+        if names:
+            self._combo_suggest_frame.grid()
+            box.yview_moveto(0)
+        else:
+            self._combo_suggest_frame.grid_remove()
+
+    def _combo_suggestions_visible(self) -> bool:
+        try:
+            return bool(self._combo_suggest_frame.winfo_manager())
+        except Exception:
+            return False
+
+    def _combo_select_suggestion(self, index: int) -> None:
+        count = int(self._combo_suggest_list.size())
+        if not count:
+            self._combo_suggest_index = None
+            return
+        index %= count
+        self._combo_suggest_index = index
+        self._combo_suggest_list.selection_clear(0, "end")
+        self._combo_suggest_list.selection_set(index)
+        self._combo_suggest_list.activate(index)
+        self._combo_suggest_list.see(index)
+
+    def _combo_suggest_click(self, event=None) -> str:
+        """Mouse choice in the suggestion list, without giving it focus."""
+        try:
+            index = int(self._combo_suggest_list.nearest(event.y))
+            name = str(self._combo_suggest_list.get(index))
+            if name:
+                self._combo_choose_category(name)
+        except Exception:
+            pass
+        return "break"
+
+    def _combo_suggestion_wheel(self, event=None) -> str:
+        """Scrolla långa träfflistor utan att byta kategori av misstag."""
+        try:
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta:
+                step = -1 if delta > 0 else 1
+            else:
+                step = 1 if getattr(event, "num", 4) == 5 else -1
+            self._combo_suggest_list.yview_scroll(step, "units")
+        except Exception:
+            pass
+        return "break"
+
+    def _combo_selected_suggestion(self) -> str:
+        if self._combo_suggest_index is None:
+            return ""
+        try:
+            return str(self._combo_suggest_list.get(self._combo_suggest_index))
+        except Exception:
+            return ""
+
+    def _combo_choose_category(self, name: str) -> None:
+        if not name:
+            return
+        if self._popdown_open():
+            try:
+                self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+            except Exception:
+                pass
+        self.combo.set(name)
+        self.combo._replace_on_type = True
+        self.mode.set("existing")
+        self._sync()
+        self.new_entry.delete(0, "end")
+        self.combo._ta_seed = ""
+        self.combo["values"] = self._all_categories
+        self._combo_render_suggestions([])
+        self._combo_show_hint()
+        try:
+            self.combo.focus_set()
+            self.combo.icursor("end")
+        except Exception:
+            pass
+
+    def _combo_search(self, event=None, *, keep_popup: bool = False) -> None:
+        """Filtrera listan medan användaren skriver.
+
+        ``keep_popup`` används när tangenten kommer från den redan öppna
+        Tk-rullgardinen: uppdatera dess rader utan att stänga den.
+        """
+        # Focus stays in the editable field while Tk's native list is open.
+        # A normal KeyRelease from that field must therefore refresh, not close,
+        # the already-posted list. Popup keypresses pass keep_popup explicitly.
+        if event is not None and self._popdown_open():
+            keep_popup = True
+        if event is not None:
+            if getattr(event, "keysym", "") in (
+                    "Up", "Down", "Return", "Escape", "Tab",
+                    "Left", "Right", "Home", "End", "Prior", "Next",
+                    "Shift_L", "Shift_R", "Control_L", "Control_R",
+                    "Alt_L", "Alt_R"):
+                return
+            # Ctrl-kombon (Ctrl+A, Ctrl+C ...) ska inte filtrera; klistra
+            # in (Ctrl+V) ska däremot uppdatera listan.
+            if getattr(event, "state", 0) & 0x4 and \
+                    getattr(event, "keysym", "") not in ("v", "V"):
+                return
+        text = self.combo.get().strip()
+        if not text:
+            self.combo["values"] = self._all_categories
+            self.combo._ta_seed = ""
+            self._combo_render_suggestions([])
+            self.mode.set("existing")
+            self._sync()
             self.new_entry.delete(0, "end")
-            self.new_entry.insert(0, val)
+            self._combo_show_hint()
+            self._combo_refresh_popup(keep_popup)
+            return
+        träffar = _filter_categories(text, self._all_categories)
+        # Visa de filtrerade träffarna direkt i en egen lista. Den lämnar
+        # tangentbordsfokus i comboboxen till skillnad från Tk:s popdown.
+        # När native-rullgardinen redan är öppen används den i stället, så
+        # två överlappande träfflistor inte visas samtidigt.
+        native_open = keep_popup and self._popdown_open()
+        self.combo["values"] = träffar
+        self._combo_render_suggestions([] if native_open else träffar)
+        self._combo_show_hint(text)
+        if träffar:
+            self.mode.set("existing")
+            self._sync()
+            self.new_entry.delete(0, "end")
+            self.combo._ta_seed = text
+        else:
+            # Skrivet namn finns inte bland kategorierna -> ny mapp.
+            self.combo._ta_seed = ""
+            self.mode.set("new")
+            self._sync()
+            self.new_entry.delete(0, "end")
+            self.new_entry.insert(0, text)
+        self._combo_refresh_popup(keep_popup)
+
+    def _combo_refresh_popup(self, keep_open: bool = False) -> None:
+        """Uppdatera den öppna listan, eller stäng den vid vanlig fritext."""
+        if not self._popdown_open():
+            return
+        try:
+            if keep_open:
+                self.combo.tk.call(
+                    "ttk::combobox::ConfigureListbox", self.combo)
+                # Typing while the native dropdown is open filters its rows
+                # and moves the visible highlight to the first match. The
+                # search text remains in the editable field until Enter.
+                values = list(self.combo["values"])
+                if self.combo.get().strip() and values:
+                    self._popdown_select_first()
+                else:
+                    self._popdown_clear_selection()
+            else:
+                self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+        except Exception:
+            pass
+
+    def _popdown_open(self) -> bool:
+        try:
+            popdown = self.combo.tk.call(
+                "ttk::combobox::PopdownWindow", self.combo)
+            return bool(int(self.combo.tk.call("winfo", "ismapped", popdown)))
+        except Exception:
+            return False
+
+    def _popdown_clear_selection(self) -> None:
+        """Visa första träffen utan att välja åt användaren.
+
+        En automatisk markering gjorde att Enter kunde godkänna och flytta
+        till första kategorin trots att användaren bara försökte söka.
+        """
+        lb = self._popdown_lb_path()
+        if not lb:
+            return
+        try:
+            if int(self.combo.tk.call(lb, "size")):
+                self.combo.tk.call(lb, "selection", "clear", 0, "end")
+                self.combo.tk.call(lb, "see", 0)
+        except Exception:
+            pass
+
+    def _popdown_select_first(self) -> None:
+        """Highlight and scroll to the first live typeahead match."""
+        if not self._popdown_open():
+            return
+        lb = self._popdown_lb_path()
+        if not lb:
+            return
+        try:
+            if not int(self.combo.tk.call(lb, "size")):
+                self._popdown_clear_selection()
+                return
+            self.combo.tk.call(lb, "selection", "clear", 0, "end")
+            self.combo.tk.call(lb, "selection", "set", 0)
+            self.combo.tk.call(lb, "activate", 0)
+            self.combo.tk.call(lb, "see", 0)
+        except Exception:
+            pass
+
+    def _popdown_lb_path(self) -> str:
+        try:
+            popdown = str(self.combo.tk.call(
+                "ttk::combobox::PopdownWindow", self.combo))
+            return f"{popdown}.f.l"
+        except Exception:
+            return ""
+
+    def _popdown_selected_name(self) -> str:
+        """Returnera bara en rad som användaren faktiskt markerat."""
+        if not self._popdown_open():
+            return ""
+        lb = self._popdown_lb_path()
+        if not lb:
+            return ""
+        try:
+            selected = self.combo.tk.call(lb, "curselection")
+            if isinstance(selected, (tuple, list)):
+                indices = selected
+            else:
+                indices = str(selected).split()
+            if not indices:
+                return ""
+            index = int(indices[0])
+            values = list(self.combo["values"])
+            return str(values[index]) if 0 <= index < len(values) else ""
+        except Exception:
+            return ""
+
+    def _bind_popdown_return(self) -> None:
+        """Ge popdown samma sökning och Enter-semantik som skrivfältet."""
+        lb = self._popdown_lb_path()
+        if not lb:
+            return
+        try:
+            if getattr(self, "_return_bound_listbox", None) == lb:
+                return
+            pick = self.win.register(self._combo_pick)
+            self.combo.tk.call(
+                "bind", lb, "<Return>",
+                f'if {{[{pick}] == "break"}} break')
+            # Interceptera tangenttryck innan Listboxens inbyggda typeahead,
+            # annars hoppar markören men sökfältet filtreras inte. Tkinter
+            # sköter säkert escapningen av tecken som mellanslag och citattecken.
+            self.combo._bind(("bind", lb), "<KeyPress>",
+                             self._combo_popup_keypress, add="+")
+            self._return_bound_listbox = lb
+        except Exception:
+            pass
+
+    def _combo_popup_keypress(self, event, keysym=None, state=None) -> str:
+        """Sök även när fokus ligger i den redan öppna native-rullgardinen."""
+        if keysym is None and state is None and not isinstance(event, str):
+            char = getattr(event, "char", "")
+            keysym = getattr(event, "keysym", "")
+            state = getattr(event, "state", 0)
+        else:
+            char = event
+        try:
+            modifiers = int(state or 0)
+        except (TypeError, ValueError):
+            modifiers = 0
+        if modifiers & (0x4 | 0x8):  # Ctrl/Alt-kombinationer lämnas åt Tk.
+            return ""
+        keysym = str(keysym or "")
+        if keysym == "Escape":
+            return self._combo_reset()
+        if keysym == "Return":
+            return self._combo_pick()
+        if keysym == "BackSpace":
+            text = "" if getattr(self.combo, "_replace_on_type", False) \
+                else self.combo.get()[:-1]
+            self.combo.set(text)
+            self.combo._replace_on_type = False
+            self._combo_search(keep_popup=True)
+            return "break"
+        if keysym in ("Delete", "Tab", "Up", "Down", "Left", "Right",
+                      "Home", "End", "Prior", "Next", "Shift_L",
+                      "Shift_R", "Control_L", "Control_R", "Alt_L",
+                      "Alt_R"):
+            return ""
+        char = str(char or "")
+        if char and char.isprintable():
+            text = "" if getattr(self.combo, "_replace_on_type", False) \
+                else self.combo.get()
+            self.combo.set(text + char)
+            self.combo._replace_on_type = False
+            self._combo_search(keep_popup=True)
+            return "break"
+        return ""
+
+    def _combo_schedule_popup_bind(self, event=None) -> None:
+        """Native arrow opens after the click; keep a visible, editable caret."""
+        if not self._popdown_open():
+            self.combo._replace_on_type = self.combo.get().strip() in self._all_categories
+        try:
+            self.win.after_idle(self._popdown_clear_selection)
+            self.win.after_idle(self._bind_popdown_return)
+            # The native popdown takes keyboard focus when opened with the
+            # mouse. Return it to the editable field so typing can continue
+            # the live category search while the dropdown stays visible.
+            self.win.after_idle(self._keep_combo_search_focus)
+        except Exception:
+            pass
+
+    def _dialog_return(self, event=None) -> str:
+        """Enter in the folder search selects; it must never submit the file."""
+        try:
+            focus = self.win.focus_get()
+            path = str(focus) if focus is not None else ""
+            combo_path = str(self.combo)
+            lb = self._popdown_lb_path()
+            popup_path = lb.rsplit(".f.l", 1)[0] if lb else ""
+            if (path == combo_path or path.startswith(combo_path + ".")
+                    or (self._popdown_open() and popup_path
+                        and path.startswith(popup_path))):
+                return self._combo_pick(event)
+            if focus is self.new_entry:
+                self._ok()
+                return "break"
+            klass = str(focus.winfo_class()) if focus is not None else ""
+            if klass in ("TButton", "TCheckbutton", "TRadiobutton"):
+                return ""
+        except Exception:
+            pass
+        self._ok()
+        return "break"
+
+    def _post_dropdown(self, seed: Optional[str] = None) -> None:
+        """Visa/uppdatera filtreringen och rulla till första träffen."""
+        if seed is not None:
+            self.combo._ta_seed = seed
+        try:
+            if self._popdown_open():
+                # Redan öppen: uppdatera raderna med de nya träffarna.
+                try:
+                    self.combo.tk.call(
+                        "ttk::combobox::ConfigureListbox", self.combo)
+                except Exception:
+                    pass
+            else:
+                self.combo.tk.call("ttk::combobox::Post", self.combo)
+            # Uppdatera markering och scrollposition även när listan redan
+            # var öppen. Annars kan tangentbordssökningen filtrera listan
+            # men lämna den kvar scrollad till en gammal rad.
+            try:
+                self.win.after_idle(self._popdown_clear_selection)
+                self.win.after_idle(self._bind_popdown_return)
+                # Keep keyboard focus in the editable field while the
+                # filtered popup stays open, so typing "li" continues the
+                # query instead of becoming listbox type-ahead for "l".
+                self.win.after_idle(self._keep_combo_search_focus)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _keep_combo_search_focus(self) -> None:
+        """Keep the popup open but return typing focus to its search field."""
+        if not self._popdown_open():
+            return
+        try:
+            self.combo.focus_set()
+            self.combo.icursor("end")
+        except Exception:
+            pass
+
+    def _combo_reset_values(self, event=None) -> None:
+        if not self._popdown_open():
+            self.combo["values"] = self._all_categories
+
+    def _combo_focus_in(self, event=None) -> None:
+        """Place the caret in the editable field without selecting its text.
+
+        If the filtered popup is open, preserve the live query instead:
+        typing must continue from "l" to "li", not replace the query or
+        fall through to listbox type-ahead.
+        """
+        if self._popdown_open():
+            self.combo._replace_on_type = False
+            self._combo_show_hint(self.combo.get())
+            try:
+                self.combo.icursor("end")
+            except Exception:
+                pass
+            return
+        self.combo["values"] = self._all_categories
+        self.combo._ta_seed = ""
+        self.combo._replace_on_type = self.combo.get().strip() in self._all_categories
+        self._combo_show_hint()
+        try:
+            # Lämna insättningspunkten synlig i stället för att markera hela
+            # mappnamnet när användaren klickar i sökrutan.
+            self.combo.icursor("end")
+        except Exception:
+            pass
+
+    def _combo_focus_out(self, event=None) -> None:
+        # Fokus flyttar till rullgardinens listbox när den öppnas - då
+        # får listan absolut inte återställas till hela kategorilistan.
+        try:
+            self.win.after_idle(self._combo_focus_check)
+        except Exception:
+            pass
+
+    def _combo_focus_check(self) -> None:
+        try:
+            w = self.win.focus_get()
+        except Exception:
+            w = None
+        if w is not None:
+            path = str(w)
+            cpath = str(self.combo)
+            popdown = ""
+            try:
+                popdown = str(self.combo.tk.call(
+                    "ttk::combobox::PopdownWindow", self.combo))
+            except Exception:
+                pass
+            if path == cpath or path.startswith(cpath + ".") or \
+                    (popdown and path.startswith(popdown)):
+                return
+        self.combo._ta_seed = ""
+        self.combo._replace_on_type = False
+        self.combo["values"] = self._all_categories
+        self._combo_render_suggestions([])
+        self._combo_show_hint()
+
+    def _combo_reset(self, event=None) -> str:
+        """Escape: stäng listan/återställ den - stänger inte dialogen."""
+        if self._popdown_open():
+            try:
+                self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+            except Exception:
+                pass
+        self.combo._ta_seed = ""
+        self._combo_reset_values()
+        self._combo_render_suggestions([])
+        self._combo_show_hint()
+        return "break"
+
+    def _combo_pick(self, event=None) -> str:
+        """Enter väljer bara en entydig eller aktiv träff — aldrig första."""
+        text = self.combo.get().strip()
+        # En aktiv synlig rad ska slå söktexten; annars väljs en unik träff.
+        namn = self._combo_selected_suggestion()
+        if not namn and self._popdown_open():
+            namn = self._popdown_selected_name()
+        if not namn:
+            namn = _resolve_category_name(text, self._all_categories)
+        if namn:
+            self._combo_choose_category(namn)
+        elif text:
+            träffar = _filter_categories(text, self._all_categories)
+            if träffar:
+                # Tvetydigt: behåll söktexten och visa träffarna utan val.
+                self.combo["values"] = träffar
+                self._combo_render_suggestions(träffar)
+                self._combo_show_hint(text)
+            else:
+                self.mode.set("new")
+                self._sync()
+                self.new_entry.delete(0, "end")
+                self.new_entry.insert(0, text)
+                self.combo._ta_seed = ""
+                self._combo_reset_values()
+                self._combo_show_hint(text)
+        return "break"
+
+    def _combo_wheel(self, event) -> str:
+        """Mushjulet rullar fönstret endast när kategorilistan är stängd."""
+        if self._popdown_open():
+            return "break"
+        try:
+            delta = int(getattr(event, "delta", 0) or 0)
+            # Använd tecknet, inte storleken: macOS rapporterar ibland ±1
+            # per hack medan Windows rapporterar ±120.
+            if delta:
+                steg = -1 if delta > 0 else 1
+            else:
+                steg = 1 if getattr(event, "num", 4) == 5 else -1
+            self._outer.yview_scroll(steg, "units")
+        except Exception:
+            pass
+        return "break"
 
     def _combo_navigate(self, event) -> str:
-        """Upp/ner bläddrar bland befintliga kategorier - endast i detta
-        fält, andra textfält rörs inte."""
-        names = self.rules.names()
+        """Piltangenter bläddrar i de synliga träffarna utan fokusbyte."""
+        keysym = getattr(event, "keysym", "")
+        if self._combo_suggestions_visible():
+            count = int(self._combo_suggest_list.size())
+            if count:
+                current = self._combo_suggest_index
+                if current is None:
+                    index = 0 if keysym == "Down" else count - 1
+                else:
+                    step = 1 if keysym == "Down" else -1
+                    index = (current + step) % count
+                self._combo_select_suggestion(index)
+            return "break"
+        if self._popdown_open():
+            lb = self._popdown_lb_path()
+            values = list(self.combo["values"])
+            if not lb or not values:
+                return "break"
+            try:
+                selected = self.combo.tk.call(lb, "curselection")
+                indices = (selected if isinstance(selected, (tuple, list))
+                           else str(selected).split())
+                current = int(indices[0]) if indices else None
+                step = 1 if keysym == "Down" else -1
+                index = (0 if step > 0 else len(values) - 1) if current is None \
+                    else (current + step) % len(values)
+                self.combo.tk.call(lb, "selection", "clear", 0, "end")
+                self.combo.tk.call(lb, "selection", "set", index)
+                self.combo.tk.call(lb, "activate", index)
+                self.combo.tk.call(lb, "see", index)
+            except Exception:
+                pass
+            return "break"
+        if keysym == "Down":
+            # Tk öppnar den inbyggda rullgardinen; installera Enter-skyddet
+            # direkt efter att popdown-fönstret skapats.
+            try:
+                self.win.after_idle(self._bind_popdown_return)
+                # Tk opens the popdown after this binding returns. Restore
+                # focus afterwards so subsequent keystrokes keep filtering.
+                self.win.after_idle(self._keep_combo_search_focus)
+            except Exception:
+                pass
+            return ""
+        names = self._all_categories
         if not names:
             return "break"
         cur = self.combo.get()
-        idx = names.index(cur) if cur in names else -1
-        if event.keysym == "Down":
-            idx = (idx + 1) % len(names)
-        else:
-            idx = (idx - 1) % len(names)
+        idx = names.index(cur) if cur in names else 0
+        idx = (idx - 1) % len(names)
         self.combo.set(names[idx])
         self.mode.set("existing")
+        self._sync()
         self.new_entry.delete(0, "end")
+        self.combo._ta_seed = ""
+        self._combo_reset_values()
+        self._combo_show_hint()
         return "break"
 
     def _chosen(self) -> List[str]:
@@ -3026,28 +7196,42 @@ class ReviewDialog:
 
     def _category(self) -> str:
         if self.mode.get() == "new":
-            return self.new_entry.get().strip()
-        return self.combo.get().strip()
+            # new_entry skapas sent i __init__ - svara tomt i stället för
+            # att krascha om någon synk råkar fråga för tidigt.
+            entry = getattr(self, "new_entry", None)
+            if entry is None:
+                return ""
+            return entry.get().strip()
+        # Skrivet sökord kan vara en ofullständig träff: använd den bara
+        # när den pekar ut exakt en kategori, aldrig som nytt mappnamn.
+        return _resolve_category_name(self.combo.get(), self._all_categories)
 
     def _ok(self) -> None:
         cat = self._category()
+        if not cat and self.mode.get() == "existing" and self.combo.get().strip():
+            self.messagebox.showwarning(
+                APP_NAME,
+                f"Flera kategorier matchar \"{self.combo.get().strip()}\".\n\n"
+                "Välj en av dem i listan (eller använd \"Ny mapp\" om du "
+                "vill skapa en ny).", parent=self.win)
+            self._post_dropdown()
+            return
         if not cat:
             self.messagebox.showwarning(APP_NAME, "Välj en befintlig kategori eller skriv ett namn på en ny mapp.",
                                         parent=self.win)
             return
+        subfolder, subfolder_error = validate_subfolder_override(
+            self.var_subfolder.get())
+        if subfolder_error:
+            self.messagebox.showwarning(APP_NAME, subfolder_error, parent=self.win)
+            return
         words = self._chosen()
-        if self.save_rule.get() and not words:
-            if not self.messagebox.askyesno(
-                    APP_NAME,
-                    "Du har inte bockat i något stödord.\n\n"
-                    "Filen flyttas då bara den här gången, ingen regel sparas.\n"
-                    "Fortsätta?", parent=self.win):
-                return
         self.result = {
             "category": cat,
-            "words": words if self.save_rule.get() else [],
-            "save_rule": bool(self.save_rule.get() and words),
+            "words": words,
+            "save_rule": bool(words),
             "folder": cat,
+            "subfolder": subfolder,
             "unmatched": False,
         }
         self._close()
@@ -3056,8 +7240,19 @@ class ReviewDialog:
         self.result = {"unmatched": True}
         self._close()
 
+    def _defer(self) -> None:
+        """Lämna filen orörd i kön och fortsätt med nästa fil."""
+        self.result = {"defer": True}
+        self._close()
+
     def _skip(self) -> None:
+        # Escape/krysset lämnar PDF:en orörd och tillbaka i kön.
         self.result = None
+        self._close()
+
+    def _stop_review(self) -> None:
+        """Avsluta hela granskningsomgången utan att tömma den kvarvarande kön."""
+        self.result = {"stop_review": True}
         self._close()
 
     def _ignore_file(self) -> None:
@@ -3076,6 +7271,7 @@ class ReviewDialog:
                 self._canvas.unbind_all(seq)
             except Exception:
                 pass
+        _reinstall_tab_wheel()
         try:
             self.win.grab_release()
         except Exception:
@@ -3083,13 +7279,101 @@ class ReviewDialog:
         self.win.destroy()
 
     def show(self) -> Optional[Dict[str, Any]]:
-        self.win.wait_window()
+        try:
+            self.win.wait_window()
+        except Exception:
+            # Fönstret revs under tiden (appen avslutades). Resultatet är
+            # då inget - anroparen måste tåla det, se _process_queue.
+            pass
         return self.result
 
 
 # --------------------------------------------------------------------------
 # Dubblettfrågan (REQ-N4) - Ersätt eller Behåll båda (2)
 # --------------------------------------------------------------------------
+def _search_key(text: str) -> str:
+    """Söknyckel: gemener, utan diakriter (å/ä/ö = a/a/o), enkla mellanslag.
+
+    Används bara av sökfältet - matchningsmotorn har sin egen normalize.
+    """
+    t = unicodedata.normalize("NFKD", str(text or "").casefold())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _rank_categories(text: str, names) -> Tuple[List[str], str]:
+    """Träffar + hur de matchades. Nivå används av hjälptexten i dialogen.
+
+    Nivåerna är strikta: finns det namn som BÖRJAR på sökordet visas bara
+    de (precis som en vanlig rullgardin som hoppar till P när man trycker
+    p). Annars visas namn där ett ORD börjar på sökordet ("plan" hittar
+    "Utrymningsplan"), och sist namn som innehåller det ("aygsinn" hittar
+    "PARKERINGEN AYGSINN"). Skiftläge och å/ä/ö spelar ingen roll.
+    """
+    q = _search_key(text)
+    if not q:
+        return list(names), "all"
+    start = [n for n in names if _search_key(n).startswith(q)]
+    if start:
+        return start, "prefix"
+    ordstart = [n for n in names
+                if any(w.startswith(q) for w in _search_key(n).split(" "))]
+    if ordstart:
+        return ordstart, "word"
+    rest = [n for n in names if q in _search_key(n)]
+    if rest:
+        return rest, "contains"
+    return [], "none"
+
+
+def _filter_categories(text: str, names) -> List[str]:
+    """Matchande kategorier, i den ordning de ska visas (se _rank_categories)."""
+    return _rank_categories(text, names)[0]
+
+
+def _typeahead_index(values, text: str, start: int = 0) -> int:
+    """Första index (från start, cykliskt) vars namn börjar på text.
+
+    -1 när inget matchar. Delas av combobox- och listbox-sökningen så att
+    "p" hoppar till P och "pil" till PIL i HELA listan, oavsett hur den
+    råkar vara filtrerad.
+    """
+    q = _search_key(text)
+    n = len(values)
+    if not q or not n:
+        return -1
+    for off in range(n):
+        i = (int(start) + off) % n
+        if _search_key(values[i]).startswith(q):
+            return i
+    return -1
+
+
+def _resolve_category_name(text: str, names) -> str:
+    """Översätt det skrivna fältet till en befintlig kategori.
+
+    Exakt namn vinner, därefter en unik begynnelse- eller delsträng.
+    Returnerar "" när inget eller flera namn matchar - då ska dialogen
+    be användaren välja ur listan i stället för att gissa.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    if text in names:
+        return text
+    q = _search_key(text)
+    exact = [n for n in names if _search_key(n) == q]
+    if len(exact) == 1:
+        return exact[0]
+    start = [n for n in names if _search_key(n).startswith(q)]
+    if len(start) == 1:
+        return start[0]
+    alla = [n for n in names if q in _search_key(n)]
+    if len(alla) == 1:
+        return alla[0]
+    return ""
+
+
 def _typeahead_match(val: str, names) -> Tuple[Optional[str], bool]:
     """Sökbar rullgardin med typeahead (ANVÄNDARORDER 2026-08-26).
 
@@ -3151,40 +7435,78 @@ class ConflictDialog:
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk = tk
         self.app = app
+        self.colors = getattr(app, "C", COLORS) if app is not None else COLORS
         self.result = "rename"
         self.win = tk.Toplevel(parent)
+        self._icon_ref = brand_window(self.win)
         self.win.after(80, lambda: dark_titlebar(
             self.win, bool(getattr(app, "theme", None)
                            and app.theme.dark)))
         self.win.title(f"{APP_NAME} - dubblett")
         self.win.transient(parent)
-        self.win.resizable(False, False)
+        self.win.resizable(True, True)
+        _fit_geometry(self.win, 640, 300, 460, 230)
         try:
-            self.win.configure(background=(app.C if app else COLORS)["bg"])
+            self.win.configure(background=self.colors["bg"])
         except Exception:
             pass
 
-        c = (app.C if app else COLORS)
         vad = ("En fil med samma namn finns redan i målmappen."
                if kind == "name" else
                "En fil med IDENTISKT innehåll (SHA-256) finns redan i "
-               "målmappen, fast med annat namn.")
-        tk.Label(self.win,
-                 text=f"{vad}\n\n"
-                      f"  Ny fil:      {src.name}\n"
-                      f"  I målmappen: {target.name}\n\n"
-                      f"Vad vill du göra?",
-                 justify="left", anchor="w",
-                 background=c["bg"], foreground=c["text"],
-                 font=("TkDefaultFont", 10)).pack(padx=18, pady=(16, 8))
+               "arkivmappen, fast med annat namn eller i en annan undermapp.")
+        try:
+            screen_h = int(self.win.winfo_screenheight())
+            screen_w = int(self.win.winfo_screenwidth())
+        except Exception:
+            screen_h, screen_w = 800, 1280
+        text_rows = max(3, min(7, (screen_h - 190) // 22))
+        text_cols = max(24, min(72, (screen_w - 140) // 8))
+
+        self.win.columnconfigure(0, weight=1)
+        self.win.rowconfigure(0, weight=1)
+        details = ttk.Frame(self.win)
+        details.grid(row=0, column=0, sticky="nsew", padx=14, pady=(14, 6))
+        details.columnconfigure(0, weight=1)
+        details.rowconfigure(0, weight=1)
+        body = tk.Text(
+            details, wrap="word", width=text_cols, height=text_rows,
+            borderwidth=0, padx=8, pady=7, state="disabled", cursor="arrow",
+            takefocus=False, background=self.colors["surface"],
+            foreground=self.colors["text"], highlightthickness=0)
+        body.grid(row=0, column=0, sticky="nsew")
+        body_scroll = ttk.Scrollbar(details, orient="vertical", command=body.yview)
+        body_scroll.grid(row=0, column=1, sticky="ns")
+        body.configure(yscrollcommand=body_scroll.set)
+        def file_summary(path: Path) -> str:
+            try:
+                stat = path.stat()
+                changed = datetime.fromtimestamp(stat.st_mtime).strftime(
+                    "%Y-%m-%d %H:%M")
+                return (f"{path}\n  Storlek: {human_size(stat.st_size)} · "
+                        f"ändrad: {changed}")
+            except OSError:
+                return f"{path}\n  Filinformation kunde inte läsas."
+
+        known_same = ("\nInnehållet är verifierat identiskt med SHA-256."
+                      if kind != "name" else
+                      "\nSamma namn är inte bevis på samma innehåll; "
+                      "jämför storlek och ändringstid nedan.")
+        body.configure(state="normal")
+        body.insert(
+            "1.0", f"{vad}{known_same}\n\nNy fil:\n{file_summary(src)}\n\n"
+            f"Befintlig målfil:\n{file_summary(target)}\n\n"
+            "Välj hur dubbletten ska hanteras:")
+        body.configure(state="disabled")
 
         self.var_remember = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.win, variable=self.var_remember,
-                        text="Kom ihåg under denna körning").pack(
-            anchor="w", padx=18)
+        ttk.Checkbutton(
+            self.win, variable=self.var_remember,
+            text="Kom ihåg under denna körning").grid(
+                row=1, column=0, sticky="w", padx=18, pady=(2, 0))
 
         rad = ttk.Frame(self.win)
-        rad.pack(padx=18, pady=16, fill="x")
+        rad.grid(row=2, column=0, sticky="ew", padx=14, pady=(8, 14))
 
         def ersatt():
             self.result = "replace"
@@ -3194,15 +7516,48 @@ class ConflictDialog:
             self.result = "rename"
             self.win.destroy()
 
-        ttk.Button(rad, text="Ersätt den gamla", style="Danger.TButton",
-                   command=ersatt).pack(side="left")
-        ttk.Button(rad, text="Behåll båda (2)", style="Accent.TButton",
-                   command=bada).pack(side="left", padx=8)
-        ttk.Button(rad, text="Avbryt flytten",
-                   command=self._avbryt).pack(side="right")
+        buttons = [
+            ttk.Button(rad, text="Ersätt den gamla", style="Danger.TButton",
+                       command=ersatt),
+            ttk.Button(rad, text="Behåll båda (2)", style="Accent.TButton",
+                       command=bada),
+            ttk.Button(rad, text="Avbryt flytten", command=self._avbryt),
+        ]
+        last_columns = None
+
+        def layout_buttons(_event=None):
+            nonlocal last_columns
+            width = max(1, rad.winfo_width())
+            columns = 3 if width >= 560 else 2 if width >= 390 else 1
+            if columns == last_columns:
+                return
+            last_columns = columns
+            for child in rad.winfo_children():
+                child.grid_forget()
+            for col in range(3):
+                rad.columnconfigure(col, weight=0, uniform="")
+            for col in range(columns):
+                rad.columnconfigure(col, weight=1, uniform="conflict-actions")
+            if columns == 3:
+                for col, button in enumerate(buttons):
+                    button.grid(row=0, column=col, sticky="ew",
+                                padx=(0 if col == 0 else 5, 0), pady=2)
+            elif columns == 2:
+                buttons[0].grid(row=0, column=0, sticky="ew", padx=(0, 5), pady=2)
+                buttons[1].grid(row=0, column=1, sticky="ew", padx=(5, 0), pady=2)
+                buttons[2].grid(row=1, column=0, columnspan=2,
+                                sticky="ew", pady=2)
+            else:
+                for row, button in enumerate(buttons):
+                    button.grid(row=row, column=0, sticky="ew", pady=2)
+
+        rad.bind("<Configure>", layout_buttons, add="+")
+        self.win.after_idle(layout_buttons)
         self.win.bind("<Escape>", lambda e: self._avbryt())
         self.win.update_idletasks()
         try:
+            self.win.lift()
+            self.win.focus_force()
             self.win.grab_set()
         except Exception:
             pass
@@ -3221,338 +7576,6 @@ class ConflictDialog:
 
 
 # --------------------------------------------------------------------------
-# REGELTESTARE — klistra text och se vinnare direkt (207)
-# --------------------------------------------------------------------------
-# Uppdateras från högerklicksmenyn i tray också: App._open_rule_tester()
-# postas via App._post så att tray-tråden aldrig rör Tk direkt.
-# Design: 10-sekunders-trimning utan att skapa filer — klistra texten ur
-# PDF:en, ange valfritt filnamn, tryck Testa och se vinnare/poäng/zon.
-
-class RuleTesterDialog:
-    """Regeltestare 207: torrkör matchningen på inklistrad text.
-
-    Visar samma poängsättning som den riktiga sorteringen (score_text +
-    decide) men utan att läsa fil från disk. Användaren kan trimma
-    stödord på 10 sekunder: klistra → Testa → se vad som vinner och
-    varför — och justera reglerna därefter.
-    """
-
-    def __init__(self, parent, app):
-        tk, ttk, filedialog, messagebox, simpledialog = _tk()
-        self.tk, self.ttk = tk, ttk
-        self.filedialog, self.messagebox = filedialog, messagebox
-        self.app = app
-        self.parent = parent
-        try:
-            C = app.C
-            theme = app.theme
-        except Exception:
-            C = COLORS
-            theme = None
-        self.C = C
-        self.theme = theme
-
-        self.win = tk.Toplevel(parent)
-        self.win.configure(background=C["bg"])
-        self.win.after(80, lambda: dark_titlebar(
-            self.win, bool(getattr(theme, "dark", False)) if theme else False))
-        self.win.title("Regeltestare — klistra text och se vinnare")
-        self.win.transient(parent)
-        _fit_geometry(self.win, 960, 720, 860, 600)
-        self.win.columnconfigure(0, weight=1)
-        self.win.rowconfigure(2, weight=1)
-
-        pad = dict(padx=14, pady=(10, 0))
-
-        # -- topp: filnamnshjälp -----------------------------------------
-        top = ttk.Frame(self.win, style="Card.TFrame")
-        top.grid(row=0, column=0, sticky="ew", **pad)
-        top.columnconfigure(1, weight=1)
-        ttk.Label(top, text="Filnamn (valfritt, påverkar zonvikten):",
-                  style="Card.TLabel").grid(row=0, column=0, sticky="w",
-                                            padx=12, pady=(10, 2))
-        self.var_filename = tk.StringVar(value="")
-        fn_entry = ttk.Entry(top, textvariable=self.var_filename)
-        fn_entry.grid(row=0, column=1, sticky="ew", padx=(6, 12), pady=(10, 2))
-        # Hjälptext under
-        ttk.Label(top, text="Tips: döper du filen i förväg (t.ex. Pilkington_556033-9086.pdf) ser du filnamns-bonus +0,1 när namnet bekräftas i texten.",
-                  style="CardMuted.TLabel", wraplength=900, justify="left"
-                  ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
-
-        # -- textrutan ------------------------------------------------------
-        mid = ttk.LabelFrame(self.win, text="  Klistra text här (ur PDF:ens textlager eller OCR)  ")
-        mid.grid(row=1, column=0, sticky="nsew", padx=14, pady=(8, 0))
-        mid.columnconfigure(0, weight=1)
-        mid.rowconfigure(0, weight=1)
-        self.text_in = tk.Text(mid, wrap="word", height=12, undo=True,
-                                font=(theme.f_mono[0] if theme and hasattr(theme, "f_mono") else "Courier", 9),
-                                background=C["surface"], foreground=C["text"],
-                                selectbackground=C["accent_light"],
-                                insertbackground=C["text"],
-                                padx=8, pady=8, highlightthickness=0, borderwidth=0)
-        self.text_in.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
-        sb = ttk.Scrollbar(mid, orient="vertical", command=self.text_in.yview)
-        sb.grid(row=0, column=1, sticky="ns", pady=8, padx=(0, 8))
-        self.text_in.configure(yscrollcommand=sb.set)
-        # Ctrl+A i textrutan
-        self.text_in.bind("<Control-a>", lambda e: (self.text_in.tag_add("sel", "1.0", "end"), "break"))
-        self.text_in.bind("<Control-A>", lambda e: (self.text_in.tag_add("sel", "1.0", "end"), "break"))
-
-        # -- knapprad -------------------------------------------------------
-        btn_row = ttk.Frame(self.win)
-        btn_row.grid(row=2, column=0, sticky="ew", padx=14, pady=6)
-        btn_row.columnconfigure(0, weight=1)
-        ttk.Button(btn_row, text="Klistra från urklipp",
-                   command=self._paste).grid(row=0, column=0, sticky="w")
-        ttk.Button(btn_row, text="Rensa",
-                   command=self._clear).grid(row=0, column=1, padx=6)
-        self.btn_test = ttk.Button(btn_row, text="Testa  ▶", style="Accent.TButton",
-                                   command=self._run)
-        self.btn_test.grid(row=0, column=2, padx=12)
-        ttk.Label(btn_row, text="Enter = Testa   Esc = Stäng",
-                  style="Muted.TLabel").grid(row=0, column=3, sticky="e")
-
-        # -- resultat -------------------------------------------------------
-        res = ttk.LabelFrame(self.win, text="  Resultat — poäng per kategori  ")
-        res.grid(row=3, column=0, sticky="nsew", padx=14, pady=(8, 0))
-        res.columnconfigure(0, weight=1)
-        res.rowconfigure(1, weight=1)
-        self.win.rowconfigure(3, weight=1)
-
-        # Beslutstext över tabellen
-        self.lbl_decision = ttk.Label(res, text="Klistra text och tryck Testa — resultatet visas här.",
-                                      style="Card.TLabel", wraplength=900, justify="left")
-        self.lbl_decision.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 0))
-
-        cols = ("rank", "kategori", "poang", "ord", "zon", "bevis")
-        self.tree = ttk.Treeview(res, columns=cols, show="headings", height=10)
-        # Kolumnbredder optimerade för 960px
-        T = theme
-        try:
-            T.fit_columns(self.tree, (
-                ("rank", "#", 4, "center", False),
-                ("kategori", "KATEGORI", 16, "w", False),
-                ("poang", "POÄNG", 7, "center", False),
-                ("ord", "MATCHADE ORD", 26, "w", True),
-                ("zon", "ZON (var)", 22, "w", True),
-                ("bevis", "BEVIS", 6, "center", False)))
-        except Exception:
-            for c, w in (("rank", 40), ("kategori", 140), ("poang", 60), ("ord", 260), ("zon", 220), ("bevis", 60)):
-                self.tree.heading(c, text=c)
-                self.tree.column(c, width=w, stretch=(c in ("ord", "zon")))
-        self.tree.grid(row=1, column=0, sticky="nsew", padx=(8, 0), pady=6)
-        ysb = ttk.Scrollbar(res, orient="vertical", command=self.tree.yview)
-        ysb.grid(row=1, column=1, sticky="ns", pady=6)
-        self.tree.configure(yscrollcommand=ysb.set)
-        try:
-            if T:
-                T.zebra(self.tree)
-        except Exception:
-            pass
-        # Dubbelklick = kopiera rad
-        self.tree.bind("<Double-1>", lambda e: self._copy_selected())
-
-        # -- botten ---------------------------------------------------------
-        bot = ttk.Frame(self.win)
-        bot.grid(row=4, column=0, sticky="ew", padx=14, pady=(6, 12))
-        bot.columnconfigure(0, weight=1)
-        ttk.Button(bot, text="Kopiera resultat",
-                   command=self._copy_all).grid(row=0, column=0, sticky="w")
-        ttk.Button(bot, text="Stäng",
-                   command=self._close).grid(row=0, column=1, sticky="e")
-
-        self.win.bind("<Return>", lambda e: self._run())
-        self.win.bind("<Escape>", lambda e: self._close())
-        self.win.protocol("WM_DELETE_WINDOW", self._close)
-        # Fokusera textrutan direkt
-        self.win.after(120, lambda: self.text_in.focus_set())
-        # Om urklipp redan innehåller text, föreslå klistra
-        self.win.after(200, self._prefill_from_clipboard)
-
-        # Logga öppning
-        try:
-            session_log("regeltestare", "Regeltestare öppnad"
-                        + (" från tray" if getattr(app, "_rule_tester_from_tray", False) else ""))
-        except Exception:
-            pass
-
-    def _prefill_from_clipboard(self) -> None:
-        try:
-            txt = self.win.clipboard_get()
-            if txt and isinstance(txt, str) and 10 < len(txt.strip()) < 20000:
-                # Fyll inte över befintlig inmatning
-                if not self.text_in.get("1.0", "end-1c").strip():
-                    # Visa som placeholder-hint i beslutstexten
-                    self.lbl_decision.configure(text="Urklipp upptäckt — tryck Klistra från urklipp eller Ctrl+V och Testa.")
-        except Exception:
-            pass
-
-    def _paste(self) -> None:
-        try:
-            txt = self.win.clipboard_get()
-            if txt:
-                self.text_in.delete("1.0", "end")
-                self.text_in.insert("1.0", txt)
-                self.text_in.focus_set()
-                self._run()
-        except Exception as exc:
-            self.messagebox.showwarning(APP_NAME, f"Kunde inte läsa urklipp:\n{exc}", parent=self.win)
-
-    def _clear(self) -> None:
-        self.text_in.delete("1.0", "end")
-        for row in self.tree.get_children():
-            self.tree.delete(row)
-        self.lbl_decision.configure(text="Rensad — klistra ny text och tryck Testa.")
-        self.var_filename.set("")
-
-    def _run(self) -> None:
-        text = self.text_in.get("1.0", "end-1c").strip()
-        if not text:
-            self.messagebox.showinfo(APP_NAME, "Klistra in text från PDF:en först.", parent=self.win)
-            return
-        if len(text) < 3:
-            self.lbl_decision.configure(text="Texten är för kort för att testa — klistra in minst några ord.")
-            return
-        filename = (self.var_filename.get() or "").strip() or "test.pdf"
-        # Säkerställ filändelse för zonvikten (filename boost kräver .pdf-namn)
-        if "." not in filename:
-            filename += ".pdf"
-        try:
-            # Bygg en fejk-Extraction som decide() förstår — utan fil-I/O.
-            ext = Extraction(path=Path(filename))
-            ext.text = text
-            ext.filename_text = filename
-            # Dela första 2 rader → header/sender, sista 2 → footer för realistisk zonvikt
-            lines = [l for l in text.splitlines() if l.strip()]
-            if lines:
-                head = "\n".join(lines[:2])
-                foot = "\n".join(lines[-2:])
-                ext.metadata["_page_header"] = head
-                ext.metadata["_page_footer"] = foot
-            # token_pages tom — flersidesbonus kräver sidräkning som vi inte har i inklistrad text
-
-            # Kör scoring + decision (samma kodväg som riktig sortering)
-            scores = score_text(self.app.rules, ext.combined, filename,
-                                ext.page_header, ext.page_footer,
-                                getattr(ext, "token_pages", None), body=text)
-            dec = decide(self.app.rules, ext, self.app.settings)
-
-            # Fyll tabellen
-            for row in self.tree.get_children():
-                self.tree.delete(row)
-            if not scores:
-                self.tree.insert("", "end", values=("", "Ingen träff", "", "Ingen kategori matchade", "", ""))
-            else:
-                for i, s in enumerate(scores):
-                    # Zon-per-ord för de första 4 matchningarna
-                    zon_str = ", ".join(f"{w} {ZONE_LABELS.get(s.zone_of(w), s.zone_of(w))}" for w in s.matched[:4])
-                    if len(s.matched) > 4:
-                        zon_str += f" +{len(s.matched)-4} till"
-                    bevis = ""
-                    if s.is_conclusive:
-                        bevis = "★ säkert ID"
-                    elif s.has_strong:
-                        bevis = "● starkt"
-                    elif s.only_recipient:
-                        bevis = "mottagare"
-                    # Multisidesbonus visas som parentes
-                    if getattr(s, "multipage", None):
-                        zon_str += f"  [flersidig: {', '.join(s.multipage[:2])}]"
-                    self.tree.insert("", "end", values=(
-                        i + 1, s.name, f"{s.score:g}", ", ".join(s.matched[:6]), zon_str, bevis))
-
-            # Beslutstext
-            if dec.status == "auto" and dec.best:
-                best = dec.best
-                txt = f"✓ AUTO — {best.name} vinner med {best.score:g} poäng. Filen skulle flyttas direkt."
-                if dec.reason:
-                    txt += f"  ({dec.reason})"
-                # Förklara bevisblocker om nära gräns
-                if best.is_conclusive:
-                    txt += f"  Säker: {', '.join(best.conclusive[:2])} står som avsändar-ID."
-                style = "ok"
-            elif dec.status == "ask":
-                best = dec.best
-                if best:
-                    # Försök förklara blocker
-                    blocker = _auto_blocker(best, self.app.rules, effective_thresholds(self.app.settings), len(text))
-                    reason = dec.reason or blocker or "för svaga bevis"
-                    txt = f"❓ FRÅGA — {best.name} leder med {best.score:g} p, men: {reason}."
-                    if len(dec.scores) > 1:
-                        txt += f" Tvåa: {dec.scores[1].name} {dec.scores[1].score:g} p."
-                    if getattr(dec, "learned_hint", None):
-                        txt += f"  (lärd hint: {dec.learned_hint[0]})"
-                    style = "warn"
-                else:
-                    txt = f"❓ FRÅGA — {dec.reason or 'Ingen kategori matchade.'}"
-                    if getattr(dec, "learned_hint", None):
-                        txt += f"  (lärd hint: {dec.learned_hint[0]})"
-                    style = "warn"
-            elif dec.status == "error":
-                txt = f"⚠ FEL — {dec.reason or 'Kunde inte bedöma texten.'}"
-                style = "err"
-            else:
-                txt = f"{dec.status}: {dec.reason}"
-                style = "info"
-            self.lbl_decision.configure(text=txt)
-            try:
-                session_log("regeltestare", f"Test: '{filename}' → {dec.status} "
-                            f"{(dec.best.name + ' ' + str(dec.best.score)) if dec.best else ''} "
-                            f"({len(scores)} kandidater) — {txt[:120]}")
-            except Exception:
-                pass
-        except Exception as exc:
-            self.messagebox.showerror(APP_NAME, f"Regeltestaren kunde inte köras:\n{exc}", parent=self.win)
-            try:
-                session_error("regeltestare", exc)
-            except Exception:
-                pass
-
-    def _copy_selected(self) -> None:
-        sel = self.tree.selection()
-        if not sel:
-            return
-        vals = self.tree.item(sel[0], "values")
-        txt = "  |  ".join(str(v) for v in vals)
-        try:
-            self.win.clipboard_clear()
-            self.win.clipboard_append(txt)
-            self.lbl_decision.configure(text=f"Kopierad: {txt[:120]}")
-        except Exception:
-            pass
-
-    def _copy_all(self) -> None:
-        try:
-            rows = []
-            rows.append(f"Regeltestare — {self.var_filename.get() or 'test.pdf'} — {APP_NAME} {APP_VERSION}")
-            rows.append(f"Beslut: {self.lbl_decision.cget('text')}")
-            rows.append("")
-            rows.append("RANK | KATEGORI | POÄNG | MATCHADE ORD | ZON | BEVIS")
-            rows.append("-" * 80)
-            for item in self.tree.get_children():
-                vals = self.tree.item(item, "values")
-                rows.append(" | ".join(str(v) for v in vals))
-            if len(rows) <= 4:
-                rows.append("(ingen data — kör Testa först)")
-            txt = "\n".join(rows)
-            self.win.clipboard_clear()
-            self.win.clipboard_append(txt)
-            try:
-                session_log("regeltestare", "Resultat kopierat till urklipp")
-            except Exception:
-                pass
-            self.lbl_decision.configure(text="Resultat kopierat — klistra in i t.ex. anteckningar för att jämföra före/efter.")
-        except Exception as exc:
-            self.messagebox.showwarning(APP_NAME, f"Kunde inte kopiera:\n{exc}", parent=self.win)
-
-    def _close(self) -> None:
-        try:
-            self.win.destroy()
-        except Exception:
-            pass
-
-
-# --------------------------------------------------------------------------
 # Huvudfönstret
 # --------------------------------------------------------------------------
 
@@ -3564,9 +7587,39 @@ class RuleTesterDialog:
 # aldrig tomma, aldrig krasch.
 
 _UI_EN = {
-    "Sortera": "Sort", "Matchningar": "Rules", "Inställningar": "Settings",
+    "Start": "Home", "Kategorier": "Categories",
+    "Avancerat": "Advanced", "Inställningar": "Settings",
     "Granska": "Review", "Historik": "History", "Hjälp": "Help",
+    "Koppla stödord till undermappar…": "Map support words to subfolders…",
+    "Bevaka Arkiv efter PDF-filer i fel mapp": "Watch Archive for misplaced PDFs",
+    "STÖDORD": "SUPPORT WORDS", "UNDERMAPPAR": "SUBFOLDERS",
+    "KOPPLING": "MAPPING", "KOPPLADE STÖDORD": "LINKED SUPPORT WORDS",
+    "Använd markerat som standardord": "Use selected as the default word",
+    "Dölj kopplade ord": "Hide linked words",
+    "+ Lägg till undermapp…": "+ Add subfolder…",
+    "Koppla loss markerat": "Unlink selected", "Klart": "Done",
+    "PDF-sortering, enkelt och säkert": "PDF sorting, simply and safely",
+    "Sortera dina PDF-filer": "Sort your PDF files",
+    "Välj PDF-mappar": "Choose PDF folders",
+    "Var filerna finns": "Where the files are",
+    "Välj arkivmapp": "Choose an archive folder",
+    "Där sorterade filer sparas": "Where sorted files are saved",
+    "Sortera eller bevaka": "Sort or watch",
+    "Du kan granska osäkra filer": "You can review uncertain files",
+    "1. PDF-filer att sortera": "1. PDF files to sort",
+    "Välj mappen eller mapparna där dina PDF-filer finns":
+        "Choose the folder or folders containing your PDF files",
+    "2. Arkivmapp": "2. Archive folder",
+    "sorterade filer sparas här": "Sorted files are saved here",
+    "Aktivitet": "Activity", "Lägg till mapp…": "Add folder…",
     "Sortera nu": "Sort now", "Sorterar…": "Sorting…",
+    "Avbryt sortering": "Stop sorting", "Stoppar…": "Stopping…",
+    "Avsluta granskning": "Stop reviewing",
+    "Den här och återstående filer blir kvar i kön.":
+        "This file and the remaining files will stay in the review queue.",
+    "Tillägg och OCR…": "Packages and OCR…",
+    "Uppdatera tillägg": "Update add-ons",
+    "Stoppar efter pågående fil…": "Stopping after the current file…",
     "Starta bevakning": "Start watching", "Stoppa bevakning": "Stop watching",
     "●  Bevakning av": "●  Watching off",
     "TESTKÖRNING": "DRY RUN", "Spara": "Save", "Spara ändringar": "Save changes",
@@ -3578,14 +7631,60 @@ _UI_EN = {
     "Exportera årsarkiv…": "Export year archive…",
     "Granska alla…": "Review all…", "Ångra valda": "Undo selected",
     "Sök efter uppdateringar…": "Check for updates…",
+    "Åtgärda automatiskt fel som inte återkommit på":
+        "Automatically resolve errors that have not recurred in",
+    "dagar (0 = av)": "days (0 = off)",
+    "Markera de fel du har åtgärdat. Deras poster rensas då ur felloggen "
+    "automatiskt och de försvinner ur AI-rapporten direkt. Fel som inte "
+    "återkommit på länge åtgärdas automatiskt.":
+        "Mark fixed errors. Their entries are then cleaned from the error "
+        "log automatically and they disappear from the AI report immediately. "
+        "Errors that have not recurred in a long time are resolved "
+        "automatically.",
+    "Rensa åtgärdade fel från loggen…": "Clean up fixed errors from the log…",
+    "Rensa åtgärdade fel från loggen": "Clean up fixed errors from the log",
+    "Markera valda som åtgärdade": "Mark selected as fixed",
+    "Rensa åtgärdade från loggen": "Clean up fixed errors from the log",
+    "Sök och uppdatera": "Check and update",
     "Kontrollera uppdateringar": "Check updates",
     "Installera Python-paket": "Install Python packages",
     "Uppdatera Python-paket": "Update Python packages",
     "Starta automatiskt med datorn": "Start automatically with the computer",
+    "Sök och jämför PDF:er…": "Search and compare PDFs…",
+    "Kontrollera arkivet…": "Check archive…",
+    "Kontrollera arkivet": "Check archive",
+    "NIVÅ": "LEVEL", "HITTAD SAK": "FINDING",
+    "FIL / PLATS": "FILE / LOCATION", "DETALJER": "DETAILS",
+    "Cache och lagring": "Cache and storage",
+    "Minska minnesanvändning i stora arkiv":
+        "Reduce memory use in large archives",
+    "Bearbetar i små omgångar och läser högst två PDF-filer parallellt i stället för upp till åtta. Kan minska minnestrycket; stora körningar kan ta längre tid.":
+        "Processes small batches and reads at most two PDFs at a time instead "
+        "of up to eight. This may reduce memory pressure; large runs can take longer.",
+    "Arkivkontroll · läsrapport": "Archive check · read-only report",
+    "Kontrollen är endast läsande: inga filer flyttas eller ändras.":
+        "Read-only check: no files are moved or changed.",
+    "Samma filnamn på flera platser": "Same filename in multiple locations",
+    "Identiska PDF-filer": "Identical PDF files",
+    "PDF verkar ofullständig": "PDF appears incomplete",
+    "Saknar sökbart textlager": "No searchable text layer",
+    "återställs automatiskt om appen behöver texten igen":
+        "recreated automatically if the app needs the text again",
+    "Rensa cache automatiskt dagligen och vid avslut":
+        "Smart-clean cache daily and on exit",
+    "Smartfilter: tar bort cache som inte använts på 30 dagar, skadade poster vid läsning och äldsta poster över 1 500 filer / 512 MB.":
+        "Smart filter: removes cache unused for 30 days, damaged entries "
+        "when read, and oldest entries above 1,500 files / 512 MB.",
+    "Rensa cache nu": "Clean cache now",
+    "Automatisk smart rensning är avstängd.": "Automatic smart cleanup is off.",
+    "Ingen smart rensning ännu · körs dagligen och vid avslut.":
+        "No smart cleanup yet · runs daily and on exit.",
     "Starta bevakningen direkt": "Start watching immediately",
-    "Starta minimerad i systemfältet": "Start minimized to tray",
+    "Starta alltid minimerad": "Always start minimized",
     "Visa ikon i systemfältet": "Show tray icon",
     "Krysset minimerar i stället för att avsluta": "Close button minimizes to tray instead",
+    "Minimera till systemfältet (annars aktivitetsfältet)":
+        "Minimize to tray (otherwise taskbar)",
     "Visa notis när filer sorterats": "Notify when files are sorted",
     "Sök uppdateringar på GitHub vid start": "Check GitHub for updates at start",
     "Installera uppdateringar automatiskt": "Install updates automatically",
@@ -3601,16 +7700,80 @@ _UI_EN = {
     "Fråga när appen är osäker": "Ask when the app is unsure",
     "OCR för skannade PDF:er": "OCR for scanned PDFs",
     "Bättre OCR (noggrannare, något långsammare)": "Better OCR (more accurate, slightly slower)",
-    "Lärande matchning (appen lär av dina beslut)": "Learning matching (the app learns from your choices)",
+    "Självlärning är alltid aktiv: appen lär av dina bekräftade val och rättelser, aldrig av autosorteringar.": "Self-learning is always on: the app learns from your confirmed choices and corrections, never automatic sorts.",
     "Läs även undermappar i inmappen": "Include subfolders of the inbox",
     "Lägg filer i undermappar efter datum": "Put files in subfolders by date",
     "Skanna om allt när ett nytt stödord lärts in": "Rescan everything when a new keyword is learned",
     "Poppa upp dialogen direkt under bevakning": "Pop up the dialog directly while watching",
     "Aktiv": "Active", "Dagar:": "Days:", "Hoppa över": "Skip",
+    "Vänta med den här": "Defer this file",
     "Spara & flytta": "Save & move", "Lägg i _Osorterat": "Put in _Unsorted",
-    "Ignorera filen": "Ignore file", "Befintlig:": "Existing:", "Ny mapp:": "New folder:",
+    "Ignorera filen": "Ignore file", "Befintlig mapp:": "Existing folder:",
+    "Skapa ny mapp:": "Create new folder:",
+    "VART SKA FILEN SPARAS?": "WHERE SHOULD THE FILE GO?",
+    "Välj en befintlig mapp eller skapa en ny. Ditt val kan läras in.":
+        "Choose an existing folder or create a new one. Your choice can be learned.",
+    "STÖDORD OCH TRÄFFAR": "KEYWORDS AND MATCHES",
+    "Välj bland upp till 25 förslag. Typ och antal träffar visas bredvid varje ord; stapeln visar relativ relevans. Inget väljs eller sparas automatiskt.":
+        "Choose from up to 25 suggestions. The type and number of matches appear beside each word; the bar shows relative relevance. Nothing is selected or saved automatically.",
+    "Ta bort alla kategorier…": "Delete all categories…",
+    "Ångra senaste tömning": "Undo the latest category clear",
+    "Kategori": "Category", "Undermappar": "Subfolders",
+    "Stödord": "Support words", "Kategori och stödord": "Category and support words",
+    "Sparade stödord": "Saved support words", "Skapade mappar": "Created folders",
+    "Kategoriinställningar": "Category settings",
+    "Kategoriinställningar…": "Category settings…",
+    "De här inställningarna påverkar inte listorna med stödord och skapade mappar.":
+        "These settings do not affect the support-word and created-folder lists.",
+    "SPARDA STÖDORD": "SAVED SUPPORT WORDS", "SKAPADE MAPPAR": "CREATED FOLDERS",
+    "KOPPLADE MAPPAR": "LINKED FOLDERS",
+    "Välj stödord för att se dess mappkoppling här.":
+        "Select a support word to see its folder mapping here.",
+    "KOPPLAD MAPP": "LINKED FOLDER",
+    "Ingen mappkoppling": "No folder mapping",
+    "Välj en kategori": "Choose a category",
+    "Välj ett stödord": "Select a support word",
+    "Dra stödord till en skapad mapp →": "Drag a support word to a created folder →",
+    "+ Skapa mapp…": "+ Create folder…", "Öppna kopplingsdialog…": "Open mapping dialog…",
+    "Välj en kategori i menyn ovan för att visa dess stödord och undermappar.":
+        "Choose a category from the menu above to view its support words and subfolders.",
+    "Välj en kategori i menyn ovan.": "Choose a category from the menu above.",
+    "Töm kategorier…": "Clear categories…",
+    "Ångra tömning": "Undo clear",
+    "Standardstödord:": "Default support word:",
+    "Kopplas till vald kategori; samma ord får finnas i flera kategorier.":
+        "Linked to the selected category; the same word may be used in several categories.",
+    "Rensa alla stödord (behåll kategorier)…": "Clear all keywords (keep categories)…",
+    "Inga kategorier ännu": "No categories yet",
+    "Skapa en kategori eller importera regler för att komma igång.":
+        "Create a category or import rules to get started.",
+    "Ingen kategori vald": "No category selected",
+    "Välj en kategori i listan till vänster för att visa dess stödord.":
+        "Select a category on the left to view its keywords.",
+    "+ Skapa kategori": "+ Create category",
+    "Importera regler…": "Import rules…",
+    "Lär in valda ord för framtida sortering":
+        "Learn selected words for future sorting",
     "Mappnamn:": "Folder name:", "Undermapp:": "Subfolder:",
-    "Sök stödord": "Search keywords", "Kontrollera": "Check", "Kontrollera igen": "Check again",
+    "Standardundermapp:": "Default subfolder:", "Datum:": "Date:",
+    "Välj…": "Choose…", "Skapa…": "Create…", "Standard": "Default",
+    "Välj befintlig…": "Choose existing…", "Skapa ny…": "Create new…",
+    "Extra undermapp:": "Additional subfolder:",
+    "Relativt till kategoriens datum-/årsmapp; skapas vid första sorteringen.":
+        "Relative to the category's date/year folder; created on first sort.",
+    "Lämna tomt för kategoriens standardundermapp; en extra sökväg läggs under den.":
+        "Leave empty to use the category default; an extra path is nested below it.",
+    "Koppla stödord till mapp (Ctrl+M)": "Assign support word to folder (Ctrl+M)",
+    "Koppla markerade stödord (Ctrl+M)": "Assign selected support words (Ctrl+M)",
+    "Skapade mappar för vald kategori visas här. Dra ett sparat stödord från vänster hit, eller använd Ctrl+M.":
+        "Created folders for the selected category appear here. Drag a saved support word from the left, or use Ctrl+M.",
+    "Dra stödord från listan till höger till den undermapp där dokumenttypen ska sparas.":
+        "Drag a saved support word from the left list to the created folder on the right.",
+    "Dra ett stödord till en mapp till höger. Skapa mappar med knappen här.":
+        "Drag a support word to a folder on the right. Create folders with the button here.",
+    "Möjlig dubblettfaktura. Kontrollera innan du sparar; ingen fil tas bort automatiskt.":
+        "Possible duplicate invoice. Check before saving; no file is deleted automatically.",
+    "Kontrollera": "Check", "Kontrollera igen": "Check again",
     "Spara hjälpen som textfil…": "Save help as text file…",
     "Stöd projektet 💖": "Support the project 💖",
     "Inga filer väntar på granskning.": "No files are waiting for review.",
@@ -3666,13 +7829,400 @@ def _translate_ui_tree(widget, mapping) -> int:
     return antal
 
 
+def _minimize_action(state: str, settings: Dict[str, Any],
+                     has_tray: bool, modal_open: bool = False,
+                     busy: bool = False) -> str:
+    """Vad ska hända när fönstret minimeras?
+
+    "none"    - inte en minimering (t.ex. withdraw, eller <Unmap> av annat
+                skäl som att byta virtuellt skrivbord)
+    "tray"    - göm fönstret i systemfältet
+    "taskbar" - låt det ligga kvar minimerat i aktivitetsfältet
+    "restore" - återställ det medan en batchsortering pågår
+
+    Är en modal dialog öppen (matchningsdialogen) går minimeringen ALLTID
+    till aktivitetsfältet. Att withdrawa huvudfönstret då lämnar en
+    grab-hållande Toplevel utan förälder - fönstret gick inte att få fram
+    igen, och kön fortsatte skapa dialoger i en död Tk.
+
+    Minimering och krysset är två olika saker: close_to_tray styr bara
+    krysset, medan minimize_to_tray styr vad som händer när fönstret
+    minimeras. Båda går till systemfältet som standard. Med en öppen
+    granskningsdialog stannar fönstret ändå i aktivitetsfältet för att
+    dialogen inte ska bli frikopplad från sitt huvudfönster.
+    """
+    if str(state or "") != "iconic":
+        return "none"
+    if modal_open:
+        return "taskbar"
+    if busy:
+        return "restore"
+    if not has_tray or not settings.get("minimize_to_tray", True):
+        return "taskbar"
+    return "tray"
+
+
+# --------------------------------------------------------------------------
+# Menyraden - samma funktioner som flikarna, nåbara utan att leta
+# --------------------------------------------------------------------------
+#: Menyerna beskrivs som DATA och byggs sedan av _build_menubar(). Då kan
+#: innehållet granskas i test utan Tk (som inte finns i CI på alla OS), och
+#: en post som pekar på en metod som inte finns upptäcks innan den klickas.
+#:
+#: Posttyper:
+#:   (ingen)    - vanlig post, kör "atgard"
+#:   avdelare   - avgränsningslinje
+#:   kryss      - bockbar post, bunden till variabeln i "var"
+#:   radio      - en av flera, bunden till "var" med värdet i "varde"
+#:   flik       - byter till fliken i "flik"
+_MENY_FLIKAR = {"tab_sort", "tab_cats", "tab_opts", "tab_review",
+                "tab_hist", "tab_json", "tab_help"}
+
+#: Genvägarna använder Ctrl på Windows/Linux och Command på macOS.
+_MENY_SNABB_CTRL = "Ctrl"
+_MENY_SNABB_CMD = "Command"
+
+
+def meny_spec() -> List[Dict[str, Any]]:
+    """Menyradens innehåll som data - testbart utan Tk."""
+    c = _MENY_SNABB_CTRL
+    return [
+        {"titel": "Arkiv", "poster": [
+            {"id": "lagg_till_inmapp", "text": "Lägg till inmapp…",
+             "snabb": f"{c}+O", "atgard": "_add_input_dir"},
+            {"id": "ta_bort_inmapp", "text": "Ta bort vald inmapp",
+             "snabb": f"{c}+Shift+O", "atgard": "_remove_input_dir"},
+            {"typ": "avdelare"},
+            {"id": "sortera_nu", "text": "Sortera nu", "snabb": "F5",
+             "atgard": "_sort_now"},
+            {"id": "bevaka", "typ": "kryss", "text": "Bevaka mapparna",
+             "snabb": f"{c}+B", "var": "var_bevaka",
+             "atgard": "_meny_bevaka"},
+            {"typ": "avdelare"},
+            {"id": "oppna_ut", "text": "Öppna utmappen",
+             "atgard": "open_output"},
+            {"id": "oppna_logg", "text": "Öppna loggmappen",
+             "atgard": "_open_log_dir"},
+            {"id": "oppna_import", "text": "Öppna importmappen",
+             "atgard": "_open_rules_import_dir"},
+            {"id": "oppna_export", "text": "Öppna exportmappen",
+             "atgard": "_open_rules_export_dir"},
+            {"typ": "avdelare"},
+            {"id": "exportera_regler", "text": "Exportera regler…",
+             "snabb": f"{c}+E", "atgard": "_export"},
+            {"id": "importera_regler", "text": "Importera regler…",
+             "snabb": f"{c}+I", "atgard": "_import"},
+            {"typ": "avdelare"},
+            {"id": "avsluta", "text": "Avsluta", "snabb": f"{c}+Q",
+             "atgard": "quit_app"},
+        ]},
+        {"titel": "Inställningar", "poster": [
+            {"id": "autostart", "typ": "kryss",
+             "text": "Starta automatiskt med datorn",
+             "var": "var_autostart", "atgard": "_toggle_autostart"},
+            {"id": "tray", "typ": "kryss", "text": "Visa ikon i systemfältet",
+             "var": "var_tray", "installning": "tray_enabled"},
+            {"id": "min_tray", "typ": "kryss",
+             "text": "Minimera till systemfältet",
+             "var": "var_min_tray", "installning": "minimize_to_tray"},
+            {"id": "close_tray", "typ": "kryss",
+             "text": "Krysset minimerar i stället för att avsluta",
+             "var": "var_close_tray", "installning": "close_to_tray"},
+            {"typ": "avdelare"},
+            {"id": "tema_ljus", "typ": "radio", "text": "Ljust tema",
+             "var": "var_theme", "varde": "ljus",
+             "atgard": "_on_theme_radio"},
+            {"id": "tema_mork", "typ": "radio", "text": "Mörkt tema",
+             "var": "var_theme", "varde": "mork",
+             "atgard": "_on_theme_radio"},
+            {"typ": "avdelare"},
+            {"id": "oppna_installningar", "text": "Alla inställningar…",
+             "snabb": f"{c}+,", "typ": "flik", "flik": "tab_opts"},
+        ]},
+        {"titel": "Visa", "poster": [
+            {"id": "flik_sortera", "text": "Start", "typ": "flik",
+             "flik": "tab_sort"},
+            {"id": "flik_matchningar", "text": "Kategorier", "typ": "flik",
+             "flik": "tab_cats"},
+            {"id": "flik_granska", "text": "Granska", "typ": "flik",
+             "flik": "tab_review"},
+            {"id": "flik_historik", "text": "Historik", "typ": "flik",
+             "flik": "tab_hist"},
+            {"id": "flik_json", "text": "Avancerat", "typ": "flik",
+             "flik": "tab_json"},
+            {"typ": "avdelare"},
+            {"id": "genvag", "text": "Skapa genväg på skrivbordet",
+             "atgard": "_make_shortcut"},
+            {"id": "spara_ikon", "text": "Spara appikonen…",
+             "atgard": "_save_icon"},
+        ]},
+        {"titel": "Hjälp", "poster": [
+            {"id": "hjalp", "text": "Användarhjälp", "snabb": "F1",
+             "typ": "flik", "flik": "tab_help"},
+            {"id": "stod", "text": "Stöd projektet 💖",
+             "atgard": "_visa_stod"},
+            {"id": "kortkommandon", "text": "Tangentbordsgenvägar…",
+             "atgard": "_show_shortcuts"},
+            {"typ": "avdelare"},
+            {"id": "ai_rapport", "text": "Kopiera AI-rapport (alla fel)",
+             "snabb": f"{c}+Shift+A", "atgard": "_copy_ai_report"},
+            {"id": "diagnostik", "text": "Kopiera diagnostik för support",
+             "atgard": "_copy_support_log"},
+            {"id": "rensa_felkoder", "text": "Rensa åtgärdade fel från loggen…",
+             "atgard": "_open_error_code_dialog"},
+            {"typ": "avdelare"},
+            {"id": "sok_uppdatering", "text": "Sök efter uppdateringar…",
+             "atgard": "_meny_sok_uppdatering"},
+            {"typ": "avdelare"},
+            {"id": "om", "text": "Om ArkivPiloten…", "atgard": "_meny_om"},
+        ]},
+    ]
+
+
+def shortcuts_help_text(plattform: str = "") -> str:
+    """Läsbar lista över menygenvägar och gemensamma dialogkommandon."""
+    modifier = meny_snabbmodifierare(plattform)
+    lines = []
+    for menu in meny_spec():
+        for post in menu["poster"]:
+            shortcut = post.get("snabb", "")
+            if shortcut:
+                shortcut = shortcut.replace(_MENY_SNABB_CTRL, modifier)
+                lines.append(f"{shortcut:<22} {post['text']}")
+    lines.extend((
+        f"{modifier}+Tab / {modifier}+Shift+Tab  Nästa/föregående flik",
+        f"{modifier}+1…7               Välj flik med nummer",
+        "F6 / Shift+F6          Flytta fokus mellan områden",
+        "Ctrl+M                  Koppla markerat stödord till markerad undermapp",
+        "Escape                 Stäng dialogen eller vänta med PDF:en",
+        "Enter                  Bekräfta markerat val när det är säkert",
+    ))
+    return "Tangentbordsgenvägar\n\n" + "\n".join(lines)
+
+
+def meny_snabbmodifierare(plattform: str = "") -> str:
+    """Ctrl på Windows/Linux, Command på macOS."""
+    p = plattform or sys.platform
+    return _MENY_SNABB_CMD if p == "darwin" else _MENY_SNABB_CTRL
+
+
+def meny_snabb_tangent(snabb: str, plattform: str = "") -> str:
+    """Gör om "Ctrl+Shift+A" till rätt Tk-sekvens för plattformen.
+
+    Windows/Linux: Control-Shift-KeyPress-A. macOS: Command-Shift-A.
+    F5 och F1 lämnas orörda (de har ingen modifierare).
+    """
+    text = str(snabb or "").strip()
+    if not text:
+        return ""
+    if text.upper() in ("F1", "F5", "F2", "F3", "F4", "F6", "F7", "F8",
+                        "F9", "F10", "F11", "F12"):
+        return f"<{text.upper()}>"
+    delar = text.split("+")
+    tang = delar[-1]
+    mods = [d for d in delar[:-1]]
+    mod = meny_snabbmodifierare(plattform)
+    nyckel = "Command" if mod == _MENY_SNABB_CMD else "Control"
+    mods = [nyckel if d.lower() in ("ctrl", "control", "cmd", "command")
+            else d for d in mods]
+    # Tk skiljer på versaler och gemener när Shift är nedtryckt: Ctrl+O ska
+    # bindas som <Control-KeyPress-o>, Ctrl+Shift+O som
+    # <Control-Shift-KeyPress-O>. Att alltid skriva versal (eller alltid
+    # gemen) gör att genvägen fungerar på en del Tk-versioner men inte alla.
+    prefix = "-".join(mods)
+    shift = any(m.lower() == "shift" for m in mods)
+    if len(tang) == 1 and tang.isalpha():
+        bokstav = tang.upper() if shift else tang.lower()
+        return (f"<{prefix}-KeyPress-{bokstav}>" if prefix
+                else f"<{bokstav}>")
+    return f"<{prefix}-{tang}>" if prefix else f"<{tang}>"
+
+
+# ========================================================================
+# VERSIONSPAKTEN - tyst sökning två gånger per dygn och tyst omstart
+# ========================================================================
+#: Hur många gånger per dygn appen letar efter en ny version (tyst).
+UPPDATERING_PER_DYGN = 2
+#: Countdown shown after an update is installed, before the app restarts.
+UPDATE_RESTART_COUNTDOWN_SECONDS = 10
+#: Kortaste tid mellan två sökningar - taket är "var 15:e minut".
+_UPPDATERING_TAK_PER_DYGN = 96
+#: Misslyckades sökningen (nätet svek) försöker appen igen så här snabbt
+#: i stället för att vänta ett halvt dygn.
+UPPDATERING_OMFORSOK_SEKUNDER = 30 * 60
+#: Hur ofta vakten väcker sig för att se om det är dags (Tk-timer).
+UPPDATERING_VAKT_SEKUNDER = 60
+
+
+def uppdateringar_per_dygn(settings: Dict[str, Any]) -> int:
+    """Inställningens antal sökningar per dygn, hållbart avgränsat (1-96)."""
+    rått = settings.get("update_checks_per_day")
+    if rått in (None, ""):              # inte angivet alls
+        rått = UPPDATERING_PER_DYGN
+    try:
+        n = int(rått)
+    except (TypeError, ValueError):
+        n = UPPDATERING_PER_DYGN
+    return max(1, min(n, _UPPDATERING_TAK_PER_DYGN))
+
+
+def uppdaterings_intervall(per_dygn: int = UPPDATERING_PER_DYGN) -> float:
+    """Sekunder mellan två sökningar - 2 per dygn ger 12 timmar."""
+    n = max(1, min(int(per_dygn or 1), _UPPDATERING_TAK_PER_DYGN))
+    return 86400.0 / n
+
+
+def _iso_tid(text: Any) -> Optional[datetime]:
+    """Läs en ISO-tid från inställningarna (None om den är tom eller trasig)."""
+    text = str(text or "").strip()
+    if not text:
+        return None
+    try:
+        tid = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if tid.tzinfo is not None:          # sparad i en annan tidszon
+        tid = tid.astimezone().replace(tzinfo=None)
+    return tid
+
+
+def _intervall(last: str, per_dygn: int, forra_lyckades: bool) -> float:
+    intervall = uppdaterings_intervall(per_dygn)
+    if not forra_lyckades:
+        intervall = min(intervall, float(UPPDATERING_OMFORSOK_SEKUNDER))
+    return intervall
+
+
+def uppdaterings_dags(last: str, per_dygn: int = UPPDATERING_PER_DYGN,
+                      forra_lyckades: bool = True,
+                      nu: Optional[datetime] = None) -> bool:
+    """Är det dags för nästa tysta sökning?
+
+    Tiden sparas i inställningarna, så antalet gäller över omstarter: en
+    app som startas tio gånger om dagen frågar inte GitHub tio gånger.
+    """
+    sen = _iso_tid(last)
+    if sen is None:                     # aldrig sökt (eller trasig tid)
+        return True
+    kvar = _intervall(last, per_dygn, forra_lyckades) - \
+        ((nu or datetime.now()) - sen).total_seconds()
+    return kvar <= 0
+
+
+def uppdaterings_nasta_text(last: str, per_dygn: int = UPPDATERING_PER_DYGN,
+                            forra_lyckades: bool = True,
+                            nu: Optional[datetime] = None) -> str:
+    """Kort text om när nästa sökning sker: "om 3 t 12 min" eller "nu"."""
+    sen = _iso_tid(last)
+    if sen is None:
+        return "nu"
+    kvar = int(_intervall(last, per_dygn, forra_lyckades)
+               - ((nu or datetime.now()) - sen).total_seconds())
+    if kvar <= 0:
+        return "nu"
+    minuter = max(1, kvar // 60)
+    tim, min_ = divmod(minuter, 60)
+    if tim and min_:
+        return f"om {tim} t {min_} min"
+    return f"om {tim} t" if tim else f"om {minuter} min"
+
+
+def tid_kort(iso: str, nu: Optional[datetime] = None) -> str:
+    """Läsbar tid: "i dag 09:12", "i går 21:03" eller datum."""
+    tid = _iso_tid(iso)
+    if tid is None:
+        return "aldrig"
+    nu = nu or datetime.now()
+    dagar = (nu.date() - tid.date()).days
+    if dagar == 0:
+        return f"i dag {tid:%H:%M}"
+    if dagar == 1:
+        return f"i går {tid:%H:%M}"
+    return f"{tid:%Y-%m-%d %H:%M}"
+
+
+def uppdateringsplan(info: Dict[str, Any], manual: bool,
+                     settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Vad ett svar från GitHub ska leda till - utan Tk-dialoger.
+
+    ``steg``:
+      fel      - sökningen misslyckades
+      aktuell  - ingen nyare version
+      osaker   - nyare version, men paketet kan inte verifieras
+      erbjudande - ny version finns, men användaren har valt att
+                   godkänna själv: notis + logg, ingen dialog
+      fraga    - fråga användaren innan installation (manuell sökning)
+      installera - installera utan frågor (tyst)
+    ``tyst``    - sökningen/installationen sker utan dialoger
+    ``omstart``  - "tyst", "fraga" eller "ingen"
+    """
+    tyst = not manual
+    omstart = "tyst" if settings.get("silent_restart", True) else "fraga"
+    if not info.get("ok"):
+        return {"steg": "fel", "tyst": tyst, "omstart": "ingen"}
+    if not info.get("available"):
+        return {"steg": "aktuell", "tyst": tyst, "omstart": "ingen"}
+    if not (info.get("sha256_url") or info.get("sha256")):
+        return {"steg": "osaker", "tyst": tyst, "omstart": "ingen"}
+    if bool(settings.get("auto_update", False)) and not manual:
+        return {"steg": "installera", "tyst": True, "omstart": omstart}
+    if not manual:
+        # Automatisk sökning med autouppdatering av: ingen dialog klockan
+        # tre på natten - en notis i systemfältet och en rad i loggen.
+        return {"steg": "erbjudande", "tyst": True, "omstart": omstart}
+    return {"steg": "fraga", "tyst": False, "omstart": omstart}
+
+
+def omstart_kommando(rot: Path, exe: str = "", plattform: str = "",
+                     dold: bool = False, bevaka_igen: bool = False,
+                     restart_after_update: bool = False) -> List[str]:
+    """Kommandot som startar om appen efter en uppdatering.
+
+    ``dold`` startar det nya fönstret i systemfältet, ``bevaka_igen`` slår
+    på bevakningen direkt, så att en pågående bevakning inte tystnar av
+    omstarten. ``restart_after_update`` visar det nya fönstret efter byte.
+    På Windows väljs
+    pythonw.exe när det finns - en tyst omstart ska inte blinka till med
+    en svart konsol.
+    """
+    rot = Path(rot)
+    plattform = plattform or sys.platform
+    exe = exe or sys.executable or "python3"
+    start = exe
+    if plattform.startswith("win"):
+        kandidat = Path(exe).with_name("pythonw.exe")
+        if kandidat.is_file():
+            start = str(kandidat)
+        skript = rot / "pdfsorter.pyw"
+        if not skript.is_file():
+            skript = rot / "pdfsorter.py"
+    else:
+        skript = rot / "pdfsorter.py"
+    cmd = [start, str(skript)]
+    if dold:
+        cmd.append("--tray")
+    if bevaka_igen:
+        cmd.append("--resume-watch")
+    if restart_after_update:
+        cmd.append("--restart-after-update")
+    return cmd
+
+
 class App:
-    def __init__(self, start_hidden: bool = False) -> None:
+    def __init__(self, start_hidden: bool = False,
+                 instanslås: Optional[Any] = None,
+                 resume_watch: bool = False,
+                 restart_after_update: bool = False) -> None:
         tk, ttk, filedialog, messagebox, simpledialog = _tk()
         self.tk, self.ttk = tk, ttk
         self.filedialog, self.messagebox, self.simpledialog = filedialog, messagebox, simpledialog
 
         self.settings = load_settings()
+        if migrate_review_preview_setting(self.settings):
+            save_settings(self.settings)
+        # Every file remains in its source folder until the user confirms a
+        # destination; legacy "ask_when_unsure=false" settings cannot bypass this.
+        self.settings["ask_when_unsure"] = True
         self.rules = Rules.load()
         # Manuellt utpekad tesseract (installerad på udda ställe) ska
         # gälla direkt vid start, innan standardsökningen ens körs.
@@ -3681,9 +8231,13 @@ class App:
         except Exception:
             pass
         self._warm_patterns()
+        # Flera sorteringstrådar kan hitta låsta filer samtidigt; varningarna
+        # visas en i taget på Tk-tråden.
+        self._locked_dialog_lock = threading.Lock()
         self.engine = SortEngine(self.rules, self.settings,
                                  log=self._log_threadsafe,
-                                 conflict_asker=self._ask_conflict)
+                                 conflict_asker=self._ask_conflict,
+                                 locked_file_asker=self._ask_locked_file)
         # Startsammanfattning till sessionsloggen - den som felsöker ska
         # direkt se inställningar, regler och motorer utan att fråga.
         _antal_kw = sum(len(c.get("keywords", []))
@@ -3706,9 +8260,18 @@ class App:
         except Exception:
             pass
         self.watcher: Optional[MultiFolderWatcher] = None
+        self.archive_watcher: Optional[MultiFolderWatcher] = None
+        self._archive_watch_root: Optional[Path] = None
+        # Senaste aktivitet från bevakningen visas på handlingsraden. Tiderna
+        # gäller den här appkörningen; trådlås behövs eftersom varje mapp har
+        # en egen watcher-tråd.
+        self._watch_status_lock = threading.Lock()
+        self._watch_last_found: Optional[datetime] = None
+        self._watch_last_sorted: Optional[datetime] = None
         self.queue: List[Decision] = []          # osäkra filer som väntar
         self._queued_paths: set = set()
         self._busy = False
+        self._sort_cancel_event: Optional[threading.Event] = None
         self._ui_calls: List[Callable[[], None]] = []
         self._ui_lock = threading.Lock()
         #: UI-tråden: används för att avgöra om en dialog kan visas direkt
@@ -3719,20 +8282,54 @@ class App:
         # TrayIcon är en variabel (klassen eller None-reserven), vilket en
         # typkontrollant inte accepterar i typuttryck - därför Any här.
         self.tray: Optional[Any] = None
-        self.visible = True
+        #: Instanslåset ägs av main() men måste kunna släppas här: vid en
+        #: omstart startas den nya processen innan den här hunnit avslutas,
+        #: och utan släppt lås skulle den bara be den döende processen visa
+        #: fönstret och sedan avsluta sig själv.
+        self.instanslås = instanslås
+        #: Startad av omstarten efter en uppdatering: bevakningen ska igång
+        #: igen, annars tystnar den av en uppdatering mitt i natten.
+        self._resume_watch = bool(resume_watch)
+        self._restart_after_update = bool(restart_after_update)
+        #: Vakten för tyst versionssökning (startas en gång).
+        self._uppdateringsvakt = False
+        #: En smart diskcache-rensning kör just nu.
+        self._cache_cleanup_running = False
+        #: En omstart väntar på att appen blir ledig.
+        self._omstart_vantar = False
+        self.visible = False
         self._quitting = False
         self._rescanning = False
+        self._hiding_for_minimize = False
+        #: Kön visar en modal granskningsdialog just nu (eller None). Används
+        #: av fönsterhanteringen så att varken minimering eller krysset kan
+        #: gömma appen medan dialogen väntar på svar.
+        self._review_dialog: Optional[Any] = None
+        #: Sätts när appen avslutas. Kön får då inte skapa fler dialoger.
+        self._closing = False
+        self._startup_taskbar_minimize = False
         self._icon_ref = None                    # håll kvar PhotoImage
 
         self.root = tk.Tk()
+        # Keep the top-level withdrawn while the interface and tray icon are
+        # initialized. This prevents even a brief maximized-window flash on
+        # normal launch and after a background update restart.
+        self.root.withdraw()
+        if diag is not None:
+            # Undantag i knappar/after-jobb fångas av Tk och skrevs tidigare
+            # bara till stderr - som inte finns när appen startas med
+            # pythonw. Nu hamnar de i loggen och i AI-rapporten.
+            diag.install_tk_hooks(self.root)
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        # Fönstret anpassas dynamiskt till skärmstorleken (användarorder
-        # 2026-08-26) - aldrig större än skärmen, centrerat, åtkomligt
-        # minsta mått även på små skärmar.
+        # Sätt reservgeometri medan fönstret är dolt. Maximering sker först
+        # när användaren faktiskt visar fönstret, inte som en startflash.
         _fit_geometry(self.root, 1280, 880, 1060, 720)
-        self.theme = Theme(self.root, ttk,
-                           dark=str(self.settings.get("theme", "ljus")) == "mork",
-                           contrast=self.settings.get("contrast", "normal"))
+        self.theme = Theme(
+            self.root, ttk,
+            dark=str(self.settings.get("theme", "ljus")) == "mork",
+            contrast=self.settings.get("contrast", "normal"),
+            text_scale=(1.25 if self.settings.get("ui_text_size") == "large"
+                        else 1.0))
         self.C = self.theme.c
         install_snabbtangenter(self.root)
         # Modern titellist som följer temat (mörk lista i mörkt läge).
@@ -3744,8 +8341,33 @@ class App:
         # aktivitetsfältet på Windows via iconbitmap.
         self._icon_ref = brand_window(self.root)
 
+        # Gemensam, luftig varumärkesrad gör att appens olika arbetsflikar
+        # känns som en sammanhållen produkt och ger en tydlig hjälpväg.
+        header = ttk.Frame(self.root, style="Topbar.TFrame")
+        header.pack(fill="x", padx=12, pady=(10, 4))
+        header.columnconfigure(1, weight=1)
+        self._brand_small_ref = icon_photoimage(36)
+        if self._brand_small_ref is not None:
+            ttk.Label(header, image=self._brand_small_ref,
+                      background=self.C["surface"]).grid(
+                          row=0, column=0, rowspan=2,
+                          padx=(12, 10), pady=7, sticky="w")
+        brand_title = ttk.Label(header, text=APP_NAME,
+                                style="BrandTitle.TLabel")
+        brand_title.grid(row=0, column=1, sticky="sw", pady=(7, 0))
+        brand_sub = ttk.Label(
+            header, text="PDF-sortering, enkelt och säkert",
+            style="BrandSub.TLabel")
+        brand_sub.grid(row=1, column=1, sticky="nw", pady=(0, 7))
+        ttk.Button(
+            header, text="Hjälp", style="Link.TButton",
+            command=lambda: self.nb.select(self.tab_help)).grid(
+                row=0, column=2, rowspan=2, padx=12, sticky="e")
+
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(fill="both", expand=True, padx=12, pady=(10, 0))
+        #: (canvas, namn) för varje rullbar flik - mushjulet letar här.
+        self._scroll_canvases: List[Any] = []
         self.tab_sort = ttk.Frame(self.nb)
         self.tab_opts = ttk.Frame(self.nb)
         self.tab_cats = ttk.Frame(self.nb)
@@ -3753,13 +8375,13 @@ class App:
         self.tab_hist = ttk.Frame(self.nb)
         self.tab_json = ttk.Frame(self.nb)
         self.tab_help = ttk.Frame(self.nb)
-        self.nb.add(self.tab_sort, text="Sortera")
-        self.nb.add(self.tab_cats, text="Matchningar")
-        self.nb.add(self.tab_opts, text="Inställningar")
+        self.nb.add(self.tab_sort, text="Start")
         self.nb.add(self.tab_review, text="Granska")
+        self.nb.add(self.tab_cats, text="Kategorier")
+        self.nb.add(self.tab_opts, text="Inställningar")
         self.nb.add(self.tab_hist, text="Historik")
-        self.nb.add(self.tab_json, text="JSON")
         self.nb.add(self.tab_help, text="Hjälp")
+        self.nb.add(self.tab_json, text="Avancerat")
 
         self._build_sort_tab()
         self._build_cats_tab()
@@ -3767,21 +8389,31 @@ class App:
         self._build_hist_tab()
         self._build_json_tab()
         self._build_help_tab()
+        # Efter alla flikar: mushjulet ska rulla inställningarna.
+        self._install_tab_wheel()
+        # Sist: menyraden (behöver flikarna och deras variabler).
+        self._build_menubar()
 
         status_line = status_text()
         if not SYSTEM_MODULE:
             status_line += "  |  pdfsorter_system.py saknas"
         self.status = ttk.Label(self.root, text=status_line, style="Status.TLabel",
-                                anchor="w")
+                                anchor="w", takefocus=True)
         self.status.pack(fill="x", side="bottom")
+        self._install_keyboard_navigation()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Unmap>", self._on_unmap)
+        self.root.bind("<Map>",
+                       lambda event: _maximize_after_map(self.root, event),
+                       add="+")
         self.root.after(120, self._pump)
         self._refresh_input_list()
         self._refresh_categories()
         self._refresh_history()
         self._refresh_queue()
+        if self.settings.get("pending_review_paths"):
+            self.root.after(350, self._restore_pending_review_queue)
 
         # 1.1.0: engelskt gränssnitt om ui_language=en (byggs svenskt,
         # översätts här). Schemakontrollen tickar var 30:e sekund.
@@ -3791,22 +8423,45 @@ class App:
             except Exception:
                 pass
         self.root.after(30000, self._schedule_tick)
+        # Kontrollera dygnsintervallet när GUI:t hunnit visas, och därefter
+        # en gång i timmen så en app som står öppen också rensar dagligen.
+        self.root.after(3000, self._cache_cleanup_tick)
+        # Samma rytm för felloggen: fel som inte återkommit åtgärdas och
+        # rensas automatiskt - användaren ska inte behöva tänka på den.
+        self.root.after(3000, self._error_autofix_tick)
 
         # Självläkande autostart (bättre autostart): OS-posten och
         # inställningen synkas vid varje start - och resultatet loggas,
         # så att en tyst trasig autostart syns i sessionsloggen.
+        #
+        # Startskedet får aldrig RADERA en fungerande autostart: om
+        # OS-posten finns men settings säger av (t.ex. efter att ha
+        # installerats via install.sh, en annan användares profil eller
+        # en återställd settings.json) ärver vi OS-posten i stället.
+        # Borttagning kräver ett uttryckligt val i gränssnittet.
         try:
-            ok, msg = sync_autostart(bool(self.settings.get("autostart", False)))
+            vill, ärvd = effective_autostart(self.settings)
+            if ärvd:
+                self.settings["autostart"] = True
+                save_settings(self.settings)
+                self._h("autostart",
+                        "Autostarten fanns i operativsystemet - "
+                        "inställningen uppdaterades i stället för att "
+                        "posten togs bort", "warn")
+            ok, msg = sync_autostart(vill)
+            try:
+                self.var_autostart.set(bool(autostart_enabled()))
+            except Exception:
+                pass
             self._h("autostart", f"Startsynk: {msg}",
                     "ok" if ok else "warn")
         except Exception as exc:
             session_error("autostart", exc)
 
-        # Uppdatering från Git (2026-10-16): sök tyst vid start om
-        # inställningen är på - fråga alltid före installation om inte
-        # auto_update valts uttryckligen.
-        if self.settings.get("check_updates", True):
-            self.root.after(5000, lambda: self._check_updates_gui(manual=False))
+        # Ny version (2026-10-26): sök tyst två gånger per dygn, inte vid
+        # varje start. Tiden sparas i inställningarna, så en app som startas
+        # ofta frågar GitHub lika sällan ändå.
+        self._starta_uppdateringsvakt()
 
         # Systemfältsikon. TrayIcon är None när systemmodulen saknas
         # (REQ-A2) - då ska appen starta ändå, utan ikon.
@@ -3818,38 +8473,62 @@ class App:
                 self.tray = None
                 self._h("systemfält", "Systemfältsikonen KUNDE INTE startas "
                         "(pystray-fel) - appen körs utan ikon", "warn")
-                if start_hidden:
+                if start_hidden or self.settings.get("start_minimized", True):
                     self._log("Systemfältet är inte tillgängligt "
-                              "(installera pystray) - visar fönstret i stället.", "warn")
+                              "(installera pystray) - minimerar till "
+                              "aktivitetsfältet i stället.", "warn")
         elif start_hidden:
             self._h("systemfält", "Systemfält saknas helt (modul/pystray) - "
-                    "visar fönstret trots --tray", "warn")
+                    "fönstret minimeras till aktivitetsfältet", "warn")
             self._log("Systemfältet är inte tillgängligt "
                       "(pdfsorter_system.py eller pystray saknas) - "
-                      "visar fönstret i stället.", "warn")
+                      "minimerar i aktivitetsfältet i stället.", "warn")
         else:
             self._h("systemfält", f"Systemfältsikon avstängd "
                     f"(inställning tray_enabled={self.settings.get('tray_enabled', True)}, "
                     f"modul tillgänglig={TrayIcon is not None})")
 
-        # Starta bevakning direkt
+        # Starta bevakning direkt (även efter en omstart efter uppdatering -
+        # den som bevakade mapparna ska inte tappa bevakningen i natten).
         if self.settings.get("autowatch_on_start", False):
             self.root.after(400, lambda: self._start_watch(quiet=True))
+        elif self._resume_watch:
+            self._h("bevaka", "Bevakningen återupptas efter omstarten "
+                    "(den var på när appen uppdaterades)")
+            self.root.after(400, lambda: self._start_watch(quiet=True))
+        if self.settings.get("archive_watch_enabled", True):
+            self.root.after(650, self._sync_archive_watch)
 
-        # Vid start: installera saknade Python-tillägg automatiskt med
-        # progress bar (ANVÄNDARORDER 2026-10-06); därefter dialog för
-        # det som inte är pip (Tesseract/svenska). Aldrig blockerande.
-        self.root.after(900, self._autoinstallera_tillagg)
+        # På Windows säkerställs bara att veckouppgiften finns. Ingen kontroll
+        # eller pip-uppdatering av tillägg körs vid vanlig appstart.
+        self.root.after(900, self._ensure_weekly_python_update_task)
 
-        # Starta minimerad
-        if (start_hidden or self.settings.get("start_minimized", False)) and self.tray:
-            varför = "--tray" if start_hidden else "inställningen 'starta minimerad'"
-            self._h("fönster", f"Fönstret visas INTE vid start ({varför}) - "
-                    "göms i systemfältet efter 150 ms")
-            self.root.after(150, lambda: self.hide_window(f"start: {varför}"))
-        elif start_hidden or self.settings.get("start_minimized", False):
-            self._h("fönster", "Minimerad start begärd men systemfält saknas - "
-                    "fönstret visas ändå")
+        # Alla normala starter minimeras. OS-autostarten använder också
+        # --tray; en andra start kan ändå visa det här fönstret igen.
+        varför = "--tray" if start_hidden else "alltid minimerad"
+        if self._restart_after_update:
+            self._h("fönster", "Appen startas minimerad efter uppdateringen.")
+        if not self.tray:
+            self._h("fönster", "Systemfältsikonen saknas - startar "
+                    "minimerad i aktivitetsfältet", "warn")
+            self.root.iconify()
+        else:
+            säkert, orsak = tray_hidden_start_safe()
+            if säkert:
+                self._h("fönster", f"Fönstret startar minimerat "
+                        f"({varför}) - göms i systemfältet")
+                self.hide_window(f"start: {varför}")
+            else:
+                self._h("fönster", f"Systemfältet kan inte visas säkert "
+                        f"({orsak}) - minimerar till aktivitetsfältet", "warn")
+                self._log(f"Systemfältet kan inte visas säkert: {orsak}. "
+                          "Startar minimerad i aktivitetsfältet i stället.",
+                          "warn")
+                self._startup_taskbar_minimize = True
+                self.root.iconify()
+                self.root.after(
+                    2000, lambda: setattr(
+                        self, "_startup_taskbar_minimize", False))
 
     # -- trådsäker UI-uppdatering -----------------------------------------
     def _post(self, fn: Callable[[], None]) -> None:
@@ -3903,17 +8582,474 @@ class App:
         session_log(category, msg, level)
 
     def _fel(self, exc: BaseException, var: str) -> None:
-        """Logga ett undantag med spårning + visa det i GUI-loggen."""
+        """Logga felet tillsammans med ett konkret och säkert nästa steg."""
         session_error(var, exc)
-        self._log_threadsafe(f"{var}: {type(exc).__name__}: {exc}", "err")
+        hint = error_next_step(exc)
+        self._log_threadsafe(
+            f"{var}: {type(exc).__name__}: {exc} · Nästa steg: {hint}", "err")
 
     def _ui(self, vad: str) -> None:
         """Logga ett användarklick, så att 'vad tryckte jag på?' syns i filen."""
         session_log("ui", f"Klick: {vad}")
 
     # ======================================================================
-    # Flik 1 - Sortera
+    # Flik 1 - Start
     # ======================================================================
+    # -- menyraden --------------------------------------------------------
+    def _meny_variabel(self, namn: str) -> Any:
+        """Hämta (eller skapa) en Tk-variabel som en menypost binder till."""
+        var = getattr(self, namn, None)
+        if var is None:
+            # Temat är en sträng ("ljus"/"mork"), allt annat är på/av.
+            if namn == "var_theme":
+                var = self.tk.StringVar(value=self.settings.get("theme", "ljus"))
+            else:
+                var = self.tk.BooleanVar(value=False)
+            setattr(self, namn, var)
+        return var
+
+    def _build_menubar(self) -> None:
+        """Bygg menyraden ur meny_spec() - samma funktioner som flikarna.
+
+        Flikarna kräver att man letar; menyraden ger genvägar till det man
+        gör oftast (sortera, bevaka, autostart, AI-rapport) och visar dessutom
+        genvägarna. Innehållet är data (meny_spec), så det kan granskas i
+        test utan Tk.
+        """
+        tk = self.tk
+        try:
+            bar = tk.Menu(self.root)
+            for meny in meny_spec():
+                m = tk.Menu(bar, tearoff=0)
+                for post in meny["poster"]:
+                    typ = post.get("typ", "")
+                    if typ == "avdelare":
+                        m.add_separator()
+                        continue
+                    text = post["text"]
+                    snabb = post.get("snabb", "")
+                    visa = (snabb.replace(_MENY_SNABB_CTRL,
+                                          meny_snabbmodifierare())
+                            if snabb else "")
+                    if typ == "kryss":
+                        m.add_checkbutton(
+                            label=text, accelerator=visa,
+                            variable=self._meny_variabel(post["var"]),
+                            command=self._meny_atgard(post))
+                    elif typ == "radio":
+                        m.add_radiobutton(
+                            label=text, accelerator=visa,
+                            variable=self._meny_variabel(post["var"]),
+                            value=post["varde"],
+                            command=self._meny_atgard(post))
+                    else:
+                        m.add_command(label=text, accelerator=visa,
+                                      command=self._meny_atgard(post))
+                bar.add_cascade(label=meny["titel"], menu=m)
+            # macOS lägger menyraden i skärmens överkant, övriga i fönstret.
+            self.root.configure(menu=bar)
+            self.menubar = bar
+            self._bind_meny_snabb()
+            self._sync_meny()
+            self._h("meny", "Menyrad byggd: " + ", ".join(
+                m["titel"] for m in meny_spec()))
+        except Exception as exc:
+            # En trasig menyrad får aldrig hindra appen från att starta.
+            self.menubar = None
+            session_error("meny", exc)
+
+    def _meny_atgard(self, post: Dict[str, Any]) -> Callable[[], None]:
+        """Klickfunktion för en menypost."""
+        if post.get("typ") == "flik":
+            return lambda p=post: self._visa_flik(p["flik"])
+        if post.get("installning"):
+            return lambda p=post: self._meny_kryss(p["installning"], p["var"])
+        namn = post.get("atgard", "")
+        metod = getattr(self, namn, None)
+        if callable(metod):
+            return lambda: metod()
+        # Ska aldrig kunna hända (testet kontrollerar att metoden finns) -
+        # men hellre en tydlig logg än en krasch i en meny.
+        return lambda n=namn: self._h(
+            "meny", f"Menyposten saknar funktion ({n})", "warn")
+
+    def _visa_flik(self, namn: str) -> None:
+        """Byt till en flik (används av menyn och av genvägarna)."""
+        flik = getattr(self, namn, None)
+        if flik is None:
+            return
+        try:
+            self.nb.select(flik)
+            self._ui(f"Menyn: fliken {namn}")
+        except Exception as exc:
+            self._fel(exc, "meny")
+
+    def _install_keyboard_navigation(self) -> None:
+        """Genvägar för flikar, dialoger och områdesvis fokusförflyttning."""
+        for sequence, delta in (("<Control-Tab>", 1),
+                                ("<Control-Shift-Tab>", -1),
+                                ("<Control-ISO_Left_Tab>", -1)):
+            self.root.bind(sequence,
+                           lambda event, step=delta:
+                           self._keyboard_tab_step(step), add="+")
+        for index in range(1, len(self.nb.tabs()) + 1):
+            self.root.bind(
+                f"<Control-Key-{index}>",
+                lambda event, i=index: self._keyboard_tab_number(i), add="+")
+        self.root.bind("<F6>",
+                       lambda event: self._keyboard_focus_step(1), add="+")
+        self.root.bind("<Shift-F6>",
+                       lambda event: self._keyboard_focus_step(-1), add="+")
+        # Widget/dialogspecifika Escape-bindningar (t.ex. återställning av
+        # en sök-combobox eller Hoppa över i granskningen) får företräde.
+        # Annars stänger Escape det aktuella Toplevel-fönstret men aldrig appen.
+        self.root.bind_all("<Escape>", self._keyboard_escape, add="+")
+
+    def _keyboard_tab_step(self, delta: int):
+        """Byt till nästa/föregående flik i den synliga ordningen."""
+        try:
+            tabs = self.nb.tabs()
+            if not tabs:
+                return "break"
+            current = tabs.index(self.nb.select()) if self.nb.select() in tabs else 0
+            self.nb.select(tabs[(current + delta) % len(tabs)])
+            return "break"
+        except Exception as exc:
+            self._fel(exc, "tangentbord")
+            return "break"
+
+    def _keyboard_tab_number(self, number: int):
+        """Ctrl+1…7 väljer flikens nuvarande position."""
+        try:
+            tabs = self.nb.tabs()
+            if 1 <= number <= len(tabs):
+                self.nb.select(tabs[number - 1])
+            return "break"
+        except Exception as exc:
+            self._fel(exc, "tangentbord")
+            return "break"
+
+    def _keyboard_escape(self, event=None):
+        """Stäng fokuserad dialog, aldrig huvudfönstret."""
+        try:
+            focused = self.root.focus_get()
+            if focused is None:
+                return None
+            top = focused.winfo_toplevel()
+            if top == self.root:
+                return None
+            if top.winfo_exists():
+                top.destroy()
+                return "break"
+        except Exception:
+            # Dialogen kan ha stängts av en annan bindning under samma event.
+            return None
+        return None
+
+    def _keyboard_focus_step(self, delta: int):
+        """F6 cyklar mellan flikväljaren, flikinnehållet och statusraden."""
+        try:
+            tabs = self.nb.tabs()
+            if not tabs:
+                return "break"
+            selected = self.nb.select()
+            page = self.root.nametowidget(selected) if selected else self.tab_sort
+            focused = self.root.focus_get()
+            focus_path = str(focused) if focused is not None else ""
+            page_path = str(page)
+            status_path = str(self.status)
+            if focus_path == status_path:
+                region = 2
+            elif focus_path == str(self.nb):
+                region = 0
+            elif focus_path == page_path or focus_path.startswith(page_path + "."):
+                region = 1
+            else:
+                region = 0 if delta > 0 else 2
+
+            target = (region + delta) % 3
+            if target == 0:
+                self.nb.focus_set()
+            elif target == 1:
+                candidate = self._keyboard_first_focusable(page)
+                (candidate or self.nb).focus_set()
+            else:
+                self.status.focus_set()
+            return "break"
+        except Exception as exc:
+            self._fel(exc, "tangentbord")
+            return "break"
+
+    def _keyboard_first_focusable(self, parent):
+        """Hitta första synliga, aktiverade fokusmålet i vald flik."""
+        try:
+            for child in parent.winfo_children():
+                if not child.winfo_ismapped():
+                    continue
+                try:
+                    if str(child.cget("takefocus")) not in ("", "0", "false"):
+                        state = str(child.cget("state"))
+                        if state != "disabled":
+                            return child
+                except Exception:
+                    pass
+                nested = self._keyboard_first_focusable(child)
+                if nested is not None:
+                    return nested
+        except Exception:
+            return None
+        return None
+
+    def _meny_kryss(self, nyckel: str, var_namn: str) -> None:
+        """Spara och verkställ en bockad menypost direkt (ingen omstart)."""
+        var = getattr(self, var_namn, None)
+        varde = bool(var.get()) if var is not None else False
+        self.settings[nyckel] = varde
+        try:
+            save_settings(self.settings)
+        except Exception as exc:
+            self._fel(exc, "meny")
+        if nyckel == "tray_enabled":
+            self._meny_tray(varde)
+        self._h("meny", f"{nyckel} = {varde} (sparat direkt)")
+        self._log(f"Inställning: {nyckel} = {'på' if varde else 'av'}.", "info")
+
+    def _meny_tray(self, på: bool) -> None:
+        """Slå på/av systemfältsikonen direkt när menyn ändrar den."""
+        try:
+            if på:
+                if self.tray is None and TrayIcon is not None and tray_available():
+                    self.tray = TrayIcon(self)
+                    if not self.tray.start():
+                        self.tray = None
+                        self._h("systemfält", "Systemfältsikonen kunde inte "
+                                "startas", "warn")
+            elif self.tray is not None:
+                self.tray.stop()
+                self.tray = None
+            self._sync_tray()
+        except Exception as exc:
+            self._fel(exc, "systemfält")
+
+    def _meny_bevaka(self) -> None:
+        """Bevakning på/av - menyposten är en kryssruta."""
+        self._toggle_watch()
+        self._sync_meny()
+
+    def _sync_meny(self) -> None:
+        """Håll menyns kryssruta för bevakning i takt med verkligheten."""
+        var = getattr(self, "var_bevaka", None)
+        if var is None:
+            return
+        try:
+            kör = bool(self.watcher and self.watcher.running)
+            if bool(var.get()) != kör:
+                var.set(kör)
+        except Exception:
+            pass
+
+    def _meny_sok_uppdatering(self) -> None:
+        self._check_updates_gui(manual=True)
+
+    def _meny_om_text(self) -> str:
+        """Texten i Om-rutan: allt en supportfråga behöver, utan nätanrop."""
+        rader = [f"{APP_NAME} {APP_VERSION}", ""]
+        try:
+            rader.append("Moduler: " + ", ".join(
+                f"{k}={v}" for k, v in _module_versions().items()))
+            if VERSIONS_BLANDADE:
+                rader.append("OBS: blandade modulversioner - kopiera ALLA "
+                             "fem .py-filerna.")
+        except Exception:
+            pass
+        rader.append(f"Python {sys.version.split()[0]} · {sys.platform}")
+        rader.append("")
+        rader.append(f"Uppdateringar: enbart GitHub Releases "
+                     f"({_sys_mod.UPDATE_REPO})")
+        inst = getattr(self, "settings", None) or {}
+        if inst.get("check_updates", True):
+            per_dygn = uppdateringar_per_dygn(inst)
+            nasta = uppdaterings_nasta_text(
+                inst.get("last_update_check", ""), per_dygn=per_dygn,
+                forra_lyckades=bool(inst.get("last_update_check_ok", True)))
+            rader.append(f"  Automatisk sökning: {per_dygn} ggr/dygn "
+                         f"(tyst), nästa {nasta}")
+            rader.append("  Tyst omstart vid uppdatering: "
+                         + ("på" if inst.get("silent_restart", True) else "av"))
+        else:
+            rader.append("  Automatisk sökning: avstängd")
+        rader.append(f"Inställningar och data: {config_dir()}")
+        rader.append(f"Loggar: {session_dir()}")
+        rader.append("")
+        rader.append(COPYRIGHT_NOTICE)
+        rader.append("Gratis - och förblir gratis.")
+        return "\n".join(rader)
+
+    def _meny_om(self) -> None:
+        self._ui("Menyn: Om")
+        try:
+            self.messagebox.showinfo(f"Om {APP_NAME}", self._meny_om_text(),
+                                     parent=self.root)
+        except Exception as exc:
+            self._fel(exc, "meny")
+
+    def _show_shortcuts(self) -> None:
+        self._ui("Visa tangentbordsgenvägar")
+        try:
+            win = self.tk.Toplevel(self.root)
+            brand_window(win)
+            win.title("Tangentbordsgenvägar")
+            win.transient(self.root)
+            win.configure(background=self.C["bg"])
+            _fit_geometry(win, 700, 520, 420, 300)
+            win.columnconfigure(0, weight=1)
+            win.rowconfigure(0, weight=1)
+            text = self.tk.Text(
+                win, wrap="word", state="normal", padx=18, pady=14,
+                background=self.C["surface"], foreground=self.C["text"],
+                font=self.theme.f_mono, borderwidth=0, highlightthickness=0)
+            text.insert("1.0", shortcuts_help_text())
+            text.configure(state="disabled")
+            text.grid(row=0, column=0, sticky="nsew", padx=(12, 0), pady=12)
+            scroll = self.ttk.Scrollbar(win, orient="vertical", command=text.yview)
+            scroll.grid(row=0, column=1, sticky="ns", pady=12, padx=(0, 12))
+            text.configure(yscrollcommand=scroll.set)
+            self.ttk.Button(
+                win, text="Stäng", command=win.destroy).grid(
+                    row=1, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 12))
+            win.bind("<Escape>", lambda _event: win.destroy())
+            win.bind("<Return>", lambda _event: win.destroy())
+            win.transient(self.root)
+            win.grab_set()
+        except Exception as exc:
+            self._fel(exc, "visa tangentbordsgenvägar")
+
+    def _bind_meny_snabb(self) -> None:
+        """Koppla menyernas genvägar till rotfönstret.
+
+        ``accelerator`` i en meny är bara en etikett - Tk kopplar ingen
+        tangent av sig själv. Bindningen läggs på rotfönstret (inte
+        ``bind_all``), så en dialog med eget tangentbord störs inte.
+        """
+        for meny in meny_spec():
+            for post in meny["poster"]:
+                snabb = post.get("snabb", "")
+                if not snabb:
+                    continue
+                sekvens = meny_snabb_tangent(snabb)
+                if not sekvens:
+                    continue
+                try:
+                    self.root.bind(sekvens, self._meny_snabb_hanterare(post))
+                except Exception:
+                    continue
+
+    def _meny_snabb_hanterare(self, post: Dict[str, Any]):
+        """Tangenthanterare som gör samma sak som menyposten."""
+        if post.get("typ") == "flik":
+            atgard = lambda: self._visa_flik(post["flik"])     # noqa: E731
+        elif post.get("installning"):
+            atgard = (lambda: self._meny_kryss(post["installning"],
+                                               post["var"]))
+        else:
+            metod = getattr(self, post.get("atgard", ""), None)
+            atgard = metod if callable(metod) else (lambda: None)
+
+        def _kor(_event=None):
+            self._ui(f"Genväg: {post.get('snabb', '')} ({post['id']})")
+            atgard()
+            return "break"
+        return _kor
+
+    def _scrollable_tab(self, parent, namn: str = ""):
+        """Gör en flik rullbar och returnera den inre ramen.
+
+        Flikarna växer på höjden (inställningarna har sex kort), medan
+        fönstret har en fast höjd. Utan rullning hamnade de nedersta
+        korten - bl.a. "Starta automatiskt med datorn" - utanför fönstret
+        och gick inte att nå alls. Här läggs innehållet i en canvas med
+        rullningslist; korten gridas som vanligt i den inre ramen.
+        """
+        tk, ttk = self.tk, self.ttk
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(parent, highlightthickness=0, borderwidth=0,
+                           background=self.C["bg"])
+        rull = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=rull.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        rull.grid(row=0, column=1, sticky="ns")
+
+        inre = ttk.Frame(canvas, style="TFrame")
+        inre.columnconfigure(0, weight=1)
+        fönster = canvas.create_window((0, 0), window=inre, anchor="nw")
+        inre.bind("<Configure>",
+                  lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(fönster, width=e.width))
+
+        # Rullningslisten visas bara när det finns något att rulla till.
+        def _uppdatera(_e=None):
+            try:
+                behövs = inre.winfo_reqheight() > canvas.winfo_height()
+            except Exception:
+                return
+            if behövs:
+                rull.grid()
+            else:
+                rull.grid_remove()
+
+        canvas.bind("<Configure>", lambda e: (canvas.itemconfigure(
+            fönster, width=e.width), _uppdatera()), add="+")
+        inre.bind("<Configure>", lambda e: _uppdatera(), add="+")
+
+        self._scroll_canvases.append((canvas, namn))
+        return inre
+
+    def _install_tab_wheel(self) -> None:
+        """Gör inställningsflikarna rullbara med mushjulet."""
+        global _TAB_WHEEL_APP
+        _TAB_WHEEL_APP = self
+        _bind_tab_wheel(getattr(self, "root", None))
+
+    def _tab_wheel_scroll(self, event) -> str:
+        """Rulla den rullbara flik som pekaren står över.
+
+        Returnerar "break" när vi rullar, annars "" så att widgeten under
+        pekaren får sköta saken själv (en lista eller ett inmatningsfält
+        ska aldrig flytta hela fliken).
+        """
+        try:
+            w = self.root.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            return ""
+        if w is None:
+            return ""
+        for canvas, _namn in getattr(self, "_scroll_canvases", []):
+            if not self._widget_in_canvas(w, canvas):
+                continue
+            if _widget_scrolls_itself(w):
+                return ""
+            steg = _wheel_steps(event)
+            if not steg:
+                return ""
+            try:
+                canvas.yview_scroll(steg * 3, "units")
+            except Exception:
+                return ""
+            return "break"
+        return ""
+
+    @staticmethod
+    def _widget_in_canvas(widget, canvas) -> bool:
+        """Ligger widgeten (eller någon av dess föräldrar) i canvasen?"""
+        while widget is not None:
+            if widget is canvas:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
     def _build_sort_tab(self) -> None:
         """Den dagliga vyn: mappar, en stor knapp och loggen."""
         tk, ttk = self.tk, self.ttk
@@ -3921,18 +9057,74 @@ class App:
         f = self.tab_sort
         f.configure(style="TFrame")
         f.columnconfigure(0, weight=1)
-        f.rowconfigure(2, weight=1)
+        f.rowconfigure(3, weight=1)
 
-        g = self.tab_opts          # tunga inställningar bor på egen flik
-        g.columnconfigure(0, weight=1)
+        # En kort startsida med tre tydliga steg. Mer sällan använda verktyg
+        # ligger kvar på sina egna flikar, så vardagsflödet hålls lättöverskådligt.
+        intro = ttk.Frame(f, style="Hero.TFrame")
+        intro.grid(row=0, column=0, sticky="ew", padx=T.PAD,
+                   pady=(T.PAD, 0))
+        intro_body = ttk.Frame(intro, style="Hero.TFrame")
+        intro_body.pack(fill="x", padx=T.INNER, pady=(8, 7))
+        ttk.Label(intro_body, text="Sortera dina PDF-filer",
+                  style="HeroTitle.TLabel").pack(anchor="w")
+        stepbar = ttk.Frame(intro_body, style="Hero.TFrame")
+        stepbar.pack(fill="x", pady=(9, 0))
+        steps = []
+        for number, (label, detail) in enumerate((
+                ("Välj PDF-mappar", "Var filerna finns"),
+                ("Välj arkivmapp", "Där sorterade filer sparas"),
+                ("Sortera eller bevaka", "Du kan granska osäkra filer")), 1):
+            chip = ttk.Frame(stepbar, style="Step.TFrame")
+            chip.columnconfigure(1, weight=1)
+            ttk.Label(chip, text=f"0{number}",
+                      style="PillAccent.TLabel").grid(
+                          row=0, column=0, rowspan=2, padx=9, pady=8,
+                          sticky="n")
+            ttk.Label(chip, text=label, style="CardKey.TLabel").grid(
+                row=0, column=1, sticky="sw", padx=(0, 8), pady=(7, 0))
+            ttk.Label(chip, text=detail, style="CardMuted.TLabel").grid(
+                row=1, column=1, sticky="nw", padx=(0, 8), pady=(0, 7))
+            steps.append(chip)
 
-        # -- rad 1: mapparna sida vid sida --------------------------------
+        last_step_columns = None
+
+        def layout_steps(_event=None):
+            nonlocal last_step_columns
+            width = max(1, stepbar.winfo_width())
+            columns = 3 if width >= 780 else 2 if width >= 500 else 1
+            if columns == last_step_columns:
+                return
+            last_step_columns = columns
+            for child in steps:
+                child.grid_forget()
+            for col in range(3):
+                stepbar.columnconfigure(col, weight=0, uniform="")
+            for col in range(columns):
+                stepbar.columnconfigure(col, weight=1, uniform="start-steps")
+            for index, child in enumerate(steps):
+                row, col = divmod(index, columns)
+                span = (columns if index == 2 and columns == 2 else 1)
+                child.grid(row=row, column=col, columnspan=span,
+                           sticky="ew", padx=(0 if col == 0 else 6, 0),
+                           pady=(0 if row == 0 else 6, 0))
+
+        stepbar.bind("<Configure>", layout_steps, add="+")
+        self.root.after_idle(layout_steps)
+
+        # Tunga inställningar bor på egen flik - och den måste gå att
+        # rulla, annars hamnar de nedersta korten (autostart, systemfält,
+        # uppdateringar) utanför fönstret och går inte att nå.
+        g = self._scrollable_tab(self.tab_opts, "inställningar")
+
+        # -- steg 1–2: mapparna sida vid sida ----------------------------
         top = ttk.Frame(f)
-        top.grid(row=0, column=0, sticky="ew", padx=T.PAD, pady=(T.PAD, 0))
+        top.grid(row=1, column=0, sticky="ew", padx=T.PAD, pady=(T.GAP, 0))
         top.columnconfigure(0, weight=3, uniform="m")
         top.columnconfigure(1, weight=2, uniform="m")
 
-        incard = T.card(top, "Inmappar som bevakas")
+        incard = T.card(top, "1. PDF-filer att sortera",
+                        "Välj mappen eller mapparna där dina PDF-filer finns")
         incard.grid(row=0, column=0, sticky="nsew", padx=(0, T.GAP))
         box = incard.body
         box.columnconfigure(0, weight=1)
@@ -3955,82 +9147,170 @@ class App:
 
         inbtn = ttk.Frame(box, style="CardInner.TFrame")
         inbtn.grid(row=0, column=2, sticky="n", padx=T.INNER, pady=T.INNER)
-        ttk.Button(inbtn, text="Lägg till…", width=12,
+        ttk.Button(inbtn, text="Lägg till mapp…", width=15,
                    command=self._add_input_dir).pack(fill="x")
         ttk.Button(inbtn, text="Ta bort", width=12,
                    command=self._remove_input_dir).pack(fill="x", pady=6)
         ttk.Button(inbtn, text="Öppna", width=12,
                    command=self._open_selected_input).pack(fill="x")
 
-        outcard = T.card(top, "Utmapp", "undermapparna skapas här")
+        outcard = T.card(top, "2. Arkivmapp", "sorterade filer sparas här")
         outcard.grid(row=0, column=1, sticky="nsew")
         outbox = outcard.body
         outbox.columnconfigure(0, weight=1)
         self.var_out = tk.StringVar(value=self.settings.get("output_dir", ""))
-        ttk.Entry(outbox, textvariable=self.var_out).grid(
-            row=0, column=0, columnspan=2, sticky="ew",
-            padx=T.INNER, pady=(T.INNER, 8))
+        out_entry = ttk.Entry(outbox, textvariable=self.var_out)
+        out_entry.grid(row=0, column=0, columnspan=2, sticky="ew",
+                       padx=T.INNER, pady=(T.INNER, 8))
+        out_entry.bind("<FocusOut>", lambda _event: self._collect_settings())
         ttk.Button(outbox, text="Bläddra…", command=lambda: self._pick(self.var_out)
                    ).grid(row=1, column=0, sticky="ew", padx=(T.INNER, 4),
                           pady=(0, T.INNER))
         ttk.Button(outbox, text="Öppna mappen", command=self.open_output
                    ).grid(row=1, column=1, sticky="ew", padx=(0, T.INNER),
                           pady=(0, T.INNER))
+        ttk.Button(outbox, text="Sök och jämför PDF:er…",
+                   command=self._open_archive_search).grid(
+                       row=2, column=0, columnspan=2, sticky="ew",
+                       padx=T.INNER, pady=(0, 4))
+        ttk.Button(outbox, text="Kontrollera arkivet…",
+                   command=self._open_archive_audit).grid(
+                       row=3, column=0, columnspan=2, sticky="ew",
+                       padx=T.INNER, pady=(0, T.INNER))
         outbox.columnconfigure(0, weight=1)
         outbox.columnconfigure(1, weight=1)
 
-        # -- rad 2: handlingsraden ----------------------------------------
+        self._sort_top_compact = None
+        def layout_folder_cards(_event=None):
+            compact = top.winfo_width() < 920
+            if compact == self._sort_top_compact:
+                return
+            self._sort_top_compact = compact
+            if compact:
+                incard.grid_configure(row=0, column=0, padx=0,
+                                      pady=(0, T.GAP))
+                outcard.grid_configure(row=1, column=0, padx=0, pady=0)
+                top.columnconfigure(0, weight=1, uniform="m")
+                top.columnconfigure(1, weight=0, uniform="m")
+            else:
+                incard.grid_configure(row=0, column=0,
+                                      padx=(0, T.GAP), pady=0)
+                outcard.grid_configure(row=0, column=1, padx=0, pady=0)
+                top.columnconfigure(0, weight=3, uniform="m")
+                top.columnconfigure(1, weight=2, uniform="m")
+
+        top.bind("<Configure>", layout_folder_cards, add="+")
+        self.root.after_idle(layout_folder_cards)
+
+        # -- steg 3: sortera eller bevaka --------------------------------
         # Det viktigaste på hela fliken. Egen vit yta så att knappen
         # "Sortera nu" läses som fönstrets primära åtgärd.
         actcard = ttk.Frame(f, style="Card.TFrame")
-        actcard.grid(row=1, column=0, sticky="ew", padx=T.PAD, pady=(T.GAP, 0))
-        actcard.columnconfigure(2, weight=1)
-
+        actcard.grid(row=2, column=0, sticky="ew", padx=T.PAD, pady=(T.GAP, 0))
+        actcard.columnconfigure(3, weight=1)
         self.btn_sort = ttk.Button(actcard, text="Sortera nu",
                                    style="Accent.TButton", command=self._sort_now)
-        self.btn_sort.grid(row=0, column=0, padx=(T.INNER, 8), pady=T.INNER)
+        self.btn_cancel_sort = ttk.Button(
+            actcard, text="Avbryt sortering", state="disabled",
+            command=self._cancel_sorting)
         self.btn_watch = ttk.Button(actcard, text="Starta bevakning",
                                     command=self._toggle_watch)
-        self.btn_watch.grid(row=0, column=1, pady=T.INNER)
+        watch_status = ttk.Frame(actcard, style="CardInner.TFrame")
+        self.lbl_watch = ttk.Label(watch_status, text="● Bevakning: AV",
+                                   style="PillMuted.TLabel")
+        self.lbl_watch_activity = ttk.Label(
+            watch_status, text="Senast hittad: aldrig · autosorterad: aldrig",
+            style="CardMuted.TLabel", wraplength=360, justify="left")
+        self.lbl_watch.pack(anchor="w")
+        self.lbl_watch_activity.pack(anchor="w", pady=(2, 0))
 
-        self.lbl_watch = ttk.Label(actcard, text="●  Bevakning av",
-                                   style="CardMuted.TLabel")
-        self.lbl_watch.grid(row=0, column=2, sticky="w", padx=14)
-
-        # Tre siffror som svarar på "hur går det?" utan att man läser loggen.
+        # Tre siffror svarar på hur körningen går utan att behöva läsa loggen.
         stats = ttk.Frame(actcard, style="CardInner.TFrame")
-        stats.grid(row=0, column=3, sticky="e", padx=(0, 8))
         self.stat_labels: Dict[str, Any] = {}
         for i, (key, caption) in enumerate((("sorted", "sorterade"),
                                             ("queue", "att granska"),
                                             ("errors", "fel"))):
             cell = ttk.Frame(stats, style="CardInner.TFrame")
-            cell.grid(row=0, column=i, padx=(0 if i == 0 else 22, 0))
+            cell.grid(row=0, column=i, padx=(0 if i == 0 else 16, 0))
             num = ttk.Label(cell, text="0", style="CardHead.TLabel")
             num.pack()
             ttk.Label(cell, text=caption, style="CardMuted.TLabel").pack()
             self.stat_labels[key] = num
 
         self.progress = ttk.Progressbar(actcard, mode="determinate", length=170)
-        self.progress.grid(row=0, column=4, padx=(14, 0))
-
-        # Statuspiller: testkörning och procent syns vid en blick, i tema-
-        # systemets egna pillytor i stället för utspridda färgattribut.
         self.pill_dry = ttk.Label(actcard, text="TESTKÖRNING",
                                   style="PillWarn.TLabel")
-        self.pill_dry.grid(row=0, column=5, padx=(10, 0))
-        self.lbl_progress = ttk.Label(actcard, text="", width=6,
-                                      style="CardMuted.TLabel")
-        self.lbl_progress.grid(row=0, column=6, padx=(6, T.INNER))
+        self.lbl_progress = ttk.Label(actcard, text="", width=16,
+                                      style="CardMuted.TLabel", anchor="e")
 
-        # -- rad 3: loggen -------------------------------------------------
-        logcard = T.card(f, "Logg", "senaste händelserna")
-        logcard.grid(row=2, column=0, sticky="nsew", padx=T.PAD,
+        self._action_compact = None
+        def layout_actions(_event=None):
+            compact = actcard.winfo_width() < 860
+            if compact == self._action_compact:
+                return
+            self._action_compact = compact
+            if compact:
+                self.btn_sort.grid_configure(row=0, column=0, padx=(T.INNER, 6))
+                self.btn_cancel_sort.grid_configure(row=0, column=1, padx=6)
+                self.btn_watch.grid_configure(row=0, column=2, padx=6)
+                watch_status.grid_configure(row=1, column=0, columnspan=3,
+                                            sticky="ew", padx=T.INNER,
+                                            pady=(0, 4))
+                # Keep the three counters on their own full-width row. The
+                # progress bar used to share their row and could cover the
+                # rightmost "fel" counter in a compact window.
+                stats.grid_configure(row=2, column=0, columnspan=3,
+                                     sticky="w", padx=T.INNER)
+                self.progress.grid_configure(row=3, column=0, columnspan=3,
+                                             sticky="ew", padx=T.INNER,
+                                             pady=(6, 0))
+                self.progress.configure(length=200)
+                self.lbl_progress.configure(width=0, anchor="w")
+                self.lbl_progress.grid_configure(row=4, column=0,
+                                                 columnspan=2, sticky="w",
+                                                 padx=T.INNER, pady=(2, 0))
+                self.pill_dry.grid_configure(row=4, column=2, sticky="e",
+                                             padx=T.INNER)
+                for col in range(3):
+                    actcard.columnconfigure(col, weight=1)
+                actcard.columnconfigure(3, weight=0)
+            else:
+                self.btn_sort.grid_configure(row=0, column=0,
+                                             padx=(T.INNER, 8))
+                self.btn_cancel_sort.grid_configure(row=0, column=1, padx=6)
+                self.btn_watch.grid_configure(row=0, column=2, padx=6)
+                watch_status.grid_configure(row=0, column=3, columnspan=1,
+                                            sticky="w", padx=14, pady=0)
+                # Keep counters on a dedicated row at every width; the
+                # progress indicator must never compete for the "fel" cell.
+                stats.grid_configure(row=1, column=0, columnspan=4,
+                                     sticky="w", padx=T.INNER)
+                self.progress.grid_configure(row=2, column=0, columnspan=2,
+                                             padx=(T.INNER, 0), pady=0,
+                                             sticky="ew")
+                self.progress.configure(length=170)
+                self.lbl_progress.configure(width=16, anchor="e")
+                self.lbl_progress.grid_configure(row=2, column=2,
+                                                 padx=(6, 8), sticky="e")
+                self.pill_dry.grid_configure(row=2, column=3,
+                                             padx=(6, T.INNER), sticky="w")
+                actcard.columnconfigure(0, weight=0)
+                actcard.columnconfigure(1, weight=0)
+                actcard.columnconfigure(2, weight=0)
+                actcard.columnconfigure(3, weight=1)
+
+        actcard.bind("<Configure>", layout_actions, add="+")
+        self.root.after_idle(layout_actions)
+
+
+        # -- aktivitet ----------------------------------------------------
+        logcard = T.card(f, "Aktivitet", "senaste händelserna")
+        logcard.grid(row=3, column=0, sticky="nsew", padx=T.PAD,
                      pady=(T.GAP, T.GAP))
         logf = logcard.body
         logf.columnconfigure(0, weight=1)
         logf.rowconfigure(0, weight=1)
-        self.logbox = tk.Text(logf, height=10, wrap="none", state="disabled",
+        self.logbox = tk.Text(logf, height=10, wrap="word", state="disabled",
                               font=T.f_mono, borderwidth=0,
                               background=self.C["surface"],
                               foreground=self.C["text"],
@@ -4061,7 +9341,7 @@ class App:
             opt.columnconfigure(c, weight=1)
 
         self.var_recursive = tk.BooleanVar(value=self.settings.get("recursive", True))
-        self.var_ask = tk.BooleanVar(value=self.settings.get("ask_when_unsure", True))
+        self.var_ask = tk.BooleanVar(value=True)
         self.var_ocr = tk.BooleanVar(value=self.settings.get("ocr_enabled", True))
         self.var_dry = tk.BooleanVar(value=self.settings.get("dry_run", False))
         self.var_action = tk.StringVar(value=self.settings.get("action", "move"))
@@ -4071,16 +9351,20 @@ class App:
                         style="Card.TCheckbutton",
                         variable=self.var_recursive).grid(row=0, column=0, columnspan=2,
                                                           sticky="w", padx=8, pady=(6, 2))
-        ttk.Checkbutton(opt, text="Fråga när appen är osäker",
-                        style="Card.TCheckbutton",
-                        variable=self.var_ask).grid(row=0, column=2, columnspan=2,
-                                                    sticky="w", padx=8, pady=(6, 2))
-        self.var_learned = tk.BooleanVar(
-            value=self.settings.get("learned_matching", True))
-        ttk.Checkbutton(opt, text="Lärande matchning (appen lär av dina beslut)",
-                        style="Card.TCheckbutton",
-                        variable=self.var_learned).grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+        confirm_all = ttk.Checkbutton(
+            opt, text="Auto endast vid exakt stödordsträff (100%)",
+            style="Card.TCheckbutton", variable=self.var_ask)
+        confirm_all.grid(row=0, column=2, columnspan=2,
+                         sticky="w", padx=8, pady=(6, 2))
+        confirm_all.state(["disabled"])
+        ttk.Label(
+            opt,
+            text=("Stödordsförslag sparas först när du väljer dem. En kategori "
+                  "behöver 100 manuella bekräftelser och två exklusiva exakta "
+                  "stödord. Dokumenttyper lärs från dina undermappsval; vid "
+                  "osäkerhet lämnas filen för granskning."),
+            style="CardMuted.TLabel", wraplength=460, justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
         ocr_cb = ttk.Checkbutton(opt, text="OCR för skannade PDF:er",
                                  style="Card.TCheckbutton", variable=self.var_ocr)
         ocr_cb.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=2)
@@ -4120,8 +9404,27 @@ class App:
                         style="Card.TRadiobutton",
                         variable=self.var_action).pack(side="left", padx=(8, 0))
 
+        learning_actions = ttk.Frame(opt, style="CardInner.TFrame")
+        learning_actions.grid(row=4, column=0, columnspan=4, sticky="w",
+                              padx=8, pady=(4, 2))
+        ttk.Button(learning_actions, text="Testa inlärningen mot historik…",
+                   command=self._learned_backtest).pack(side="left", padx=(0, 6))
+        ttk.Button(learning_actions, text="Återbygg från historik",
+                   command=self._rebuild_learned).pack(side="left", padx=6)
+        ttk.Button(learning_actions, text="Återställ inlärning",
+                   command=self._reset_learned).pack(side="left", padx=6)
+        ttk.Button(learning_actions, text="Hantera per kategori…",
+                   command=self._manage_learned).pack(side="left", padx=6)
+        ttk.Label(
+            opt,
+            text=("Manuella val och rättelser förbättrar framtida förslag. "
+                  "Inlärda poäng kan aldrig flytta en fil; bara en exakt "
+                  "stödordsträff kan göra det."),
+            style="CardMuted.TLabel", wraplength=720, justify="left",
+        ).grid(row=5, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 4))
+
         adv = ttk.Frame(opt, style="CardInner.TFrame")
-        adv.grid(row=4, column=0, columnspan=4, sticky="w",
+        adv.grid(row=6, column=0, columnspan=4, sticky="w",
                  padx=8, pady=(8, T.INNER))
         self.var_unmatched = tk.StringVar(value=self.settings.get("unmatched_folder", ""))
         ttk.Label(adv, text="Osorterat-mapp:", style="Card.TLabel").pack(side="left")
@@ -4342,14 +9645,18 @@ class App:
         for c in range(4):
             sysbox.columnconfigure(c, weight=1)
 
-        self.var_autostart = tk.BooleanVar(value=autostart_enabled())
-        self.var_startmin = tk.BooleanVar(value=self.settings.get("start_minimized", False))
+        self.var_autostart = tk.BooleanVar(
+            value=bool(self.settings.get("autostart", False)
+                      or autostart_enabled()))
+        self.var_startmin = tk.BooleanVar(value=True)
         self.var_tray = tk.BooleanVar(value=self.settings.get("tray_enabled", True))
         self.var_close_tray = tk.BooleanVar(value=self.settings.get("close_to_tray", True))
+        self.var_min_tray = tk.BooleanVar(
+            value=self.settings.get("minimize_to_tray", True))
         self.var_autowatch = tk.BooleanVar(value=self.settings.get("autowatch_on_start", False))
+        self.var_archive_watch = tk.BooleanVar(
+            value=self.settings.get("archive_watch_enabled", True))
         self.var_notify = tk.BooleanVar(value=self.settings.get("notify", True))
-        self.var_checkupd = tk.BooleanVar(value=self.settings.get("check_updates", True))
-        self.var_autoupd = tk.BooleanVar(value=self.settings.get("auto_update", False))
 
         cb_auto = ttk.Checkbutton(sysbox, text="Starta automatiskt med datorn",
                                   style="Card.TCheckbutton",
@@ -4366,10 +9673,12 @@ class App:
                         style="Card.TCheckbutton",
                                   variable=self.var_tray)
         cb_tray.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=2)
-        ttk.Checkbutton(sysbox, text="Starta minimerad i systemfältet",
-                        style="Card.TCheckbutton",
-                        variable=self.var_startmin).grid(row=1, column=2, columnspan=2,
-                                                         sticky="w", padx=8, pady=2)
+        cb_startmin = ttk.Checkbutton(
+            sysbox, text="Starta alltid minimerad",
+            style="Card.TCheckbutton", variable=self.var_startmin)
+        cb_startmin.grid(row=1, column=2, columnspan=2, sticky="w",
+                         padx=8, pady=2)
+        cb_startmin.state(["disabled"])
         ttk.Checkbutton(sysbox, text="Krysset minimerar i stället för att avsluta",
                         style="Card.TCheckbutton",
                         variable=self.var_close_tray).grid(row=2, column=0, columnspan=2,
@@ -4378,19 +9687,35 @@ class App:
                         style="Card.TCheckbutton",
                         variable=self.var_notify).grid(row=2, column=2, columnspan=2,
                                                        sticky="w", padx=8, pady=2)
-        ttk.Checkbutton(sysbox, text="Sök uppdateringar på GitHub vid start",
-                        style="Card.TCheckbutton",
-                        variable=self.var_checkupd).grid(row=3, column=0, columnspan=2,
-                                                         sticky="w", padx=8, pady=2)
-        ttk.Checkbutton(sysbox, text="Installera uppdateringar automatiskt",
-                        style="Card.TCheckbutton",
-                        variable=self.var_autoupd).grid(row=3, column=2, columnspan=2,
-                                                        sticky="w", padx=8, pady=2)
+        ttk.Checkbutton(
+            sysbox, text="Bevaka Arkiv efter PDF-filer i fel mapp",
+            style="Card.TCheckbutton", variable=self.var_archive_watch,
+            command=self._collect_settings
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=8, pady=2)
+        # Uppdateringarna har ett eget kort längre ned (2026-10-26).
+        # Kryssrutorna låg här förut, men de hörde inte ihop med
+        # autostart och systemfält - och de syntes bara om man rullade.
+
+        # Minimering är en egen sak, skild från krysset. Standard är att
+        # fönstret stannar i aktivitetsfältet - ingen ska tappa fönstret.
+        minrad = ttk.Frame(sysbox, style="CardInner.TFrame")
+        minrad.grid(row=4, column=0, columnspan=4, sticky="w",
+                    padx=8, pady=(4, 2))
+        cb_mintray = ttk.Checkbutton(
+            minrad, text="Minimera till systemfältet (annars aktivitetsfältet)",
+            style="Card.TCheckbutton", variable=self.var_min_tray)
+        cb_mintray.pack(side="left")
+        if not tray_available():
+            cb_mintray.state(["disabled"])
 
         # -- tema: ljust eller mörkt, växlas live --
         themrad = ttk.Frame(sysbox, style="CardInner.TFrame")
-        themrad.grid(row=3, column=0, columnspan=4, sticky="w",
+        themrad.grid(row=5, column=0, columnspan=4, sticky="w",
                      padx=8, pady=(8, 2))
+        #: Menyns kryssruta för bevakning - speglar watcherns verkliga läge.
+        self.var_bevaka = tk.BooleanVar(
+            value=bool(self.watcher and self.watcher.running))
+        self.menubar = None
         self.var_theme = tk.StringVar(value=self.settings.get("theme", "ljus"))
         ttk.Label(themrad, text="Tema:", style="Card.TLabel").pack(side="left")
         for txt, val in (("Ljust", "ljus"), ("Mörkt", "mork")):
@@ -4409,9 +9734,20 @@ class App:
                             variable=self.var_contrast,
                             command=self._on_theme_radio).pack(
                 side="left", padx=(8, 0))
+        self.var_text_size = tk.StringVar(
+            value=("large" if self.settings.get("ui_text_size") == "large"
+                   else "normal"))
+        ttk.Label(themrad, text="   Text:", style="Card.TLabel"
+                  ).pack(side="left", padx=(12, 0))
+        for txt, val in (("Normal", "normal"), ("Större", "large")):
+            ttk.Radiobutton(themrad, text=txt, value=val,
+                            style="Card.TRadiobutton",
+                            variable=self.var_text_size,
+                            command=self._on_theme_radio).pack(
+                side="left", padx=(6, 0))
 
         extra = ttk.Frame(sysbox, style="CardInner.TFrame")
-        extra.grid(row=4, column=0, columnspan=4, sticky="w",
+        extra.grid(row=6, column=0, columnspan=4, sticky="w",
                    padx=8, pady=(8, T.INNER))
         ttk.Button(extra, text="Skapa genväg på skrivbordet",
                    command=self._make_shortcut).pack(side="left")
@@ -4429,7 +9765,7 @@ class App:
         self.var_sched = tk.BooleanVar(value=self.settings.get("schedule_enabled", False))
         self.var_schedtime = tk.StringVar(value=self.settings.get("schedule_time", "07:00"))
         rad5 = ttk.Frame(sysbox, style="CardInner.TFrame")
-        rad5.grid(row=5, column=0, columnspan=4, sticky="w", padx=8, pady=(6, 2))
+        rad5.grid(row=7, column=0, columnspan=4, sticky="w", padx=8, pady=(6, 2))
         ttk.Label(rad5, text="Språk:", style="Card.TLabel").pack(side="left")
         ttk.Combobox(rad5, textvariable=self.var_lang, values=["sv", "en"],
                      state="readonly", width=5).pack(side="left", padx=(4, 2))
@@ -4441,14 +9777,116 @@ class App:
         ttk.Label(rad5, text="kl.", style="Card.TLabel").pack(side="left")
         ttk.Entry(rad5, textvariable=self.var_schedtime, width=6).pack(side="left")
         rad6 = ttk.Frame(sysbox, style="CardInner.TFrame")
-        rad6.grid(row=6, column=0, columnspan=4, sticky="w", padx=8, pady=(2, 6))
+        rad6.grid(row=8, column=0, columnspan=4, sticky="w", padx=8, pady=(2, 6))
         ttk.Checkbutton(rad6, text="Skriv kategori som PDF-metadata vid sortering",
                         style="Card.TCheckbutton",
                         variable=self.var_tagpdf).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(rad6, text="Slå upp okända avsändare via nätet (org.nr)",
                         style="Card.TCheckbutton",
                         variable=self.var_orglookup).pack(side="left")
+        # -- uppdateringar (2026-10-26) --
+        # Eget kort: två tysta sökningar per dygn och tyst omstart är
+        # inställningar man vill hitta, inte snubbla över.
+        updcard = T.card(g, "Uppdateringar")
+        updcard.grid(row=6, column=0, sticky="ew", padx=T.PAD,
+                     pady=(T.GAP, T.PAD))
+        updb = updcard.body
+        for c in range(4):
+            updb.columnconfigure(c, weight=1)
+        self.var_checkupd = tk.BooleanVar(
+            value=self.settings.get("check_updates", True))
+        self.var_autoupd = tk.BooleanVar(
+            value=self.settings.get("auto_update", True))
+        self.var_tystomstart = tk.BooleanVar(
+            value=self.settings.get("silent_restart", True))
+        ttk.Checkbutton(updb, text="Sök efter ny version automatiskt (tyst)",
+                        style="Card.TCheckbutton",
+                        variable=self.var_checkupd,
+                        command=self._refresh_update_status).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
+        ttk.Checkbutton(updb,
+                        text="Installera automatiskt när paketet är verifierat",
+                        style="Card.TCheckbutton",
+                        variable=self.var_autoupd).grid(
+            row=0, column=2, columnspan=2, sticky="w", padx=8, pady=(6, 2))
+        ttk.Checkbutton(updb,
+                        text="Starta om tyst när en ny version installerats",
+                        style="Card.TCheckbutton",
+                        variable=self.var_tystomstart).grid(
+            row=1, column=0, columnspan=4, sticky="w", padx=8, pady=2)
+        updrad = ttk.Frame(updb, style="CardInner.TFrame")
+        updrad.grid(row=2, column=0, columnspan=4, sticky="ew",
+                    padx=8, pady=(2, 6))
+        self.btn_update = ttk.Button(
+            updrad, text="Sök och uppdatera", style="Accent.TButton",
+            command=lambda: self._check_updates_gui(manual=True))
+        self.btn_update.pack(side="right")
+        self.lbl_uppdatering = ttk.Label(
+            updrad, text=self._uppdatering_status_text(),
+            style="CardMuted.TLabel")
+        self.lbl_uppdatering.pack(side="left", padx=(0, 8))
         self._update_pills()
+
+        # -- smart diskcache-rensning: gammal/oanvänd cache först ---------
+        cachecard = T.card(g, "Cache och lagring",
+                           "återställs automatiskt om appen behöver texten igen")
+        cachecard.grid(row=7, column=0, sticky="ew", padx=T.PAD,
+                       pady=(T.GAP, T.PAD))
+        cacheb = cachecard.body
+        cacheb.columnconfigure(0, weight=1)
+        self.var_cache_cleanup = tk.BooleanVar(
+            value=self.settings.get("cache_cleanup_enabled", True))
+        ttk.Checkbutton(
+            cacheb, text="Rensa cache automatiskt dagligen och vid avslut",
+            style="Card.TCheckbutton", variable=self.var_cache_cleanup,
+            command=self._toggle_cache_cleanup).grid(
+                row=0, column=0, columnspan=2, sticky="w",
+                padx=8, pady=(6, 2))
+        self.var_low_memory_mode = tk.BooleanVar(
+            value=bool(self.settings.get("low_memory_mode", False)))
+        ttk.Checkbutton(
+            cacheb, text="Minska minnesanvändning i stora arkiv",
+            style="Card.TCheckbutton", variable=self.var_low_memory_mode,
+            command=self._toggle_low_memory_mode).grid(
+                row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 2))
+        ttk.Label(
+            cacheb,
+            text="Bearbetar i små omgångar och läser högst två PDF-filer parallellt "
+                 "i stället för upp till åtta. Kan minska minnestrycket; "
+                 "stora körningar kan ta längre tid.",
+            style="CardMuted.TLabel", wraplength=760, justify="left").grid(
+                row=2, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+        ttk.Label(
+            cacheb,
+            text="Smartfilter: tar bort cache som inte använts på 30 dagar, "
+                 "skadade poster vid läsning och äldsta poster över "
+                 "1 500 filer / 512 MB.",
+            style="CardMuted.TLabel", wraplength=760, justify="left").grid(
+                row=3, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+        cacherad = ttk.Frame(cacheb, style="CardInner.TFrame")
+        cacherad.grid(row=4, column=0, columnspan=2, sticky="ew",
+                      padx=8, pady=(4, 6))
+        self.lbl_cache_cleanup = ttk.Label(
+            cacherad, text=self._cache_cleanup_status_text(),
+            style="CardMuted.TLabel")
+        self.lbl_cache_cleanup.pack(side="left", fill="x", expand=True)
+        ttk.Button(cacherad, text="Rensa cache nu",
+                   command=self._rensa_cache).pack(side="right")
+        # Fellogg: fel som inte återkommit på N dagar åtgärdas och rensas
+        # automatiskt. 0 = av (helt manuell hantering i Hjälp-menyn).
+        self.var_error_autofix_days = tk.StringVar(
+            value=str(max(0, int(self.settings.get(
+                "error_autofix_days", 7) or 0))))
+        felrad = ttk.Frame(cacheb, style="CardInner.TFrame")
+        felrad.grid(row=5, column=0, columnspan=2, sticky="ew",
+                    padx=8, pady=(2, 6))
+        ttk.Label(felrad, text="Åtgärda automatiskt fel som inte återkommit på",
+                  style="Card.TLabel").pack(side="left")
+        ttk.Spinbox(felrad, from_=0, to=90, width=4,
+                    textvariable=self.var_error_autofix_days).pack(
+                        side="left", padx=6)
+        ttk.Label(felrad, text="dagar (0 = av)",
+                  style="Card.TLabel").pack(side="left")
 
     def _update_stats(self, sorted_n: Optional[int] = None,
                       errors: Optional[int] = None) -> None:
@@ -4472,6 +9910,85 @@ class App:
             lbl.configure(foreground=(self.C[tones[key]] if n
                                       else self.C["text_faint"]))
 
+    def _ask_locked_file(self, path: Path) -> bool:
+        """Varna på Tk-tråden, be användaren stänga filen och försöka igen."""
+        lock = getattr(self, "_locked_dialog_lock", None)
+        if lock is None:
+            return False
+        if threading.current_thread() is getattr(self, "_main_thread", None):
+            # Blockera inte en nästlad Tk-loop om en annan varning redan visas.
+            if not lock.acquire(blocking=False):
+                return False
+            try:
+                return self._show_locked_file_warning(path)
+            finally:
+                lock.release()
+                self._resume_queue_after_locked_warning()
+
+        if not lock.acquire(timeout=120):
+            return False
+        finished = threading.Event()
+        answer = {"retry": False}
+
+        def show() -> None:
+            if self._review_is_open():
+                try:
+                    self.root.after(150, show)
+                except Exception:
+                    finished.set()
+                return
+            try:
+                answer["retry"] = self._show_locked_file_warning(path)
+            finally:
+                finished.set()
+
+        try:
+            self._post(show)
+            if not finished.wait(120):
+                session_log("sortering", f"Timeout på låst-fil-dialog: {path}",
+                            "warn")
+                return False
+            return answer["retry"]
+        finally:
+            lock.release()
+            self._resume_queue_after_locked_warning()
+
+    def _resume_queue_after_locked_warning(self) -> None:
+        if (getattr(self, "queue", None)
+                and not getattr(self, "_closing", False)):
+            self._post(self._process_queue)
+
+    def _show_locked_file_warning(self, path: Path) -> bool:
+        """Dialogens innehåll hålls på ett ställe för batch och bevakning."""
+        if getattr(self, "_closing", False) or self._review_is_open():
+            return False
+        try:
+            if not self.root.winfo_exists():
+                return False
+            if not getattr(self, "visible", True):
+                # Visa ägarfönstret så varningen inte hamnar bakom tray-starten;
+                # undvik show_window(), som annars kan öppna granskningskön.
+                self.root.deiconify()
+                self.root.state("normal")
+                self.root.lift()
+                self.root.focus_force()
+                self.visible = True
+                self._sync_tray()
+        except Exception:
+            return False
+        session_log("sortering", f"Filen verkar vara låst: {path}", "warn")
+        try:
+            return bool(self.messagebox.askretrycancel(
+                "Filen används",
+                f"ArkivPiloten kan inte flytta filen eftersom den verkar vara "
+                f"öppen eller låst:\n\n{path.name}\n\n"
+                "Stäng filen i programmet där den är öppen och välj "
+                "Försök igen. Välj Avbryt för att låta filen ligga kvar.",
+                parent=self.root))
+        except Exception as exc:
+            session_error("låst-fil-dialog", exc)
+            return False
+
     def _ask_conflict(self, src: Path, target: Path, kind: str) -> str:
         """REQ-N4: visa dubblettfrågan och vänta på svaret.
 
@@ -4483,25 +10000,75 @@ class App:
         return _conflict_ask_impl(self, src, target, kind)
 
     def _on_theme_radio(self) -> None:
-        self._set_theme(self.var_theme.get() == "mork",
-                        contrast=self.var_contrast.get())
+        self._set_theme(
+            self.var_theme.get() == "mork",
+            contrast=self.var_contrast.get(),
+            text_size=self.var_text_size.get())
 
-    def _set_theme(self, dark: bool, contrast: str = "normal") -> None:
-        """Byt tema live: ttk-stilarna är namngivna och ritas om direkt;
-        de råa Tk-widgetarna (listor, logg, textfält) får nya färger här."""
+    def _set_theme(self, dark: bool, contrast: str = "normal",
+                   text_size: Optional[str] = None) -> None:
+        """Byt tema och textstorlek live utan att bygga om flikarna."""
+        text_size = text_size or self.settings.get("ui_text_size", "normal")
+        text_size = "large" if text_size == "large" else "normal"
         if (bool(getattr(self.theme, "dark", False)) == dark
-                and getattr(self.theme, "contrast", "normal") == contrast):
+                and getattr(self.theme, "contrast", "normal") == contrast
+                and self.settings.get("ui_text_size", "normal") == text_size):
             return
+        old_theme = self.theme
         self.settings["theme"] = "mork" if dark else "ljus"
         self.settings["contrast"] = contrast
+        self.settings["ui_text_size"] = text_size
         save_settings(self.settings)
-        self.theme = Theme(self.root, self.ttk, dark=dark, contrast=contrast)
+        self.theme = Theme(
+            self.root, self.ttk, dark=dark, contrast=contrast,
+            text_scale=1.25 if text_size == "large" else 1.0)
         self.C = self.theme.c
         self._retint_raw()
+        self._replace_raw_fonts(old_theme, self.theme)
         self._update_pills()
         self.root.after(60, lambda: dark_titlebar(self.root, bool(dark)))
         self._log(f"Tema: {'mörkt' if dark else 'ljust'}, "
-                  f"kontrast: {contrast}.", "info")
+                  f"kontrast: {contrast}, text: "
+                  f"{'större' if text_size == 'large' else 'normal'}.", "info")
+
+    def _replace_raw_fonts(self, old_theme, new_theme) -> None:
+        """Behåll råa Tk-widgetars typografiska nivå när textstorleken ändras."""
+        pairs = ((old_theme.f_base, new_theme.f_base),
+                 (old_theme.f_small, new_theme.f_small),
+                 (old_theme.f_tiny, new_theme.f_tiny),
+                 (old_theme.f_bold, new_theme.f_bold),
+                 (old_theme.f_head, new_theme.f_head),
+                 (old_theme.f_title, new_theme.f_title),
+                 (old_theme.f_huge, new_theme.f_huge),
+                 (old_theme.f_mono, new_theme.f_mono),
+                 (old_theme.f_mono_bold, new_theme.f_mono_bold))
+        mapping = {tuple(before): after for before, after in pairs}
+
+        def visit(widget) -> None:
+            try:
+                current = widget.cget("font")
+                if isinstance(current, (tuple, list)):
+                    replacement = mapping.get(tuple(current))
+                    if replacement:
+                        widget.configure(font=replacement)
+            except Exception:
+                pass
+            try:
+                children = widget.winfo_children()
+            except Exception:
+                children = ()
+            for child in children:
+                visit(child)
+
+        visit(self.root)
+        for tag, attr in (("h1", "f_title"), ("h2", "f_head"),
+                          ("body", "f_base"), ("bullet", "f_base"),
+                          ("code", "f_mono"), ("note", "f_small"),
+                          ("key", "f_bold")):
+            try:
+                self.help_text.tag_configure(tag, font=getattr(new_theme, attr))
+            except Exception:
+                pass
 
     def _retint_raw(self) -> None:
         """Färglägg om råa Tk-widgets efter temabyte (de följer inte ttk)."""
@@ -4541,7 +10108,7 @@ class App:
             t.tag_configure("note", foreground=c["text_muted"])
         except Exception:
             pass
-        for tree in ("cat_tree", "kw_tree", "q_tree", "h_tree"):
+        for tree in ("kw_tree", "q_tree", "h_tree"):
             try:
                 self.theme.zebra(getattr(self, tree))
             except Exception:
@@ -4559,13 +10126,57 @@ class App:
         if not hasattr(self, "pill_dry"):
             return
         watching = bool(self.watcher and self.watcher.running)
-        self.lbl_watch.configure(
-            text="● Bevakning: PÅ" if watching else "● Bevakning: AV",
-            style="PillOk.TLabel" if watching else "PillMuted.TLabel")
+        archive_watching = bool(self.archive_watcher and self.archive_watcher.running)
+        if watching and archive_watching:
+            watch_text, watch_style = "● Bevakning: PÅ · inmappar + Arkiv", "PillOk.TLabel"
+        elif watching:
+            watch_text, watch_style = "● Bevakning: PÅ · inmappar", "PillOk.TLabel"
+        elif archive_watching:
+            watch_text, watch_style = "● Arkivkontroll: PÅ", "PillOk.TLabel"
+        else:
+            watch_text, watch_style = "● Bevakning: AV", "PillMuted.TLabel"
+        self.lbl_watch.configure(text=watch_text, style=watch_style)
+        self._refresh_watch_activity()
         if self.var_dry.get():
             self.pill_dry.grid()
         else:
             self.pill_dry.grid_remove()
+
+    def _watch_activity_text(self) -> str:
+        lock = getattr(self, "_watch_status_lock", None)
+        if lock is None:
+            found = getattr(self, "_watch_last_found", None)
+            sorted_at = getattr(self, "_watch_last_sorted", None)
+        else:
+            with lock:
+                found = self._watch_last_found
+                sorted_at = self._watch_last_sorted
+        found_text = tid_kort(found.isoformat()) if found else "aldrig"
+        sorted_text = tid_kort(sorted_at.isoformat()) if sorted_at else "aldrig"
+        return (f"Senast hittad: {found_text} · "
+                f"autosorterad: {sorted_text}")
+
+    def _refresh_watch_activity(self) -> None:
+        label = getattr(self, "lbl_watch_activity", None)
+        if label is not None:
+            label.configure(text=self._watch_activity_text())
+
+    def _note_watch_activity(self, *, found: bool = False,
+                             sorted_file: bool = False) -> None:
+        now = datetime.now()
+        lock = getattr(self, "_watch_status_lock", None)
+        if lock is None:
+            if found:
+                self._watch_last_found = now
+            if sorted_file:
+                self._watch_last_sorted = now
+        else:
+            with lock:
+                if found:
+                    self._watch_last_found = now
+                if sorted_file:
+                    self._watch_last_sorted = now
+        self._post(self._refresh_watch_activity)
 
     def _on_strictness(self, initial: bool = False) -> None:
         """Nivåvalet fyller i fälten och låser dem, utom vid "Egen"."""
@@ -4608,7 +10219,7 @@ class App:
         else:
             self._log("Datumsortering av - filer läggs direkt i "
                       "kategorimappen.", "info")
-        if hasattr(self, "cat_tree"):
+        if hasattr(self, "cat_combo"):
             self._on_cat_select()
 
     def _pick(self, var) -> None:
@@ -4616,6 +10227,8 @@ class App:
         chosen = self.filedialog.askdirectory(initialdir=cur, parent=self.root)
         if chosen:
             var.set(chosen)
+            if var is getattr(self, "var_out", None):
+                self._collect_settings()
 
     # -- inmappar ---------------------------------------------------------
     def input_dirs(self) -> List[str]:
@@ -4673,6 +10286,7 @@ class App:
         self.settings["input_dir"] = dirs[0]
         save_settings(self.settings)
         self._refresh_input_list()
+        self._sync_archive_watch()
         self._log(f"Lade till inmapp: {chosen}", "info")
         if self.watcher and self.watcher.running:
             self._restart_watch()
@@ -4690,6 +10304,7 @@ class App:
         self.settings["input_dir"] = dirs[0] if dirs else ""
         save_settings(self.settings)
         self._refresh_input_list()
+        self._sync_archive_watch()
         if self.watcher and self.watcher.running:
             self._restart_watch()
 
@@ -4797,6 +10412,7 @@ class App:
         self.settings["exclude_dirs"] = exc
         save_settings(self.settings)
         self._refresh_excludes()
+        self._sync_archive_watch()
         self._log(f"Undantagen mapp (hoppas över): {chosen}", "info")
         if self.watcher and self.watcher.running:
             self._restart_watch()
@@ -4813,6 +10429,7 @@ class App:
         self.settings["exclude_dirs"] = exc
         save_settings(self.settings)
         self._refresh_excludes()
+        self._sync_archive_watch()
         if self.watcher and self.watcher.running:
             self._restart_watch()
 
@@ -4823,6 +10440,508 @@ class App:
         else:
             self.messagebox.showinfo(APP_NAME, "Ingen giltig utmapp vald än.",
                                      parent=self.root)
+
+    def _open_archive_audit(self) -> None:
+        """Scan the archive for damaged, unreadable and duplicate PDF files."""
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if not output or not Path(output).is_dir():
+            self.messagebox.showinfo(
+                APP_NAME, "Välj först en giltig arkivmapp på fliken Start.",
+                parent=self.root)
+            return
+        tk, ttk = self.tk, self.ttk
+        english = self.settings.get("ui_language", "sv") == "en"
+        text_for = lambda sv, en: en if english else sv
+        win = tk.Toplevel(self.root)
+        win._icon_ref = brand_window(win)
+        win.title(text_for("Arkivkontroll · läsrapport",
+                           "Archive check · read-only report"))
+        win.transient(self.root)
+        win.geometry("1050x650")
+        win.minsize(700, 440)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(1, weight=1)
+        header = ttk.Frame(win, style="CardInner.TFrame")
+        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 4))
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text=text_for("Kontrollera arkivet", "Check archive"),
+                  style="CardTitle.TLabel").grid(
+                      row=0, column=0, sticky="w")
+        status = ttk.Label(
+            header, text=text_for(
+                "Kontrollen är endast läsande: inga filer flyttas eller ändras.",
+                "Read-only check: no files are moved or changed."),
+            style="CardMuted.TLabel", wraplength=680, justify="right")
+        status.grid(row=0, column=1, sticky="e", padx=(12, 0))
+        frame = ttk.Frame(win, style="Card.TFrame")
+        frame.grid(row=1, column=0, sticky="nsew", padx=14, pady=10)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        cols = ("level", "kind", "path", "details")
+        tree = ttk.Treeview(frame, columns=cols, show="headings")
+        for col, heading, width in (
+                ("level", text_for("NIVÅ", "LEVEL"), 90),
+                ("kind", text_for("HITTAD SAK", "FINDING"), 210),
+                ("path", text_for("FIL / PLATS", "FILE / LOCATION"), 330),
+                ("details", text_for("DETALJER", "DETAILS"), 430)):
+            tree.heading(col, text=heading)
+            tree.column(col, width=width, minwidth=90,
+                        stretch=(col in {"path", "details"}))
+        tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=8)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.tag_configure("error", foreground=self.C["err"])
+        tree.tag_configure("warning", foreground=self.C["warn"])
+        tree.tag_configure("info", foreground=self.C["text_muted"])
+        ttk.Button(win, text=text_for("Stäng", "Close"),
+                   command=win.destroy).grid(
+            row=2, column=0, sticky="e", padx=16, pady=(0, 12))
+
+        status.configure(text=text_for("Söker igenom arkivets mappar…",
+                                       "Scanning archive folders…"))
+
+        def worker() -> None:
+            try:
+                files = list_pdfs(Path(output), recursive=True)
+                self._post(lambda: update_status(len(files)))
+                report = audit_archive(files, root=Path(output))
+                self._post(lambda: finish(report, ""))
+            except Exception as exc:
+                self._post(lambda exc=exc: finish({}, str(exc)))
+
+        def update_status(count: int) -> None:
+            try:
+                if win.winfo_exists():
+                    status.configure(text=(
+                        f"Checking {count} PDF files…" if english else
+                        f"Kontrollerar {count} PDF-filer…"))
+            except Exception:
+                pass
+
+        def finish(report: Dict[str, Any], error: str) -> None:
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            if error:
+                status.configure(text=(f"Check failed: {error}" if english else
+                                       f"Kontrollen misslyckades: {error}"))
+                return
+            issues = report.get("issues", [])
+            for row in issues[:5000]:
+                level = row["level"]
+                label = ({"error": "Error", "warning": "Review",
+                          "info": "Info"} if english else
+                         {"error": "Fel", "warning": "Kontrollera",
+                          "info": "Info"}).get(level, level)
+                tree.insert("", "end", values=(
+                    label, row["kind"], row["path"], row["details"]),
+                    tags=(level,))
+            if len(issues) > 5000:
+                tree.insert("", "end", values=(
+                    "Info", "Resultatgräns", "", "Endast de första 5 000 visas."),
+                    tags=("info",))
+            if not issues:
+                status.configure(text=(
+                    f"Checked {report.get('checked', 0)} PDF files. No known issues found."
+                    if english else
+                    f"Kontrollerade {report.get('checked', 0)} PDF-filer. "
+                    "Inga kända problem hittades."))
+            else:
+                errors = sum(issue["level"] == "error" for issue in issues)
+                warnings = sum(issue["level"] == "warning" for issue in issues)
+                status.configure(text=(
+                    f"Checked {report.get('checked', 0)} PDFs · {errors} errors · "
+                    f"{warnings} items to review · {len(issues)} findings. "
+                    "Nothing was changed." if english else
+                    f"Kontrollerade {report.get('checked', 0)} PDF-filer · "
+                    f"{errors} fel · {warnings} saker att granska · "
+                    f"{len(issues)} observationer. Inget har ändrats."))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="arkivkontroll").start()
+
+    def _open_archive_search(self) -> None:
+        """Open a read-only local search, compare and page-overview window."""
+        existing = getattr(self, "_archive_search_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    return
+            except Exception:
+                pass
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if not output or not Path(output).is_dir():
+            self.messagebox.showinfo(
+                APP_NAME, "Välj först en giltig arkivmapp på fliken Start.",
+                parent=self.root)
+            return
+
+        tk, ttk = self.tk, self.ttk
+        english = self.settings.get("ui_language", "sv") == "en"
+        text_for = lambda sv, en: en if english else sv
+        win = tk.Toplevel(self.root)
+        self._archive_search_window = win
+        win._icon_ref = brand_window(win)
+        win.title(text_for("Sök och jämför i arkivet", "Search and compare in archive"))
+        win.transient(self.root)
+        win.geometry("1040x690")
+        win.minsize(720, 470)
+        win.columnconfigure(0, weight=1)
+        ttk.Label(win, text=text_for("Sök i ditt PDF-arkiv",
+                                      "Search your PDF archive"),
+                  style="CardTitle.TLabel").grid(
+                      row=0, column=0, sticky="w", padx=16, pady=(14, 4))
+        ttk.Label(win,
+                  text=text_for(
+                      "Sökningen är lokal och ändrar inte dokumenten. "
+                      "Träffar visar sida och textutdrag.",
+                      "Search runs locally and does not change documents. "
+                      "Results show the page and a text excerpt."),
+                  style="CardMuted.TLabel", wraplength=950).grid(
+                      row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+
+        query_bar = ttk.Frame(win, style="Card.TFrame")
+        query_bar.grid(row=2, column=0, sticky="new", padx=14, pady=(0, 8))
+        query_bar.columnconfigure(0, weight=1)
+        query = tk.StringVar()
+        entry = ttk.Entry(query_bar, textvariable=query)
+        entry.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        status = ttk.Label(
+            query_bar, text=text_for("Ange ett ord eller en fras.",
+                                    "Enter a word or phrase."),
+            style="CardMuted.TLabel")
+        status.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 8))
+        controls = ttk.Frame(query_bar, style="CardInner.TFrame")
+        controls.grid(row=0, column=1, rowspan=2, sticky="e", padx=10, pady=8)
+
+        table_box = ttk.Frame(win, style="Card.TFrame")
+        table_box.grid(row=3, column=0, sticky="nsew", padx=14, pady=(0, 8))
+        win.rowconfigure(3, weight=1)
+        table_box.columnconfigure(0, weight=1)
+        table_box.rowconfigure(0, weight=1)
+        columns = ("file", "page", "snippet")
+        tree = ttk.Treeview(table_box, columns=columns, show="headings",
+                            selectmode="extended")
+        tree.heading("file", text="PDF")
+        tree.heading("page", text=text_for("Sida", "Page"))
+        tree.heading("snippet", text=text_for("Textutdrag", "Text excerpt"))
+        tree.column("file", width=280, minwidth=130, stretch=False)
+        tree.column("page", width=65, minwidth=55, anchor="center", stretch=False)
+        tree.column("snippet", width=600, minwidth=180, stretch=True)
+        tree.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        scroll = ttk.Scrollbar(table_box, orient="vertical", command=tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=10)
+        tree.configure(yscrollcommand=scroll.set)
+        buttons = ttk.Frame(win, style="CardInner.TFrame")
+        buttons.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 12))
+        buttons.columnconfigure(0, weight=1)
+        state = {"rows": [], "busy": False, "cancel": threading.Event()}
+
+        def alive() -> bool:
+            try:
+                return bool(win.winfo_exists())
+            except Exception:
+                return False
+
+        def close_window() -> None:
+            state["cancel"].set()
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self._archive_search_window = None
+
+        def run_search(_event=None) -> None:
+            term = query.get().strip()
+            if not term:
+                status.configure(text=text_for("Skriv först ett ord eller en fras.",
+                                               "Enter a word or phrase first."))
+                entry.focus_set()
+                return
+            if state["busy"]:
+                return
+            state["busy"] = True
+            state["cancel"] = threading.Event()
+            cancel = state["cancel"]
+            for item in tree.get_children():
+                tree.delete(item)
+            state["rows"] = []
+            root = Path(output)
+            files = list_pdfs(root, recursive=True)
+            status.configure(text=(
+                f"Searching {len(files)} PDF files…" if english else
+                f"Söker i {len(files)} PDF-filer…"))
+            search_button.configure(state="disabled")
+
+            def worker() -> None:
+                found: List[Dict[str, Any]] = []
+                errors = 0
+                ocr_partial = 0
+                limited = False
+                for number, path in enumerate(files, 1):
+                    if cancel.is_set():
+                        return
+                    try:
+                        extraction = read_pdf(path, self.settings)
+                        if extraction.error:
+                            errors += 1
+                        else:
+                            if (extraction.used_ocr and extraction.page_count
+                                    and extraction.pages_read < extraction.page_count):
+                                ocr_partial += 1
+                            found.extend(search_extracted_pages(
+                                path, extraction.text, term))
+                            if len(found) >= 5000:
+                                found[:] = found[:5000]
+                                limited = True
+                                break
+                    except Exception as exc:
+                        errors += 1
+                        session_error("arkivsökning", exc)
+                    if number % 20 == 0:
+                        text = (f"Searching… {number} of {len(files)} PDF files"
+                                if english else
+                                f"Söker… {number} av {len(files)} PDF-filer")
+                        self._post(lambda text=text: (
+                            status.configure(text=text) if alive() else None))
+                self._post(lambda: finish(found, errors, ocr_partial, term,
+                                          len(files), limited))
+
+            threading.Thread(target=worker, daemon=True,
+                             name="arkivsökning").start()
+
+        def finish(found: List[Dict[str, Any]], errors: int,
+                   ocr_partial: int, term: str, file_count: int,
+                   limited: bool) -> None:
+            if not alive():
+                return
+            state["busy"] = False
+            state["rows"] = found
+            for index, hit in enumerate(found):
+                path = Path(hit["path"])
+                try:
+                    display_path = str(path.relative_to(Path(output)))
+                except ValueError:
+                    display_path = path.name
+                tree.insert("", "end", iid=f"hit{index}", values=(
+                    display_path, hit["page"], hit["snippet"]))
+            message = (f"{len(found)} matches for ‘{term}’ in {file_count} PDF files."
+                       if english else
+                       f"{len(found)} träffar för ‘{term}’ i {file_count} PDF-filer.")
+            if errors:
+                message += (f" {errors} files could not be read." if english else
+                            f" {errors} filer kunde inte läsas.")
+            if limited:
+                message += (" Showing the first 5,000 matches." if english else
+                            " Visar de första 5 000 träffarna.")
+            if ocr_partial:
+                message += (f" OCR read only the configured first pages in "
+                            f"{ocr_partial} scanned PDFs." if english else
+                            f" OCR läste bara de inställda första sidorna i "
+                            f"{ocr_partial} skannade PDF-filer.")
+            status.configure(text=message)
+            search_button.configure(state="normal")
+
+        def selected_paths() -> List[Path]:
+            paths = []
+            seen = set()
+            for item in tree.selection():
+                try:
+                    index = int(item[3:])
+                    path = Path(state["rows"][index]["path"])
+                except (ValueError, IndexError, KeyError):
+                    continue
+                key = os.path.normcase(os.path.abspath(str(path)))
+                if key not in seen:
+                    seen.add(key)
+                    paths.append(path)
+            return paths
+
+        def compare_selected() -> None:
+            paths = selected_paths()
+            if len(paths) != 2:
+                self.messagebox.showinfo(
+                    APP_NAME, text_for(
+                        "Markera träffar i exakt två olika PDF-filer "
+                        "för att jämföra dem.",
+                        "Select results from exactly two different PDFs to compare."),
+                    parent=win)
+                return
+            report = tk.Toplevel(win)
+            report._icon_ref = brand_window(report)
+            report.title(text_for("Jämför PDF-dokument", "Compare PDF documents"))
+            report.transient(win)
+            _fit_geometry(report, 900, 680, 600, 400)
+            report.columnconfigure(0, weight=1)
+            report.rowconfigure(1, weight=1)
+            heading = ttk.Label(
+                report, text=text_for("Jämför text per sida…",
+                                      "Comparing text page by page…"),
+                style="CardTitle.TLabel", wraplength=820)
+            heading.grid(row=0, column=0, sticky="w", padx=14, pady=12)
+            body = ttk.Frame(report, style="Card.TFrame")
+            body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 10))
+            body.columnconfigure(0, weight=1)
+            body.rowconfigure(0, weight=1)
+            text = tk.Text(body, wrap="word", state="disabled", padx=12, pady=10,
+                           background=self.C["surface"], foreground=self.C["text"],
+                           font=self.theme.f_base, borderwidth=0)
+            text.grid(row=0, column=0, sticky="nsew")
+            text_scroll = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+            text_scroll.grid(row=0, column=1, sticky="ns")
+            text.configure(yscrollcommand=text_scroll.set)
+
+            def compare_worker() -> None:
+                try:
+                    left = read_pdf(paths[0], self.settings)
+                    right = read_pdf(paths[1], self.settings)
+                    same_bytes = sha256_file(paths[0]) == sha256_file(paths[1])
+                    changes = compare_extracted_pages(left.text, right.text)
+                    result = (left, right, same_bytes, changes, "")
+                except Exception as exc:
+                    result = (None, None, False, [], str(exc))
+                self._post(lambda: show_comparison(result))
+
+            def show_comparison(result) -> None:
+                if not report.winfo_exists():
+                    return
+                left, right, same_bytes, changes, error = result
+                if error:
+                    heading.configure(text=f"Jämförelsen misslyckades: {error}")
+                    return
+                heading.configure(text=("Innehåll identiskt byte för byte" if same_bytes
+                                        else "Jämförelse klar · originalfilerna är oförändrade"))
+                lines = [f"A: {paths[0]}\nB: {paths[1]}",
+                         f"Sidor: {left.page_count} mot {right.page_count}"]
+                if left.error or right.error:
+                    lines.append("Varning: minst en PDF kunde inte läsas helt.")
+                if same_bytes:
+                    lines.append("\nFilerna har samma SHA-256-kontrollsumma.")
+                elif not changes:
+                    lines.append("\nDen extraherade sidtexten matchar, men filerna ")
+                    lines.append("skiljer sig i metadata, skanning eller formatering.")
+                else:
+                    lines.append(f"\nOlika sidor: {len(changes)} (högst 20 visas)")
+                    for change in changes:
+                        lines.append(f"\nSida {change['page']} · {change['kind']}")
+                        if change["before"]:
+                            lines.append(f"  A: {change['before']}")
+                        if change["after"]:
+                            lines.append(f"  B: {change['after']}")
+                text.configure(state="normal")
+                text.insert("1.0", "\n".join(lines))
+                text.configure(state="disabled")
+
+            threading.Thread(target=compare_worker, daemon=True,
+                             name="jämför-pdf").start()
+
+        def show_contact_sheet() -> None:
+            paths = selected_paths()
+            if not paths:
+                self.messagebox.showinfo(
+                    APP_NAME, text_for("Markera en träff för att visa sidöversikten.",
+                                       "Select a result to show the page overview."),
+                    parent=win)
+                return
+            path = paths[0]
+            sheet = tk.Toplevel(win)
+            sheet._icon_ref = brand_window(sheet)
+            sheet.title(text_for(f"Sidöversikt · {path.name}",
+                                 f"Page overview · {path.name}"))
+            sheet.transient(win)
+            _fit_geometry(sheet, 1080, 760, 640, 440)
+            sheet.columnconfigure(0, weight=1)
+            sheet.rowconfigure(1, weight=1)
+            note = ttk.Label(sheet, text="Skapar sidöversikt…",
+                             style="CardMuted.TLabel")
+            note.grid(row=0, column=0, sticky="w", padx=14, pady=10)
+            surface = ttk.Frame(sheet, style="Card.TFrame")
+            surface.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+            surface.columnconfigure(0, weight=1)
+            surface.rowconfigure(0, weight=1)
+            canvas = tk.Canvas(surface, highlightthickness=0,
+                               background=self.C["surface"])
+            canvas.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+            sheet_scroll = ttk.Scrollbar(surface, orient="vertical",
+                                         command=canvas.yview)
+            sheet_scroll.grid(row=0, column=1, sticky="ns", pady=8, padx=(0, 8))
+            canvas.configure(yscrollcommand=sheet_scroll.set)
+            inner = ttk.Frame(canvas, style="CardInner.TFrame")
+            inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+            inner.bind("<Configure>", lambda _e: canvas.configure(
+                scrollregion=canvas.bbox("all")))
+            canvas.bind("<Configure>", lambda e: canvas.itemconfigure(
+                inner_id, width=e.width))
+
+            def render_worker() -> None:
+                try:
+                    pymupdf = _open_pymupdf()
+                    thumbnails = []
+                    with pymupdf.open(str(path)) as doc:
+                        total = len(doc)
+                        count = min(total, 120)
+                        for page_index in range(count):
+                            page = doc[page_index]
+                            zoom = _bounded_render_zoom(page.rect, 0.28)
+                            pix = page.get_pixmap(
+                                matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+                            thumbnails.append((page_index + 1, pix.tobytes("png")))
+                    self._post(lambda: paint_contact_sheet(
+                        thumbnails, total, ""))
+                except Exception as exc:
+                    self._post(lambda exc=exc: paint_contact_sheet([], 0, str(exc)))
+
+            def paint_contact_sheet(thumbnails, total: int, error: str) -> None:
+                try:
+                    if not sheet.winfo_exists():
+                        return
+                except Exception:
+                    return
+                if error:
+                    note.configure(text=f"Kunde inte skapa sidöversikten: {error}")
+                    return
+                import base64
+                refs = []
+                for index, (page_number, png) in enumerate(thumbnails):
+                    photo = tk.PhotoImage(
+                        data=base64.b64encode(png).decode("ascii"))
+                    refs.append(photo)
+                    cell = ttk.Frame(inner, style="CardInner.TFrame")
+                    cell.grid(row=index // 4, column=index % 4,
+                              padx=10, pady=10, sticky="n")
+                    ttk.Label(cell, image=photo).pack()
+                    ttk.Label(cell, text=f"Sida {page_number}",
+                              style="CardMuted.TLabel").pack(pady=(4, 0))
+                sheet._contact_sheet_images = refs
+                note.configure(text=(f"Visar {len(thumbnails)} av {total} sidor. "
+                                     "Originalfilen har inte ändrats."))
+
+            threading.Thread(target=render_worker, daemon=True,
+                             name="pdf-sidöversikt").start()
+
+        search_button = ttk.Button(
+            controls, text=text_for("Sök", "Search"),
+            style="Accent.TButton", command=run_search)
+        search_button.pack(side="left", padx=(0, 6))
+        ttk.Button(controls, text=text_for("Jämför två…", "Compare two…"),
+                   command=compare_selected).pack(side="left", padx=3)
+        ttk.Button(controls, text=text_for("Alla sidor…", "All pages…"),
+                   command=show_contact_sheet).pack(
+            side="left", padx=(3, 0))
+        ttk.Button(buttons, text=text_for("Stäng", "Close"),
+                   command=close_window).pack(side="right")
+        tree.bind("<Double-1>", lambda _event: (
+            open_externally(Path(state["rows"][int(tree.focus()[3:])]["path"]))
+            if tree.focus().startswith("hit") else None))
+        entry.bind("<Return>", run_search)
+        win.protocol("WM_DELETE_WINDOW", close_window)
+        win.bind("<Escape>", lambda _event: close_window())
+        entry.focus_set()
 
     def all_input_files(self) -> List[Path]:
         """Alla PDF-filer i samtliga bevakade mappar, utan dubbletter.
@@ -4852,9 +10971,9 @@ class App:
         self.settings.update({
             "output_dir": self.var_out.get().strip(),
             "recursive": bool(self.var_recursive.get()),
-            "learned_matching": bool(self.var_learned.get()),
+            "learned_matching": True,
             "year_subfolder": bool(self.var_year_sub.get()),
-            "ask_when_unsure": bool(self.var_ask.get()),
+            "ask_when_unsure": True,
             "ocr_enabled": bool(self.var_ocr.get()),
             "ocr_quality": ("high" if self.var_ocr_quality.get()
                             else "standard"),
@@ -4874,12 +10993,18 @@ class App:
             "reject_recipient_only": bool(self.var_rejrec.get()),
             "tray_enabled": bool(self.var_tray.get()),
             "close_to_tray": bool(self.var_close_tray.get()),
-            "start_minimized": bool(self.var_startmin.get()),
+            "minimize_to_tray": bool(self.var_min_tray.get()),
+            "start_minimized": True,
             "autowatch_on_start": bool(self.var_autowatch.get()),
+            "archive_watch_enabled": bool(self.var_archive_watch.get()),
             "notify": bool(self.var_notify.get()),
             "autostart": bool(self.var_autostart.get()),
             "check_updates": bool(self.var_checkupd.get()),
             "auto_update": bool(self.var_autoupd.get()),
+            "silent_restart": bool(self.var_tystomstart.get()),
+            "cache_cleanup_enabled": bool(self.var_cache_cleanup.get()),
+            "low_memory_mode": bool(self.var_low_memory_mode.get()),
+            "error_autofix_days": max(0, int(num(self.var_error_autofix_days, 7))),
         })
         if hasattr(self, "var_lang"):
             self.settings.update({
@@ -4903,7 +11028,10 @@ class App:
                 or self.settings.get("ocr_quality", "high") != tidigare_kvalitet):
             TEXT_CACHE.clear()
         save_settings(self.settings)
+        if hasattr(self, "archive_watcher"):
+            self._sync_archive_watch()
         self._update_pills()
+        self._refresh_update_status()
         session_log("inställningar",
                     f"Sparade: strikthet={self.settings.get('strictness')}, "
                     f"min_keywords={self.settings.get('min_keywords')}, "
@@ -5028,66 +11156,114 @@ class App:
             self._log("Inga PDF-filer i de bevakade mapparna.", "warn")
             return
         self._busy = True
+        self._sort_cancel_event = threading.Event()
         self.btn_sort.configure(state="disabled", text="Sorterar…")
+        self.btn_cancel_sort.configure(state="normal", text="Avbryt sortering")
         self.progress.configure(maximum=len(files), value=0)
-        self.lbl_progress.configure(text="0 %")
+        self.lbl_progress.configure(text=f"0 av {len(files)}")
         self._log(f"— Startar: {len(files)} filer "
                   f"{'(TESTKÖRNING)' if self.settings['dry_run'] else ''} —", "info")
-        threading.Thread(target=self._sort_worker, args=(files,), daemon=True).start()
+        threading.Thread(target=self._sort_worker,
+                         args=(files, self._sort_cancel_event),
+                         daemon=True, name="pdfsorter-sort").start()
 
-    def _sort_worker(self, files: List[Path]) -> None:
+    def _cancel_sorting(self) -> None:
+        """Stoppa den manuella batchen efter en redan pågående fil."""
+        event = self._sort_cancel_event
+        if not self._busy or event is None or event.is_set():
+            return
+        event.set()
+        self.btn_cancel_sort.configure(state="disabled", text="Stoppar…")
+        self.lbl_progress.configure(text="Stoppar efter pågående fil…")
+        self._log("Avbryt begärt. En fil som redan flyttas kan slutföras; "
+                  "övriga filer lämnas kvar. Redan flyttade filer återställs inte.",
+                  "warn")
+
+    def _sort_worker(self, files: List[Path],
+                     cancel_event: Optional[threading.Event] = None) -> None:
         # Parallell analys: PDF-läsningen är den långsamma delen och är
         # oberoende mellan filer, så flera läses samtidigt. Själva flytten
         # serialiserar motorn internt - "skriv aldrig över" gäller alltså
         # även när trådar tävlade om samma målnamn.
         total = len(files)
-        workers = max(2, min(8, os.cpu_count() or 2))
+        workers = processing_worker_count(self.settings)
+        cancel_event = cancel_event or threading.Event()
         done = 0
         done_lock = threading.Lock()
 
         def job(path: Path) -> None:
             nonlocal done
-            if not path.exists():
+            if cancel_event.is_set() or not path.exists():
                 return
+            attempted = False
             try:
+                attempted = True
                 decision = self.engine.analyze(path)
-                self._handle(decision, from_watch=False)
+                if not cancel_event.is_set():
+                    self._handle(decision, from_watch=False,
+                                 cancel_event=cancel_event)
             except Exception as exc:
-                self._log_threadsafe(f"{path.name}  ✖ {type(exc).__name__}: {exc}", "err")
-            with done_lock:
-                done += 1
-                v = done
-            self._post(lambda v=v: (
-                self.progress.configure(value=v),
-                self.lbl_progress.configure(text=f"{v * 100 // total} %")))
+                if not cancel_event.is_set():
+                    self._log_threadsafe(
+                        f"{path.name}  ✖ {type(exc).__name__}: {exc}", "err")
+            finally:
+                if attempted:
+                    with done_lock:
+                        done += 1
+                        value = done
+                    def update_progress(value=value):
+                        if not self.root.winfo_exists():
+                            return
+                        self.progress.configure(value=value)
+                        suffix = " · stoppar" if cancel_event.is_set() else ""
+                        self.lbl_progress.configure(
+                            text=f"{value}/{total}{suffix}")
+                    self._post(update_progress)
 
-        # Hängningsskydd: även om något oväntat kastas här måste
-        # _finish_run nås, annars förblir _busy sann och "Sortera nu"
-        # låses för alltid.
+        # Uppgifter som ännu inte börjat analysera lämnas orörda efter stopp.
+        # Ett redan pågående beslut får nå en säker gräns innan det avslutas.
         with LogContext("tid", f"batchsortering {total} filer, "
                         f"{workers} trådar"):
             try:
+                batch_size = processing_batch_size(
+                    self.settings, workers, total)
                 with concurrent.futures.ThreadPoolExecutor(
                         max_workers=workers,
                         thread_name_prefix="pdfsorter-sort") as pool:
-                    for _ in pool.map(job, files):
-                        pass
+                    for start in range(0, total, batch_size):
+                        batch = files[start:start + batch_size]
+                        for _ in pool.map(job, batch):
+                            pass
             except Exception as exc:
                 self._fel(exc, "batchsortering")
                 self._log_threadsafe(f"Sorteringen avbröts: {exc}", "err")
             finally:
-                self._post(self._finish_run)
+                with done_lock:
+                    completed = done
+                cancelled = cancel_event.is_set()
+                self._post(lambda: self._finish_run(
+                    cancelled=cancelled, completed=completed, total=total))
 
-    def _finish_run(self) -> None:
+    def _finish_run(self, cancelled: bool = False,
+                    completed: int = 0, total: int = 0) -> None:
         self._busy = False
+        self._sort_cancel_event = None
         self.btn_sort.configure(state="normal", text="Sortera nu")
+        self.btn_cancel_sort.configure(state="disabled", text="Avbryt sortering")
         self.lbl_progress.configure(text="")
         self.engine.flush_rules()          # debouncade skrivningar i hamn
         self._log(f"    Textcache: {TEXT_CACHE.stats()}", "info")
         s = self.engine.stats
-        self._log(f"— Klart: {s['sorted']} sorterade, {len(self.queue)} väntar på granskning, "
-                  f"{s['error']} fel —", "info")
         sorted_n = s["sorted"]
+        if cancelled:
+            self._log(
+                f"— Avbruten: {completed} av {total} filer analyserade; "
+                f"{sorted_n} sorterades, {len(self.queue)} väntar på granskning. "
+                "Redan flyttade filer behålls; övriga ligger kvar. —", "warn")
+        else:
+            self._log(f"— Klart: {sorted_n} sorterade, "
+                      f"{len(self.queue)} väntar på granskning, "
+                      f"{s['error']} fel —", "info")
         self._update_stats(sorted_n=sorted_n, errors=s["error"])
         self.engine.stats.clear()
         self._refresh_queue()
@@ -5098,11 +11274,14 @@ class App:
             self._notify(f"{sorted_n} filer sorterade"
                          + (f", {len(self.queue)} väntar på granskning"
                             if self.queue else ""))
-        if self.queue and self.settings.get("ask_when_unsure", True) and self.visible:
+        if not cancelled and self.queue and self.visible:
             self._process_queue()
 
-    def _handle(self, decision: Decision, from_watch: bool) -> None:
+    def _handle(self, decision: Decision, from_watch: bool,
+                cancel_event: Optional[threading.Event] = None) -> None:
         """Ta hand om ett beslut (körs i bakgrundstråd)."""
+        if cancel_event is not None and cancel_event.is_set():
+            return
         name = decision.path.name
         if decision.status == "ignored":
             self._log_threadsafe(f"{name}  ⊘ {decision.reason} - lämnas orörd",
@@ -5113,35 +11292,32 @@ class App:
             return
         if decision.status == "auto":
             best = decision.best
-            ok, msg = self.engine.apply(decision, best.name, best.matched, "auto")
-            if ok:
-                tag = " (OCR)" if decision.extraction.used_ocr else ""
-                # Felsökningsdesign: logga VAR träffarna satt, så att en
-                # felregisterad kategori syns direkt i loggen.
-                zon = ", ".join(f"{w}:{best.zone_of(w)}"
-                                for w in best.matched[:3])
-                mp = getattr(best, "multipage", None)
-                flersidig = f"  [flersidig: {', '.join(mp)}]" if mp else ""
-                self._log_threadsafe(
-                    f"{name}  →  {best.name}   poäng {best.score:g}{tag}  "
-                    f"[{zon}]{flersidig}",
-                    "ok")
-                if from_watch:
-                    self._post(self._sync_tray)
-                    if not self.visible:
-                        self._post(lambda n=name, c=best.name:
-                                   self._notify(f"{n} → {c}"))
+            if best is not None:
+                ok, msg = self.engine.apply(
+                    decision, best.name, best.matched, "auto",
+                    cancel_event=cancel_event)
+                if not ok and msg.startswith("Avbruten"):
+                    return
+                if ok:
+                    zone = ", ".join(f"{word}:{best.zone_of(word)}"
+                                     for word in best.matched[:3])
+                    self._log_threadsafe(
+                        f"{name}  →  {best.name}   exakt stödord  [{zone}]", "ok")
+                    if from_watch:
+                        if not self.settings.get("dry_run", False):
+                            self._note_watch_activity(sorted_file=True)
+                        self._post(self._sync_tray)
+                        if not self.visible:
+                            self._post(lambda n=name, c=best.name:
+                                       self._notify(f"{n} → {c} (exakt stödord)"))
+                    return
+                decision.reason = msg
             else:
-                self._log_threadsafe(f"{name}  ✖ {msg}", "err")
-            return
+                decision.reason = "Exakt stödordsträff saknar en entydig kategori."
+            # Stale/forged automatic decisions are reviewed, never moved.
+            decision.status = "ask"
 
         # osäker
-        if not self.settings.get("ask_when_unsure", True):
-            ok, msg = self.engine.send_to_unmatched(decision)
-            self._log_threadsafe(f"{name}  ⚠ {decision.reason} → "
-                                 f"{'_Osorterat' if ok else msg}", "warn")
-            return
-
         key = str(decision.path)
         if key not in self._queued_paths:
             self._queued_paths.add(key)
@@ -5192,6 +11368,7 @@ class App:
                           "bevakas INTE.\nKryssa i 'Läs även undermappar' "
                           "i Inställningar för att ta med dem.", "warn")
         self._sync_tray()
+        self._sync_meny()
         return True
 
     def _stop_watch(self) -> None:
@@ -5202,6 +11379,7 @@ class App:
         self._update_pills()
         self._log("Bevakning stoppad.", "info")
         self._sync_tray()
+        self._sync_meny()
 
     def _restart_watch(self) -> None:
         """Starta om bevakningen så att ändrade mappar slår igenom."""
@@ -5210,180 +11388,284 @@ class App:
             self.watcher = None
             self._start_watch(quiet=True)
 
+    def _stop_archive_watch(self) -> None:
+        watcher = getattr(self, "archive_watcher", None)
+        if watcher:
+            watcher.stop()
+        self.archive_watcher = None
+        self._archive_watch_root = None
+        if hasattr(self, "lbl_watch"):
+            self._update_pills()
+
+    def _sync_archive_watch(self) -> None:
+        """Starta den separata arkivkontrollen när Arkiv-bevakning är på."""
+        if not getattr(self, "settings", {}).get("archive_watch_enabled", True):
+            self._stop_archive_watch()
+            return
+        output = str(getattr(self, "settings", {}).get("output_dir", "") or "").strip()
+        if not output:
+            self._stop_archive_watch()
+            return
+        root = Path(output).expanduser()
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            root = root.resolve()
+        except OSError as exc:
+            self._log(f"Arkivbevakning kunde inte starta: {exc}", "warn")
+            self._stop_archive_watch()
+            return
+        for input_dir in getattr(self, "settings", {}).get("input_dirs", []) or []:
+            source = Path(input_dir).expanduser()
+            if source.exists() and (source.resolve() == root
+                                    or _inuti(root, source)
+                                    or _inuti(source, root)):
+                self._log("Arkivbevakning stoppades: arkiv- och inmapp överlappar.",
+                          "warn")
+                self._stop_archive_watch()
+                return
+        if (self.archive_watcher and self.archive_watcher.running
+                and self._archive_watch_root == root):
+            return
+        self._stop_archive_watch()
+        interval = max(10.0, float(self.settings.get(
+            "archive_watch_interval", 30.0) or 30.0))
+        self.archive_watcher = MultiFolderWatcher(
+            [root], on_file=self._on_archived_file,
+            interval=interval,
+            stable_seconds=float(self.settings.get("stable_seconds", 3.0)),
+            recursive=True,
+            excludes=self.settings.get("exclude_dirs", []),
+        )
+        self._archive_watch_root = root
+        self.archive_watcher.start()
+        if hasattr(self, "lbl_watch"):
+            self._update_pills()
+        self._log(f"Bevakar Arkiv efter felplacerade PDF-filer: {root} "
+                  f"(kontroll var {interval:g}:e sekund).", "info")
+
+    def _on_archived_file(self, path: Path) -> None:
+        """Safely flag or correct a PDF whose archive path conflicts with rules."""
+        watcher = getattr(self, "archive_watcher", None)
+        if not watcher or not watcher.running:
+            return
+        try:
+            root = Path(self.settings.get("output_dir", "")).resolve()
+            relative = Path(path).resolve().relative_to(root)
+        except (OSError, ValueError):
+            return
+        if len(relative.parts) < 2:
+            return
+        current_folder = relative.parts[0]
+        current_categories = [cat for cat in self.rules.categories
+                              if safe_folder_name(cat.get("folder", cat["name"]))
+                              == current_folder]
+        if len(current_categories) != 1:
+            return
+        current_cat = current_categories[0]
+        if not current_cat.get("enabled", True):
+            return
+        try:
+            decision = self.engine.analyze(Path(path))
+        except Exception as exc:
+            self._log_threadsafe(f"Arkivkontroll kunde inte läsa {Path(path).name}: {exc}",
+                                 "warn")
+            return
+        if decision.status in {"ignored", "error"}:
+            return
+
+        exact = exact_support_matches(self.rules, decision.extraction)
+        if len(exact) == 1:
+            target_category = next(iter(exact))
+        elif decision.status == "auto" and decision.best:
+            target_category = decision.best.name
+        else:
+            return
+        target_cat = self.rules.get(target_category)
+        if not target_cat or not target_cat.get("enabled", True):
+            return
+        category_changed = target_cat["name"] != current_cat["name"]
+
+        # For the same category, only audit a subfolder when a user has
+        # configured an exact word/template or confirmed manual types. Merely
+        # lacking a route is not proof that an existing folder is wrong.
+        mapped_sub, has_mapping = match_subfolder_keyword(
+            self.rules, target_category, decision.extraction)
+        mapped_targets, _active_mappings = subfolder_keyword_matches(
+            self.rules, target_category, decision.extraction)
+        template_sub, has_template = match_subfolder_template(
+            self.rules, target_category, decision.extraction)
+        _learned_sub, has_learned_types = learned_manual_subfolder(
+            target_category, decision.extraction)
+        has_type_rules = has_mapping or has_template or has_learned_types
+        if not category_changed and not has_type_rules:
+            return
+
+        if decision.status == "auto":
+            expected, error = self.engine.destination_for(
+                decision, target_category, automatic=True)
+        elif has_mapping and mapped_sub:
+            expected, error = self.engine.destination_for(
+                decision, target_category, mapped_sub)
+        elif has_template and template_sub:
+            expected, error = self.engine.destination_for(
+                decision, target_category, template_sub)
+        elif has_learned_types and _learned_sub:
+            expected, error = self.engine.destination_for(
+                decision, target_category, _learned_sub)
+        else:
+            expected, error = None, "Dokumenttypen matchar inte entydigt."
+
+        if expected is not None and not error:
+            try:
+                if expected.resolve() == Path(path).resolve():
+                    return
+            except OSError:
+                pass
+        if not category_changed and not (has_mapping and mapped_sub
+                                         or has_template and template_sub
+                                         or has_learned_types and _learned_sub):
+            # No matching folder word just means we cannot infer its type.
+            # Multiple mapped destinations are a real conflict, so queue them.
+            unresolved_template = has_template and not template_sub
+            unresolved_learned = has_learned_types and not _learned_sub
+            if len(mapped_targets) < 2 and not unresolved_template and not unresolved_learned:
+                return
+        if decision.status == "auto" and self.settings.get("action", "move") == "move" \
+                and not self.settings.get("dry_run", False) and not error:
+            ok, message = self.engine.apply(
+                decision, target_category,
+                decision.best.matched if decision.best else [], "auto")
+            if ok:
+                self._log_threadsafe(
+                    f"Arkivkontroll flyttade {Path(path).name} från "
+                    f"{current_cat['name']} till {target_cat['name']}.", "ok")
+                self._note_watch_activity(sorted_file=True)
+                return
+            decision.status = "ask"
+            decision.reason = message
+        else:
+            decision.status = "ask"
+            decision.reason = ("Arkivkontrollen hittade en möjlig felplacering "
+                               f"(nu: {current_cat['name']}, förslag: "
+                               f"{target_cat['name']}). "
+                               + (error or "Bekräfta rätt kategori/undermapp."))
+        self._handle(decision, from_watch=True)
+
     def _on_watched_file(self, path: Path) -> None:
+        # En watcher-tråd kan precis hinna lämna sin callback när användaren
+        # stänger av bevakningen. Kontrollera tillståndet innan någon analys
+        # eller sorteringsåtgärd får starta.
+        watcher = getattr(self, "watcher", None)
+        if not watcher or not getattr(watcher, "running", False):
+            session_log("bevaka", f"Ignorerade fil efter stoppad bevakning: {path}",
+                        "info")
+            return
+        self._note_watch_activity(found=True)
         session_log("bevaka", f"Ny stabil fil upptäckt: {path}")
         try:
             decision = self.engine.analyze(path)
+            # Bevaka kan ha stoppats medan PDF:en analyserades.
+            if not getattr(watcher, "running", False):
+                session_log("bevaka", f"Avbröt sortering efter stoppad bevakning: {path}",
+                            "info")
+                return
             self._handle(decision, from_watch=True)
         except Exception as exc:
             self._fel(exc, f"bevaka {path.name}")
             self._log_threadsafe(f"{path.name}  ✖ {exc}", "err")
 
     # ======================================================================
-    # Flik 2 - Matchningar
+    # Flik 3 - Kategorier
     # ======================================================================
     def _build_cats_tab(self) -> None:
-        """Matchningsvyn: kategorier till vänster, deras stödord till höger.
-
-        Allt går att göra härifrån - lägga till, ändra vikt och ta bort -
-        utan att öppna någon JSON-fil.
-        """
+        """Show the selected category's saved support words and created folders."""
         tk, ttk = self.tk, self.ttk
         T = self.theme
         f = self.tab_cats
-        f.columnconfigure(1, weight=1)
-        f.rowconfigure(1, weight=1)
+        # Keep the support-word list readable, with a dedicated live view of
+        # the selected word's folder mapping between it and the folder list.
+        f.columnconfigure(0, weight=42)
+        f.columnconfigure(1, weight=27)
+        f.columnconfigure(2, weight=31)
+        f.rowconfigure(2, weight=1)
 
-        # -- sökrad över hela fliken --
+        catbar = ttk.Frame(f, style="Card.TFrame")
+        catbar.grid(row=0, column=0, columnspan=3, sticky="ew",
+                    padx=T.PAD, pady=(T.PAD, 0))
+        catbar.columnconfigure(1, weight=1)
+        ttk.Label(catbar, text="Kategori", style="CardKey.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(T.INNER, 8), pady=T.INNER)
+        self.var_cat_select = tk.StringVar()
+        self.cat_combo = ttk.Combobox(
+            catbar, textvariable=self.var_cat_select, state="readonly")
+        self.cat_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8),
+                            pady=T.INNER)
+        self._cat_select_trace = self.var_cat_select.trace_add(
+            "write", lambda *_args: self._on_cat_select())
+        ttk.Button(catbar, text="Kategoriinställningar…",
+                   command=self._open_category_settings).grid(
+                       row=0, column=2, padx=(0, 4))
+        ttk.Button(catbar, text="+ Ny", command=self._cat_new).grid(
+            row=0, column=3, padx=(0, 4))
+        ttk.Button(catbar, text="Byt namn", command=self._cat_rename).grid(
+            row=0, column=4, padx=4)
+        ttk.Button(catbar, text="Ta bort", style="Danger.TButton",
+                   command=self._cat_delete).grid(row=0, column=5, padx=4)
+        ttk.Button(catbar, text="Töm kategorier…", style="Danger.TButton",
+                   command=self._cat_clear_all).grid(row=0, column=6, padx=4)
+        self.btn_cat_restore = ttk.Button(
+            catbar, text="Ångra tömning", style="CardLink.TButton",
+            command=self._cat_restore_clear_backup,
+            state="normal" if self._category_clear_backup_path() else "disabled")
+        self.btn_cat_restore.grid(row=0, column=7, padx=(4, T.INNER))
+
         bar = ttk.Frame(f, style="Card.TFrame")
-        bar.grid(row=0, column=0, columnspan=2, sticky="ew",
-                 padx=T.PAD, pady=(T.PAD, 0))
-        bar.columnconfigure(1, weight=1)
-        ttk.Label(bar, text="Sök stödord", style="CardKey.TLabel").grid(
-            row=0, column=0, sticky="w", padx=(T.INNER, 0), pady=T.INNER)
-        self.var_kwsearch = tk.StringVar()
-        ent = ttk.Entry(bar, textvariable=self.var_kwsearch)
-        ent.grid(row=0, column=1, sticky="ew", padx=10, pady=T.INNER)
-        ent.bind("<KeyRelease>", lambda e: self._refresh_keyword_view())
-        ttk.Button(bar, text="Rensa", style="CardLink.TButton",
-                   command=lambda: (self.var_kwsearch.set(""),
-                                    self._refresh_keyword_view())
-                   ).grid(row=0, column=2)
+        bar.grid(row=1, column=0, columnspan=3, sticky="ew",
+                 padx=T.PAD, pady=(6, 0))
+        bar.columnconfigure(0, weight=1)
         self.lbl_kwcount = ttk.Label(bar, text="", style="CardMuted.TLabel")
-        self.lbl_kwcount.grid(row=0, column=3, padx=16)
-        ttk.Separator(bar, orient="vertical").grid(row=0, column=4, sticky="ns",
+        self.lbl_kwcount.grid(row=0, column=0, sticky="w", padx=T.INNER)
+        ttk.Separator(bar, orient="vertical").grid(row=0, column=1, sticky="ns",
                                                    pady=10)
-        ttk.Button(bar, text="Exportera…", style="CardLink.TButton",
-                   command=self._export).grid(row=0, column=5, padx=(12, 0))
-        ttk.Button(bar, text="Importera…", style="CardLink.TButton",
-                   command=self._import).grid(row=0, column=6, padx=(4, T.INNER))
-
-        # -- vänster: kategorier --
-        leftcard = T.card(f, "Kategorier")
-        leftcard.grid(row=1, column=0, sticky="nsew",
-                      padx=(T.PAD, T.GAP // 2), pady=T.GAP)
-        left = leftcard.body
-        left.rowconfigure(0, weight=1)
-        left.columnconfigure(0, weight=1)
-
-        cat_cols = ("name", "count", "regel")
-        self.cat_tree = ttk.Treeview(left, columns=cat_cols, show="headings",
-                                     selectmode="browse", height=14)
-        T.fit_columns(self.cat_tree, (
-            ("name", "KATEGORI", 16, "w", True),
-            ("count", "ORD", 3, "center", False),
-            # Visar avvikelser från standard: "3 ord" eller "{år}". Utan
-            # den måste man klicka på varje kategori för att se om någon
-            # har egna regler.
-            ("regel", "REGEL", 7, "w", False)))
-        self.cat_tree.grid(row=0, column=0, sticky="nsew", padx=(1, 0), pady=(1, 0))
-        self.cat_tree.bind("<<TreeviewSelect>>", lambda e: self._on_cat_select())
-        # Ta bort en kategori med Delete-tangenten, som en bekväm genväg
-        # vid sidan av knappen "Ta bort".
-        self.cat_tree.bind("<Delete>", lambda e: self._cat_delete())
-        self.theme.zebra(self.cat_tree)
-        csb = ttk.Scrollbar(left, orient="vertical", command=self.cat_tree.yview)
-        csb.grid(row=0, column=1, sticky="ns", pady=(1, 0), padx=(0, 1))
-        self.cat_tree.configure(yscrollcommand=csb.set)
-
-        # Högerklicksmeny på kategorilistan: samla alla kategorival på ett
-        # ställe, precis som för stödorden. Gör det tydligt att en hel
-        # kategori (med alla dess stödord) går att ta bort.
-        self.cat_menu = tk.Menu(self.cat_tree, tearoff=0)
-        self.cat_menu.add_command(label="+ Ny kategori…", command=self._cat_new)
-        self.cat_menu.add_command(label="Byt namn…", command=self._cat_rename)
-        self.cat_menu.add_separator()
-        self.cat_menu.add_command(label="Ta bort kategori",
-                                  command=self._cat_delete)
-        self.cat_tree.bind("<Button-3>", self._cat_context)
-        self.cat_tree.bind("<Button-2>", self._cat_context)   # macOS
-
-        cbtn = ttk.Frame(left, style="CardInner.TFrame")
-        cbtn.grid(row=1, column=0, columnspan=2, sticky="ew",
-                  padx=T.INNER, pady=T.INNER)
-        ttk.Button(cbtn, text="+ Ny", command=self._cat_new).pack(side="left")
-        ttk.Button(cbtn, text="Byt namn", command=self._cat_rename
-                   ).pack(side="left", padx=5)
-        ttk.Button(cbtn, text="Ta bort", style="Danger.TButton",
-                   command=self._cat_delete).pack(side="left")
-
-        # -- höger: stödorden --
-        rightcard = T.card(f, "Stödord")
-        rightcard.grid(row=1, column=1, sticky="nsew",
-                       padx=(T.GAP // 2, T.PAD), pady=T.GAP)
-        right = rightcard.body
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(2, weight=1)
-
-        head = ttk.Frame(right, style="CardInner.TFrame")
-        head.grid(row=0, column=0, columnspan=2, sticky="ew",
-                  padx=T.INNER, pady=(T.INNER, 2))
-        head.columnconfigure(0, weight=1)
-        self.lbl_cat_title = ttk.Label(head, text="—", style="CardTitle.TLabel")
-        self.lbl_cat_title.grid(row=0, column=0, sticky="w")
-        self.lbl_cat_stats = ttk.Label(head, text="", style="CardMuted.TLabel")
-        self.lbl_cat_stats.grid(row=1, column=0, sticky="w", pady=(1, 0))
-
-        meta = ttk.Frame(right, style="CardInner.TFrame")
-        meta.grid(row=1, column=0, columnspan=2, sticky="ew",
-                  padx=T.INNER, pady=(10, 8))
-        meta.columnconfigure(1, weight=1)
-        ttk.Label(meta, text="Mappnamn:", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w")
-        self.var_folder = tk.StringVar()
-        ttk.Entry(meta, textvariable=self.var_folder).grid(
-            row=0, column=1, sticky="ew", padx=8)
-        self.var_cat_enabled = tk.BooleanVar(value=True)
-        ttk.Checkbutton(meta, text="Aktiv", variable=self.var_cat_enabled,
+        self.var_kw_hide_linked = tk.BooleanVar(
+            value=bool(self.settings.get("kw_hide_linked", False)))
+        ttk.Checkbutton(bar, text="Dölj kopplade ord",
                         style="Card.TCheckbutton",
-                        command=self._cat_save_meta).grid(row=0, column=2, padx=6)
-        ttk.Button(meta, text="Spara", command=self._cat_save_meta
-                   ).grid(row=0, column=3)
+                        variable=self.var_kw_hide_linked,
+                        command=self._toggle_kw_hide_linked).grid(
+                            row=0, column=2, padx=(12, 0))
+        ttk.Button(bar, text="Exportera…", style="CardLink.TButton",
+                   command=self._export).grid(row=0, column=3, padx=(12, 0))
+        ttk.Button(bar, text="Importera…", style="CardLink.TButton",
+                   command=self._import).grid(row=0, column=4, padx=(4, T.INNER))
 
-        # -- undermapp per datum --
-        ttk.Label(meta, text="Undermapp:", style="Card.TLabel").grid(
-            row=1, column=0, sticky="w", pady=(8, 0))
-        self.sub_combo = ttk.Combobox(
-            meta, state="readonly", width=34,
-            values=[etikett for _, etikett in SUBFOLDER_TEMPLATES])
-        self.sub_combo.grid(row=1, column=1, sticky="w", padx=8, pady=(8, 0))
-        self.sub_combo.bind("<<ComboboxSelected>>", lambda e: self._cat_save_sub())
-        self.lbl_sub_ex = ttk.Label(meta, text="", style="CardMuted.TLabel")
-        self.lbl_sub_ex.grid(row=1, column=2, columnspan=2, sticky="w",
-                             pady=(8, 0))
-
-        # -- eget krav på antal stödord --
-        ttk.Label(meta, text="Kräver:", style="Card.TLabel").grid(
-            row=2, column=0, sticky="w", pady=(8, 0))
-        krav = ttk.Frame(meta, style="CardInner.TFrame")
-        krav.grid(row=2, column=1, columnspan=3, sticky="w",
-                  padx=8, pady=(8, 0))
-        self.var_catkw = tk.StringVar(value="0")
-        self.spin_catkw = ttk.Spinbox(krav, from_=0, to=9, width=4,
-                                      textvariable=self.var_catkw,
-                                      command=self._cat_save_kw)
-        self.spin_catkw.pack(side="left")
-        self.spin_catkw.bind("<FocusOut>", lambda e: self._cat_save_kw())
-        self.lbl_catkw = ttk.Label(krav, text="", style="CardMuted.TLabel")
-        self.lbl_catkw.pack(side="left", padx=10)
-
-        cols = ("word", "kind", "weight", "whole", "hits")
-        self.kw_tree = ttk.Treeview(right, columns=cols, show="headings",
+        support_card = T.card(f, "Sparade stödord")
+        support_card.grid(row=2, column=0, sticky="nsew",
+                          padx=(T.PAD, T.GAP // 2), pady=T.GAP)
+        support = support_card.body
+        support.columnconfigure(0, weight=1)
+        support.rowconfigure(0, weight=1)
+        cols = ("word", "kind", "weight", "whole", "hits", "folder", "std")
+        self.kw_tree = ttk.Treeview(support, columns=cols, show="headings",
                                     selectmode="extended")
         T.fit_columns(self.kw_tree, (
             ("word", "STÖDORD", 20, "w", True),
-            ("kind", "TYP", 20, "w", False),
+            ("kind", "TYP", 18, "w", False),
             ("weight", "VIKT", 4, "center", False),
             ("whole", "HELT ORD", 4, "center", False),
-            ("hits", "TRÄFFAR", 5, "center", False)))
-        for col in ("word", "kind", "weight", "whole", "hits"):
+            ("hits", "TRÄFFAR", 5, "center", False),
+            ("folder", "MAPP", 12, "w", True),
+            ("std", "★", 2, "center", False)))
+        for col in cols:
             self.kw_tree.heading(col, command=lambda c=col: self._sort_keywords(c))
-        self.kw_tree.grid(row=2, column=0, sticky="nsew", padx=(1, 0), pady=4)
+        self._apply_kw_column_order(self.settings.get("kw_column_order", ()))
+        self.kw_tree.grid(row=0, column=0, sticky="nsew", padx=(T.INNER, 0),
+                          pady=(T.INNER, 4))
         self.theme.zebra(self.kw_tree)
         self.kw_tree.bind("<Delete>", lambda e: self._kw_remove())
+        self.kw_tree.bind("<<TreeviewSelect>>",
+                          self._cat_map_show_selected_mapping, add="+")
         self.kw_tree.bind("<Double-1>", lambda e: self._kw_edit())
-
-        # Högerklick: allt man kan göra med ett stödord, på ett ställe.
         self.kw_menu = tk.Menu(self.kw_tree, tearoff=0)
         self.kw_menu.add_command(label="Ändra ord…", command=self._kw_edit)
         self.kw_menu.add_command(label="Ändra vikt…", command=self._kw_weight)
@@ -5394,114 +11676,922 @@ class App:
         self.kw_menu.add_command(label="Rensa oanvända ord i kategorin…",
                                  command=self._kw_prune)
         self.kw_tree.bind("<Button-3>", self._kw_context)
-        self.kw_tree.bind("<Button-2>", self._kw_context)   # macOS
-        ksb = ttk.Scrollbar(right, orient="vertical", command=self.kw_tree.yview)
-        ksb.grid(row=2, column=1, sticky="ns", pady=4, padx=(0, 1))
+        self.kw_tree.bind("<Button-2>", self._kw_context)
+        ksb = ttk.Scrollbar(support, orient="vertical", command=self.kw_tree.yview)
+        ksb.grid(row=0, column=1, sticky="ns", pady=(T.INNER, 4),
+                 padx=(0, T.INNER))
         self.kw_tree.configure(yscrollcommand=ksb.set)
-
-        # Sammanfattning av kategorins styrka - syns direkt utan att man
-        # behöver räkna raderna i tabellen.
-        self.lbl_kw_sum = ttk.Label(right, style="CardMuted.TLabel",
-                                    justify="left")
-        self.lbl_kw_sum.grid(row=3, column=0, columnspan=2, sticky="w",
-                             padx=T.INNER, pady=(6, 0))
-
-        hint = ttk.Label(right, style="CardMuted.TLabel", justify="left",
-                         text="Dubbelklicka ändrar ordet  ·  högerklick ger "
-                              "fler val  ·  Delete tar bort  ·  klicka på en "
-                              "rubrik för att sortera")
-        hint.grid(row=4, column=0, columnspan=2, sticky="w",
+        self.kw_scrollbar = ksb
+        self.lbl_kw_sum = ttk.Label(support, style="CardMuted.TLabel", justify="left")
+        self.lbl_kw_sum.grid(row=1, column=0, columnspan=2, sticky="w",
+                             padx=T.INNER, pady=(4, 0))
+        hint = ttk.Label(
+            support, style="CardMuted.TLabel", justify="left",
+            text="Dubbelklicka ändrar ordet  ·  högerklick ger fler val  ·  "
+                 "Delete tar bort  ·  klicka på en rubrik för att sortera  ·  "
+                 "dra en rubrik i sidled för att flytta kolumnen")
+        hint.grid(row=2, column=0, columnspan=2, sticky="w",
                   padx=T.INNER, pady=(2, 0))
-
-        kbtn = ttk.Frame(right, style="CardInner.TFrame")
-        kbtn.grid(row=5, column=0, columnspan=2, sticky="ew",
+        self.kw_hint = hint
+        kbtn = ttk.Frame(support, style="CardInner.TFrame")
+        kbtn.grid(row=3, column=0, columnspan=2, sticky="ew",
                   padx=T.INNER, pady=(8, T.INNER))
-        # grid i stället för pack: med pack konkurrerar vänster- och
-        # högerpackade knappar om samma utrymme, och den sista klipps tyst
-        # till "Ta bor". Här får varje knapp sin egen kolumn, och kolumn 4
-        # sväller så att grupperna skjuts isär.
-        for _i, (_txt, _cmd, _stil) in enumerate((
+        for index, (label, command, style) in enumerate((
                 ("+ Lägg till ord", self._kw_add, "Accent.TButton"),
                 ("Ändra ord", self._kw_edit, "TButton"),
                 ("Vikt", self._kw_weight, "TButton"),
                 ("Flytta…", self._kw_move, "TButton"))):
-            ttk.Button(kbtn, text=_txt, command=_cmd, style=_stil).grid(
-                row=0, column=_i, padx=(0, 6), sticky="w")
+            ttk.Button(kbtn, text=label, command=command, style=style).grid(
+                row=0, column=index, padx=(0, 6), sticky="w")
         kbtn.columnconfigure(4, weight=1)
-        # "Rensa oanvända" bor i högerklicksmenyn: den används sällan, och
-        # en sjätte knapp gör att raden inte får plats i kortet.
         ttk.Button(kbtn, text="Ta bort", style="Danger.TButton",
                    command=self._kw_remove).grid(row=0, column=5)
+        ttk.Button(kbtn, text="Rensa alla stödord (behåll kategorier)…",
+                   style="Danger.TButton", command=self._kw_clear_all).grid(
+                       row=1, column=0, columnspan=6, sticky="ew", pady=(6, 0))
+        self.kw_buttons = kbtn
+        self.empty_cat_panel = ttk.Frame(support, style="CardInner.TFrame")
+        self.empty_cat_panel.grid(row=0, column=0, columnspan=2, sticky="nsew",
+                                  padx=T.INNER, pady=T.INNER)
+        self.empty_cat_panel.columnconfigure(0, weight=1)
+        self.lbl_cat_empty = ttk.Label(
+            self.empty_cat_panel, text="", style="CardMuted.TLabel",
+            justify="center", anchor="center", wraplength=580)
+        self.lbl_cat_empty.grid(row=0, column=0, sticky="ew", padx=12, pady=(24, 14))
+        empty_actions = ttk.Frame(self.empty_cat_panel, style="CardInner.TFrame")
+        empty_actions.grid(row=1, column=0, pady=(0, 24))
+        ttk.Button(empty_actions, text="+ Skapa kategori", style="Accent.TButton",
+                   command=self._cat_new).pack(side="left", padx=5)
+        ttk.Button(empty_actions, text="Importera regler…",
+                   command=self._import).pack(side="left", padx=5)
+        self.empty_cat_panel.grid_remove()
 
+        linked_card = T.card(f, "Kopplade mappar")
+        linked_card.grid(row=2, column=1, sticky="nsew",
+                         padx=(T.GAP // 2, T.GAP // 2), pady=T.GAP)
+        linked_body = linked_card.body
+        linked_body.columnconfigure(0, weight=1)
+        linked_body.rowconfigure(1, weight=1)
+        ttk.Label(
+            linked_body,
+            text="Välj stödord för att se dess mappkoppling här.",
+            style="CardMuted.TLabel", wraplength=360, justify="left",
+        ).grid(row=0, column=0, sticky="ew", padx=T.INNER,
+               pady=(T.INNER, 8))
+        linked_view = ttk.Frame(linked_body, style="CardInner.TFrame")
+        linked_view.grid(row=1, column=0, sticky="nsew", padx=T.INNER, pady=2)
+        linked_view.columnconfigure(0, weight=1)
+        linked_view.rowconfigure(0, weight=1)
+        self.selected_keyword_map_tree = ttk.Treeview(
+            linked_view, columns=("word", "folder"), show="headings",
+            selectmode="none", height=12)
+        self.selected_keyword_map_tree.heading("word", text="STÖDORD")
+        self.selected_keyword_map_tree.heading("folder", text="KOPPLAD MAPP")
+        self.selected_keyword_map_tree.column(
+            "word", width=120, minwidth=90, anchor="w", stretch=True)
+        self.selected_keyword_map_tree.column(
+            "folder", width=170, minwidth=110, anchor="w", stretch=True)
+        self.selected_keyword_map_tree.grid(row=0, column=0, sticky="nsew")
+        self.theme.zebra(self.selected_keyword_map_tree)
+        linked_scroll = ttk.Scrollbar(
+            linked_view, orient="vertical",
+            command=self.selected_keyword_map_tree.yview)
+        linked_scroll.grid(row=0, column=1, sticky="ns")
+        linked_xscroll = ttk.Scrollbar(
+            linked_view, orient="horizontal",
+            command=self.selected_keyword_map_tree.xview)
+        linked_xscroll.grid(row=1, column=0, sticky="ew")
+        self.selected_keyword_map_tree.configure(
+            yscrollcommand=linked_scroll.set,
+            xscrollcommand=linked_xscroll.set)
+        folder_card = T.card(f, "Skapade mappar")
+        folder_card.grid(row=2, column=2, sticky="nsew",
+                         padx=(T.GAP // 2, T.PAD), pady=T.GAP)
+        mapbody = folder_card.body
+        mapbody.columnconfigure(0, weight=1)
+        mapbody.rowconfigure(1, weight=1)
+        ttk.Label(
+            mapbody,
+            text="Endast redan skapade mappar i vald kategori visas här. "
+                 "Kolumnen ‘KOPPLADE STÖDORD’ visar vad som sorteras till varje mapp. "
+                 "Årsmappen visas inte; mappar som återkommer under olika år visas en gång.",
+            style="CardMuted.TLabel", wraplength=580, justify="left",
+        ).grid(row=0, column=0, sticky="ew", padx=T.INNER,
+               pady=(T.INNER, 8))
+        map_view = ttk.Frame(mapbody, style="CardInner.TFrame")
+        map_view.grid(row=1, column=0, sticky="nsew", padx=T.INNER, pady=2)
+        map_view.columnconfigure(0, weight=1)
+        map_view.rowconfigure(0, weight=1)
+        self.subfolder_map_tree = ttk.Treeview(
+            map_view, columns=("folder", "words"), show="headings",
+            selectmode="browse", height=12)
+        self.subfolder_map_tree.heading("folder", text="MAPP")
+        self.subfolder_map_tree.heading("words", text="KOPPLADE STÖDORD")
+        self.subfolder_map_tree.column(
+            "folder", width=140, minwidth=90, anchor="w", stretch=True)
+        self.subfolder_map_tree.column(
+            "words", width=190, minwidth=120, anchor="w", stretch=True)
+        self.subfolder_map_tree.grid(row=0, column=0, sticky="nsew")
+        self.theme.zebra(self.subfolder_map_tree)
+        try:
+            self.subfolder_map_tree.tag_configure(
+                "_map_drop_target",
+                background=self.theme.c["accent_light"],
+                foreground=self.theme.c["accent_dark"],
+                font=("TkDefaultFont", 10, "bold"))
+            self.kw_tree.tag_configure(
+                "_map_drag_source",
+                background=self.theme.c["accent_light"],
+                foreground=self.theme.c["accent_dark"],
+                font=("TkDefaultFont", 10, "bold"))
+        except Exception:
+            pass
+        map_scroll = ttk.Scrollbar(
+            map_view, orient="vertical", command=self.subfolder_map_tree.yview)
+        map_scroll.grid(row=0, column=1, sticky="ns")
+        self.subfolder_map_tree.configure(yscrollcommand=map_scroll.set)
+        self.subfolder_map_trees = [self.subfolder_map_tree]
+        self.lbl_subfolder_map_status = ttk.Label(
+            mapbody, text="Välj en kategori för att börja.",
+            style="CardMuted.TLabel", wraplength=580, justify="left")
+        self.lbl_subfolder_map_status.grid(
+            row=2, column=0, sticky="ew", padx=T.INNER, pady=(6, 4))
+        map_actions = ttk.Frame(mapbody, style="CardInner.TFrame")
+        map_actions.grid(row=3, column=0, sticky="ew",
+                         padx=T.INNER, pady=(0, T.INNER))
+        map_actions.columnconfigure(0, weight=1)
+        map_actions.columnconfigure(1, weight=1)
+        ttk.Button(map_actions, text="Använd valt stödord som standard",
+                   command=self._cat_map_set_default).grid(
+                       row=0, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        ttk.Button(map_actions, text="Koppla stödord till mapp (Ctrl+M)",
+                   command=self._cat_map_assign_selected).grid(
+                       row=1, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        ttk.Button(map_actions, text="+ Skapa mapp…",
+                   command=self._cat_map_add_folder).grid(
+                       row=2, column=0, sticky="ew", padx=(0, 3))
+        ttk.Button(map_actions, text="Koppla loss valt ord",
+                   command=self._cat_map_remove).grid(
+                       row=2, column=1, sticky="ew", padx=(3, 0))
+        ttk.Button(map_actions, text="Ta bort vald mapp · behåll och skanna filer",
+                   command=self._cat_map_remove_folder).grid(
+                       row=3, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        ttk.Button(map_actions, text="Öppna kopplingsdialog…",
+                   command=self._open_subfolder_keyword_editor).grid(
+                       row=4, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        self._map_drag_word = ""
+        self.kw_tree.bind("<ButtonPress-1>", self._cat_map_drag_start, add="+")
+        self.kw_tree.bind("<B1-Motion>", self._cat_map_drag_motion, add="+")
+        self.kw_tree.bind("<ButtonRelease-1>", self._cat_map_drag_release, add="+")
+        self.kw_tree.bind("<ButtonPress-1>", self._kw_column_drag_start, add="+")
+        self.kw_tree.bind("<B1-Motion>", self._kw_column_drag_motion, add="+")
+        self.kw_tree.bind("<ButtonRelease-1>", self._kw_column_drag_release, add="+")
+        self.subfolder_map_tree.bind(
+            "<<TreeviewSelect>>",
+            lambda event: self._cat_map_folder_selected(self.subfolder_map_tree),
+            add="+")
+        self.root.bind("<Control-m>", self._cat_map_assign_selected, add="+")
+        self.root.bind("<Escape>", self._cat_map_drag_cancel, add="+")
         self._kw_sort = ("hits", True)
         self._kw_rows: List[Dict[str, Any]] = []
 
+        self._build_category_settings_window()
+
+    def _build_category_settings_window(self) -> None:
+        """Keep detailed category-routing controls in a separate settings dialog."""
+        tk, ttk = self.tk, self.ttk
+        dialog = tk.Toplevel(self.root)
+        self.category_settings_window = dialog
+        dialog._icon_ref = brand_window(dialog)
+        dialog.withdraw()
+        dialog.transient(self.root)
+        dialog.title("Kategoriinställningar")
+        dialog.geometry("780x510")
+        dialog.minsize(620, 420)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.withdraw)
+        ttk.Label(dialog, text="Kategoriinställningar", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", padx=16, pady=(14, 8))
+        meta = ttk.Frame(dialog, style="Card.TFrame")
+        self.cat_meta = meta
+        meta.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 8))
+        meta.columnconfigure(1, weight=1)
+        ttk.Label(meta, text="Arkivmapp i Utforskaren:",
+                  style="Card.TLabel").grid(
+            row=0, column=0, sticky="w", padx=12, pady=(12, 0))
+        self.var_folder = tk.StringVar()
+        ttk.Entry(meta, textvariable=self.var_folder).grid(
+            row=0, column=1, sticky="ew", padx=8, pady=(12, 0))
+        self.var_cat_enabled = tk.BooleanVar(value=True)
+        ttk.Checkbutton(meta, text="Aktiv", variable=self.var_cat_enabled,
+                        style="Card.TCheckbutton",
+                        command=self._cat_save_meta).grid(row=0, column=2, padx=6, pady=(12, 0))
+        ttk.Button(meta, text="Spara", command=self._cat_save_meta).grid(
+            row=0, column=3, padx=(0, 12), pady=(12, 0))
+        ttk.Label(meta, text="Standardundermapp:", style="Card.TLabel").grid(
+            row=1, column=0, sticky="w", padx=12, pady=(10, 0))
+        self.var_cat_subpath = tk.StringVar()
+        ttk.Entry(meta, textvariable=self.var_cat_subpath).grid(
+            row=1, column=1, sticky="ew", padx=8, pady=(10, 0))
+        ttk.Button(meta, text="Välj…", command=self._cat_browse_subpath).grid(
+            row=1, column=2, padx=(0, 4), pady=(10, 0))
+        ttk.Button(meta, text="Skapa…", command=self._cat_create_subpath).grid(
+            row=1, column=3, padx=(0, 4), pady=(10, 0))
+        ttk.Button(meta, text="Spara", command=self._cat_save_subpath).grid(
+            row=1, column=4, padx=(0, 12), pady=(10, 0))
+        ttk.Label(meta,
+                  text="Byt arkivmappens namn och tryck Spara för att döpa om den "
+                       "i Utforskaren; befintliga filer följer med.",
+                  style="CardMuted.TLabel", wraplength=560, justify="left").grid(
+                      row=7, column=1, columnspan=4, sticky="w", padx=8,
+                      pady=(8, 0))
+        ttk.Label(meta,
+                  text="Relativt till kategoriens datum-/årsmapp; skapas vid första sorteringen.",
+                  style="CardMuted.TLabel").grid(
+                      row=2, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
+        ttk.Label(meta, text="Datum:", style="Card.TLabel").grid(
+            row=3, column=0, sticky="w", padx=12, pady=(10, 0))
+        self.sub_combo = ttk.Combobox(
+            meta, state="readonly", width=34,
+            values=[label for _, label in SUBFOLDER_TEMPLATES])
+        self.sub_combo.grid(row=3, column=1, sticky="w", padx=8, pady=(10, 0))
+        self.sub_combo.bind("<<ComboboxSelected>>", lambda e: self._cat_save_sub())
+        self.lbl_sub_ex = ttk.Label(meta, text="", style="CardMuted.TLabel")
+        self.lbl_sub_ex.grid(row=3, column=2, columnspan=3, sticky="w",
+                             padx=8, pady=(10, 0))
+        ttk.Label(meta, text="Kräver:", style="Card.TLabel").grid(
+            row=4, column=0, sticky="w", padx=12, pady=(10, 0))
+        krav = ttk.Frame(meta, style="CardInner.TFrame")
+        krav.grid(row=4, column=1, columnspan=4, sticky="w", padx=8, pady=(10, 0))
+        self.var_catkw = tk.StringVar(value="0")
+        self.spin_catkw = ttk.Spinbox(krav, from_=0, to=9, width=4,
+                                      textvariable=self.var_catkw,
+                                      command=self._cat_save_kw)
+        self.spin_catkw.pack(side="left")
+        self.spin_catkw.bind("<FocusOut>", lambda e: self._cat_save_kw())
+        self.lbl_catkw = ttk.Label(krav, text="", style="CardMuted.TLabel")
+        self.lbl_catkw.pack(side="left", padx=10)
+        ttk.Label(meta, text="Standardstödord:", style="Card.TLabel").grid(
+            row=5, column=0, sticky="w", padx=12, pady=(10, 0))
+        self.var_default_keyword = tk.StringVar()
+        self.default_keyword_combo = ttk.Combobox(
+            meta, textvariable=self.var_default_keyword, state="readonly")
+        self.default_keyword_combo.grid(
+            row=5, column=1, columnspan=4, sticky="ew", padx=8, pady=(10, 0))
+        self.default_keyword_combo.bind(
+            "<<ComboboxSelected>>", self._cat_default_changed)
+        ttk.Label(meta,
+                  text="Kopplas till vald kategori; samma ord får finnas i flera kategorier.",
+                  style="CardMuted.TLabel").grid(
+                      row=6, column=1, columnspan=4, sticky="w", padx=8, pady=(2, 0))
+        ttk.Label(
+            dialog,
+            text="De här inställningarna påverkar inte listorna med stödord och skapade mappar.",
+            style="CardMuted.TLabel").grid(row=2, column=0, sticky="w", padx=16, pady=(0, 8))
+        ttk.Button(dialog, text="Klart", command=dialog.withdraw).grid(
+            row=3, column=0, sticky="e", padx=16, pady=(0, 14))
+
+    def _open_category_settings(self) -> None:
+        """Open settings for the currently selected category."""
+        if not self._selected_cat():
+            self.messagebox.showinfo(APP_NAME, "Välj först en kategori.", parent=self.root)
+            return
+        dialog = self.category_settings_window
+        dialog.title(f"Kategoriinställningar · {self._selected_cat()}")
+        dialog.deiconify()
+        dialog.lift()
+
     # -- visning ----------------------------------------------------------
     def _refresh_categories(self, keep: Optional[str] = None) -> None:
-        keep = keep or self._selected_cat()
-        for row in self.cat_tree.get_children():
-            self.cat_tree.delete(row)
-        for i, cat in enumerate(self.rules.categories):
-            tags = ["odd" if i % 2 else "even"]
-            if not cat.get("enabled", True):
-                tags.append("off")
-            name = cat["name"] + ("   (av)" if not cat.get("enabled", True) else "")
-            märken = []
-            n_kw = int(cat.get("min_keywords", 0) or 0)
-            if n_kw:
-                märken.append(f"{n_kw} ord")
-            if cat.get("subfolder"):
-                märken.append(cat["subfolder"])
-            self.cat_tree.insert("", "end", iid=cat["name"], tags=tags,
-                                 values=(name, len(cat["keywords"]),
-                                         " · ".join(märken)))
         names = self.rules.names()
-        target = keep if keep in names else (names[0] if names else None)
-        if target:
-            self.cat_tree.selection_set(target)
-            self.cat_tree.see(target)
+        current = keep or self._selected_cat()
+        target = current if current in names else (names[0] if names else "")
+        self.cat_combo.configure(values=names)
+        self.var_cat_select.set(target)
         total_words = sum(len(c["keywords"]) for c in self.rules.categories)
         self.lbl_kwcount.configure(
             text=f"{len(names)} kategorier · {total_words} stödord")
-        self._on_cat_select()
+        # Setting the selector variable invokes the trace and refreshes every
+        # category-dependent field from the same selected category.
 
     def _selected_cat(self) -> Optional[str]:
-        sel = self.cat_tree.selection()
-        return sel[0] if sel else None
+        name = self.var_cat_select.get().strip()
+        return name or None
+
+    def _toggle_kw_hide_linked(self) -> None:
+        """Visa/dölj redan mappkopplade stödord i listan (sparas)."""
+        try:
+            self.settings["kw_hide_linked"] = bool(
+                self.var_kw_hide_linked.get())
+            save_settings(self.settings)
+        except Exception:
+            pass
+        self._refresh_keyword_view()
 
     def _sort_keywords(self, col: str) -> None:
+        # Ett avslutat kolumndrag släpper också rubrikens klick: sortera
+        # inte då, flytten är redan gjord.
+        if getattr(self, "_kw_col_moved", False):
+            self._kw_col_moved = False
+            return
         current, desc = self._kw_sort
         self._kw_sort = (col, not desc if col == current else True)
         self._refresh_keyword_view()
 
-    def _on_cat_select(self) -> None:
+    def _kw_display_columns(self) -> List[str]:
+        """Stödordstabellens visade kolumnordning (aldrig tom)."""
+        try:
+            display = list(self.kw_tree["displaycolumns"] or ())
+        except Exception:
+            display = []
+        if not display or {str(c) for c in display} != set(KW_COLUMNS):
+            display = list(KW_COLUMNS)
+        return [str(c) for c in display]
+
+    def _apply_kw_column_order(self, order: Any, save: bool = False) -> None:
+        """Visa stödordskolumnerna i en ordning; spara den vid behov."""
+        order = normalize_column_order(order)
+        try:
+            self.kw_tree["displaycolumns"] = order
+        except Exception:
+            return
+        if save:
+            try:
+                self.settings["kw_column_order"] = order
+                save_settings(self.settings)
+            except Exception:
+                pass
+
+    def _kw_column_drag_start(self, event) -> None:
+        """Börja flytta en kolumn när draget startar på en rubrik."""
+        tree = self.kw_tree
+        try:
+            region = tree.identify_region(event.x, event.y)
+        except Exception:
+            return
+        if region != "heading":
+            return
+        display = self._kw_display_columns()
+        try:
+            index = int(str(tree.identify_column(event.x))[1:]) - 1
+        except (TypeError, ValueError):
+            return
+        if not 0 <= index < len(display):
+            return
+        self._kw_col_drag = {"col": display[index], "x": event.x,
+                             "moved": False}
+        try:
+            tree.configure(cursor="fleur")
+        except Exception:
+            pass
+
+    def _kw_column_drag_motion(self, event) -> None:
+        drag = getattr(self, "_kw_col_drag", None)
+        if not drag:
+            return
+        if abs(event.x - drag["x"]) > 6:
+            drag["moved"] = True
+
+    def _kw_column_drag_release(self, event) -> None:
+        drag = getattr(self, "_kw_col_drag", None)
+        self._kw_col_drag = None
+        try:
+            self.kw_tree.configure(cursor="")
+        except Exception:
+            pass
+        if not drag or not drag["moved"]:
+            return
+        # Rubrikkommandot (sortering) körs efter den här bindningen:
+        # flaggan gör att draget inte också råkar sortera om.
+        self._kw_col_moved = True
+        display = self._kw_display_columns()
+        try:
+            widths = [int(self.kw_tree.column(c, "width")) for c in display]
+        except Exception:
+            return
+        order = drop_column_at(display, drag["col"], widths, event.x)
+        if order != display:
+            self._apply_kw_column_order(order, save=True)
+
+    def _on_cat_select(self, _event=None) -> None:
         name = self._selected_cat()
         cat = self.rules.get(name) if name else None
         if not cat:
             self.var_folder.set("")
-            self.lbl_cat_title.configure(text="Ingen kategori vald")
-            self.lbl_cat_stats.configure(text="")
+            self.var_cat_enabled.set(True)
+            self.var_cat_subpath.set("")
+            self.var_catkw.set("0")
+            self.var_default_keyword.set("")
+            self.default_keyword_combo.configure(values=())
+            no_categories = not self.rules.categories
+            self.lbl_cat_empty.configure(
+                text=("Skapa en kategori eller importera regler för att komma igång."
+                      if no_categories else
+                      "Välj en kategori i menyn ovan för att visa dess stödord och mappar."))
+            self.kw_tree.grid_remove()
+            self.kw_scrollbar.grid_remove()
+            self.lbl_kw_sum.grid_remove()
+            self.kw_hint.grid_remove()
+            self.kw_buttons.grid_remove()
+            self.empty_cat_panel.grid()
             for row in self.kw_tree.get_children():
                 self.kw_tree.delete(row)
+            self._refresh_subfolder_map()
             return
+
+        self.empty_cat_panel.grid_remove()
+        self.kw_tree.grid()
+        self.kw_scrollbar.grid()
+        self.lbl_kw_sum.grid()
+        self.kw_hint.grid()
+        self.kw_buttons.grid()
         self.var_folder.set(cat["folder"])
         self.var_cat_enabled.set(cat.get("enabled", True))
+        self.var_cat_subpath.set(cat.get("subfolder_path", ""))
         mall = cat.get("subfolder", "")
-        nycklar = [t for t, _ in SUBFOLDER_TEMPLATES]
+        nycklar = [template for template, _label in SUBFOLDER_TEMPLATES]
         self.sub_combo.current(nycklar.index(mall) if mall in nycklar else 0)
         self._show_sub_example(cat)
         self.var_catkw.set(str(int(cat.get("min_keywords", 0) or 0)))
         self._show_kw_krav(cat)
-        self.lbl_cat_title.configure(text=cat["name"])
-        used = sum(1 for k in cat["keywords"] if k.get("hits", 0))
-        self.lbl_cat_stats.configure(
-            text=f"{len(cat['keywords'])} stödord, varav {used} har använts  ·  "
-                 f"{cat.get('files_sorted', 0)} filer sorterade  ·  "
-                 f"mapp: {cat['folder']}")
+        default_words = sorted(
+            {normalize(kw.get("text", "")) for kw in cat["keywords"]
+             if normalize(kw.get("text", ""))}, key=str.casefold)
+        self.default_keyword_combo.configure(values=default_words)
+        default_word = normalize(cat.get("default_keyword", ""))
+        self.var_default_keyword.set(
+            default_word if default_word in default_words else "")
+        if hasattr(self, "category_settings_window"):
+            self.category_settings_window.title(
+                f"Kategoriinställningar · {cat['name']}")
         self._refresh_keyword_view()
+        self._refresh_subfolder_map()
+
+    def _refresh_subfolder_map(self) -> None:
+        tree = getattr(self, "subfolder_map_tree", None)
+        if tree is None:
+            return
+        for item in tree.get_children():
+            tree.delete(item)
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            self.lbl_subfolder_map_status.configure(
+                text="Välj en kategori i menyn ovan.")
+            if hasattr(self, "kw_tree"):
+                self._refresh_keyword_view()
+                self._cat_map_show_selected_mapping()
+            return
+        mapping = cat.setdefault("subfolder_keyword_map", {})
+        if not isinstance(mapping, dict):
+            mapping = {}
+            cat["subfolder_keyword_map"] = mapping
+        folders = self._subfolder_mapping_options(cat)
+        keyword_labels = {
+            normalize(keyword.get("text", "")): str(keyword.get("text", ""))
+            for keyword in cat.get("keywords", [])
+            if normalize(keyword.get("text", ""))
+        }
+        for index, folder in enumerate(folders):
+            mapped = sorted(
+                (keyword_labels.get(normalize(word), str(word))
+                 for word, target in mapping.items()
+                 if str(target).casefold() == folder.casefold()),
+                key=str.casefold)
+            tree.insert("", "end", iid=f"map-folder-{index}",
+                        values=(folder, ", ".join(mapped) or "—"))
+        self.lbl_subfolder_map_status.configure(
+            text=(f"{len(folders)} skapade mappar. Dra ett sparat stödord "
+                  "från vänster eller markera ord och mapp och tryck Ctrl+M."))
+        if hasattr(self, "kw_tree"):
+            # Mappkolumnen i stödordstabellen speglar alltid kopplingarna.
+            self._refresh_keyword_view()
+            self._cat_map_show_selected_mapping()
+
+    def _cat_map_set_row_highlight(self, state_attr: str, tree, row: str,
+                                   tag: str) -> None:
+        """Apply a temporary drag highlight while preserving the row's tags."""
+        current = getattr(self, state_attr, None)
+        if current and current["tree"] is tree and current["row"] == row:
+            return
+        self._cat_map_clear_row_highlight(state_attr)
+        if not row:
+            return
+        try:
+            original = tuple(tree.item(row, "tags") or ())
+            tree.item(row, tags=original + (tag,))
+            setattr(self, state_attr, {"tree": tree, "row": row,
+                                       "tags": original})
+        except Exception:
+            pass
+
+    def _cat_map_clear_row_highlight(self, state_attr: str) -> None:
+        current = getattr(self, state_attr, None)
+        if not current:
+            return
+        try:
+            current["tree"].item(current["row"], tags=current["tags"])
+        except Exception:
+            pass
+        setattr(self, state_attr, None)
+
+    def _cat_map_drag_restore(self) -> None:
+        self._cat_map_clear_row_highlight("_map_drag_source_highlight")
+        self._cat_map_clear_row_highlight("_map_drag_target_highlight")
+        self._map_drag_word = ""
+        try:
+            self.root.configure(cursor="")
+        except Exception:
+            pass
+
+    def _cat_map_drag_start(self, event) -> None:
+        self._cat_map_drag_restore()
+        row = self.kw_tree.identify_row(event.y)
+        word = normalize(self.kw_tree.set(row, "word")) if row else ""
+        if not word:
+            return
+        self._map_drag_word = word
+        self.kw_tree.selection_set(row)
+        self._cat_map_set_row_highlight(
+            "_map_drag_source_highlight", self.kw_tree, row,
+            "_map_drag_source")
+        try:
+            self.root.configure(cursor="hand2")
+        except Exception:
+            pass
+        self.lbl_subfolder_map_status.configure(
+            text=f"↗ Dra koppling: ‘{word}’ → släpp på en mapp. Esc avbryter.")
+
+    def _cat_map_drag_motion(self, event) -> None:
+        word = getattr(self, "_map_drag_word", "")
+        if not word:
+            return
+        target = self.root.winfo_containing(event.x_root, event.y_root)
+        if target in getattr(self, "subfolder_map_trees", ()):
+            row_y = event.y_root - target.winfo_rooty()
+            row = target.identify_row(row_y)
+            values = target.item(row, "values") if row else ()
+            folder = str(values[0]) if values else ""
+            if folder:
+                self._cat_map_set_row_highlight(
+                    "_map_drag_target_highlight", target, row,
+                    "_map_drop_target")
+                self.lbl_subfolder_map_status.configure(
+                    text=f"↗ Koppla ‘{word}’ till ‘{folder}’ — släpp för att spara.")
+                cursor = "hand2"
+            else:
+                self._cat_map_clear_row_highlight("_map_drag_target_highlight")
+                self.lbl_subfolder_map_status.configure(
+                    text=f"⛔ Släpp ‘{word}’ på en skapad mapp — annars sparas inget.")
+                cursor = "no"
+        else:
+            self._cat_map_clear_row_highlight("_map_drag_target_highlight")
+            self.lbl_subfolder_map_status.configure(
+                text=f"Dra ‘{word}’ till en mapp till höger. Släpp här för att avbryta.")
+            cursor = "no"
+        try:
+            self.root.configure(cursor=cursor)
+        except Exception:
+            pass
+
+    def _cat_map_drag_cancel(self, _event=None):
+        if not getattr(self, "_map_drag_word", ""):
+            return None
+        self._cat_map_drag_restore()
+        self.lbl_subfolder_map_status.configure(
+            text="Dragningen avbröts. Ingen koppling ändrades.")
+        return "break"
+
+    def _cat_map_drag_release(self, event) -> None:
+        word = getattr(self, "_map_drag_word", "")
+        target = self.root.winfo_containing(event.x_root, event.y_root)
+        row = ""
+        folder = ""
+        if word and target in getattr(self, "subfolder_map_trees", ()):
+            row_y = event.y_root - target.winfo_rooty()
+            row = target.identify_row(row_y)
+            values = target.item(row, "values") if row else ()
+            folder = str(values[0]) if values else ""
+        if not word or not folder:
+            self._cat_map_drag_restore()
+            if word:
+                self.lbl_subfolder_map_status.configure(
+                    text="Kopplingen avbröts. Släpp på en skapad mapp för att spara.")
+            return
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            self._cat_map_drag_restore()
+            self.lbl_subfolder_map_status.configure(
+                text="Kopplingen kunde inte sparas. Välj en kategori först.")
+            return
+        cat.setdefault("subfolder_keyword_map", {})[word] = folder
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self._cat_map_drag_restore()
+        self.lbl_subfolder_map_status.configure(
+            text=f"✓ Stödordet ‘{word}’ är nu kopplat till mappen ‘{folder}’. "
+                 f"Standardord: {normalize(cat.get('default_keyword', '')) or 'inte valt'}.")
+
+    def _cat_map_folder_selected(self, selected_tree, _event=None) -> None:
+        for tree in getattr(self, "subfolder_map_trees", ()):
+            if tree is not selected_tree:
+                selection = tree.selection()
+                if selection:
+                    tree.selection_remove(*selection)
+
+    def _cat_map_show_selected_mapping(self, _event=None) -> None:
+        """Show selected support words and their mapped folders in its own column."""
+        detail_tree = getattr(self, "selected_keyword_map_tree", None)
+        if detail_tree is not None:
+            for item in detail_tree.get_children():
+                detail_tree.delete(item)
+        selection = self.kw_tree.selection()
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            if detail_tree is not None:
+                detail_tree.insert(
+                    "", "end", values=("—", "Välj en kategori"))
+            return
+        mapping = cat.get("subfolder_keyword_map", {})
+        mapping_by_normalized = {
+            normalize(word): str(folder)
+            for word, folder in mapping.items()
+        } if isinstance(mapping, dict) else {}
+        entries = []
+        for row in selection:
+            label = str(self.kw_tree.set(row, "word") or "").strip()
+            word = normalize(label)
+            if not word:
+                continue
+            folder = mapping_by_normalized.get(word, "")
+            shown_folder = folder or "Ingen mappkoppling"
+            if detail_tree is not None:
+                detail_tree.insert("", "end", values=(label, shown_folder))
+            entries.append(
+                f"‘{label}’ → ‘{folder}’" if folder
+                else f"‘{label}’ → ingen mappkoppling")
+        if not entries and detail_tree is not None:
+            detail_tree.insert(
+                "", "end", values=("—", "Välj ett stödord"))
+        if entries:
+            self.lbl_subfolder_map_status.configure(
+                text="Kopplat stödord: " + " · ".join(entries))
+
+    def _cat_map_assign_selected(self, _event=None):
+        """Assign selected support word(s) to the selected folder; Ctrl+M."""
+        try:
+            if self.nb.select() != str(self.tab_cats):
+                return
+        except Exception:
+            pass
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        words = [normalize(self.kw_tree.set(row, "word"))
+                 for row in self.kw_tree.selection()]
+        words = [word for word in words if word]
+        selected_folders = [
+            tree.item(row, "values")
+            for tree in getattr(self, "subfolder_map_trees", ())
+            for row in tree.selection()
+        ]
+        if not cat:
+            self.lbl_subfolder_map_status.configure(
+                text="Välj först en kategori i menyn ovan.")
+            return "break"
+        if not words:
+            self.lbl_subfolder_map_status.configure(
+                text="Markera ett eller flera sparade stödord till vänster.")
+            return "break"
+        if len(selected_folders) != 1 or not selected_folders[0]:
+            self.lbl_subfolder_map_status.configure(
+                text="Markera en skapad mapp i listan till höger.")
+            return "break"
+        folder = str(selected_folders[0][0])
+        mapping = cat.setdefault("subfolder_keyword_map", {})
+        for word in words:
+            mapping[word] = folder
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self.lbl_subfolder_map_status.configure(
+            text=(f"Kopplade {len(words)} stödord till ‘{folder}’. "
+                  "Inget flyttas förrän en PDF sorteras.")
+        )
+        return "break"
+
+    def _cat_default_changed(self, _event=None) -> None:
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            return
+        word = normalize(self.var_default_keyword.get())
+        valid_words = {normalize(kw.get("text", ""))
+                       for kw in cat.get("keywords", [])}
+        if word and word not in valid_words:
+            self.var_default_keyword.set("")
+            word = ""
+        cat["default_keyword"] = word
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self._refresh_keyword_view()
+        self.lbl_subfolder_map_status.configure(
+            text=(f"{word} är standardstödord för {cat['name']}. "
+                  "Inställningen är separat för varje kategori."
+                  if word else f"Standardstödordet togs bort för {cat['name']}."))
+
+    def _cat_map_set_default(self) -> None:
+        selection = self.kw_tree.selection()
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat or not selection:
+            self.lbl_subfolder_map_status.configure(
+                text="Markera först ett sparat stödord i listan till vänster.")
+            return
+        word = normalize(self.kw_tree.set(selection[0], "word"))
+        if not word:
+            return
+        self.var_default_keyword.set(word)
+        self._cat_default_changed()
+
+    def _cat_map_add_folder(self) -> None:
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            self.lbl_subfolder_map_status.configure(
+                text="Välj först en kategori i menyn ovan.")
+            return
+        value = self.simpledialog.askstring(
+            APP_NAME,
+            "Mapp relativt kategoriens datum-/årsmapp "
+            "(exempel: Faktura eller Transaktioner/Inbetalningar):",
+            parent=self.root)
+        if value is None:
+            return
+        folder, error = self._create_category_mapping_folder(cat, value)
+        if error:
+            self.messagebox.showwarning(APP_NAME, error, parent=self.root)
+            return
+        self._refresh_subfolder_map()
+        self.lbl_subfolder_map_status.configure(
+            text=f"Skapade mappen ‘{folder}’ i kategorin {cat['name']}.")
+
+    def _cat_map_remove_folder(self) -> None:
+        """Remove a created folder while preserving its files and rescanning PDFs."""
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        tree = getattr(self, "subfolder_map_tree", None)
+        selection = tree.selection() if tree else ()
+        if not cat or not selection:
+            self.lbl_subfolder_map_status.configure(
+                text="Markera först en skapad mapp i listan till höger.")
+            return
+        folder = str(tree.item(selection[0], "values")[0] or "").strip()
+        folder, error = validate_subfolder_override(folder)
+        if error or not folder:
+            self.lbl_subfolder_map_status.configure(text="Den valda mappen är ogiltig.")
+            return
+        if getattr(self, "_rescanning", False):
+            self.messagebox.showinfo(
+                APP_NAME, "Vänta tills den pågående omskanningen är klar.",
+                parent=self.root)
+            return
+        if not self.messagebox.askyesno(
+                APP_NAME,
+                f"Ta bort mappen ‘{folder}’ från kategorin {cat['name']}?\n\n"
+                "Alla filer behålls och flyttas upp till mappens förälder. "
+                "PDF-filerna skannas sedan om.", parent=self.root):
+            return
+        try:
+            moved_pdfs = self._remove_category_mapping_folder(cat, folder)
+        except (OSError, ValueError) as exc:
+            self.messagebox.showerror(
+                APP_NAME, f"Mappen kunde inte tas bort: {exc}", parent=self.root)
+            return
+        mapping = cat.setdefault("subfolder_keyword_map", {})
+        prefix = folder.casefold() + "/"
+        for word, target in list(mapping.items()):
+            if (str(target).casefold() == folder.casefold()
+                    or str(target).casefold().startswith(prefix)):
+                mapping.pop(word, None)
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self.lbl_subfolder_map_status.configure(
+            text=(f"Mappen ‘{folder}’ togs bort. Filerna finns kvar; "
+                  f"{len(moved_pdfs)} PDF-filer skannas om."))
+        if moved_pdfs:
+            self._start_rescan_files(moved_pdfs, cat["name"])
+
+    def _remove_category_mapping_folder(
+            self, cat: Dict[str, Any], folder: str) -> List[Path]:
+        """Move folder contents to each folder's parent, then remove empty dirs.
+
+        Mapping rows collapse year/date paths, so remove every matching physical
+        instance (for example the same document-type folder under 2024 and 2025).
+        Files are flattened into the parent with collision-safe names.
+        """
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if not output:
+            raise ValueError("Välj först en arkivmapp under Start.")
+        root = (Path(output) / safe_folder_name(cat["folder"])).resolve()
+        if not root.is_dir():
+            raise ValueError("Kategorimappen finns inte längre.")
+        base = self._category_subfolder_mapping_base(cat)
+        try:
+            base_parts = list(base.resolve().relative_to(root).parts)
+            base_parts = [part for part in base_parts
+                          if not (len(part) == 4 and part.isdigit())]
+        except (OSError, ValueError):
+            base_parts = []
+        matches = []
+        for directory in root.rglob("*"):
+            if not directory.is_dir():
+                continue
+            try:
+                directory.resolve().relative_to(root)
+                relative = list(directory.relative_to(root).parts)
+            except (OSError, ValueError):
+                continue
+            relative = [part for part in relative
+                        if not (len(part) == 4 and part.isdigit())]
+            if base_parts and relative[:len(base_parts)] == base_parts:
+                relative = relative[len(base_parts):]
+            if "/".join(relative).casefold() == folder.casefold():
+                matches.append(directory)
+        if not matches:
+            raise ValueError("Den valda skapade mappen hittades inte.")
+
+        # Validate every instance before moving any files so a link or an
+        # unexpected path cannot leave only some year-folders processed.
+        files_by_directory: Dict[Path, List[Path]] = {}
+        for directory in matches:
+            files = []
+            for path in directory.rglob("*"):
+                if path.is_symlink():
+                    raise ValueError("Mappen innehåller en symbolisk länk; inget ändrades.")
+                if path.is_file():
+                    path.resolve().relative_to(root)
+                    files.append(path)
+            files_by_directory[directory] = files
+
+        pdfs: List[Path] = []
+        for directory in matches:
+            parent = directory.parent
+            files = files_by_directory[directory]
+            for source in files:
+                target = parent / source.name
+                if target.exists():
+                    stem, suffix = source.stem, source.suffix
+                    index = 2
+                    while target.exists():
+                        target = parent / f"{stem} ({index}){suffix}"
+                        index += 1
+                shutil.move(str(source), str(target))
+                if target.suffix.casefold() == ".pdf":
+                    pdfs.append(target)
+            for child in sorted(directory.rglob("*"),
+                                key=lambda item: len(item.parts), reverse=True):
+                if child.is_dir():
+                    child.rmdir()
+            directory.rmdir()
+        return pdfs
+
+    def _start_rescan_files(self, files: List[Path], category: str) -> None:
+        """Start the regular safe rescan worker for an explicit set of files."""
+        if self._rescanning or not files:
+            return
+        self._rescanning = True
+        self._log(f"Skannar om {len(files)} filer…", "info")
+        threading.Thread(target=self._rescan_worker, args=(files, category),
+                         daemon=True, name="pdfsorter-rescan").start()
+
+    def _cat_map_remove(self) -> None:
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        selection = self.kw_tree.selection()
+        if not cat or not selection:
+            self.lbl_subfolder_map_status.configure(
+                text="Markera först ett sparat stödord i listan till vänster.")
+            return
+        word = normalize(self.kw_tree.set(selection[0], "word"))
+        mapping = cat.setdefault("subfolder_keyword_map", {})
+        if word not in mapping:
+            self.lbl_subfolder_map_status.configure(
+                text=f"{word} har ingen undermappskoppling.")
+            return
+        mapping.pop(word, None)
+        self.rules.save()
+        self._refresh_subfolder_map()
+        self.lbl_subfolder_map_status.configure(
+            text=f"Kopplingen för {word} togs bort.")
 
     def _refresh_keyword_view(self) -> None:
-        """Rita om stödordslistan med aktuell sortering och sökfilter."""
+        """Rita om alla stödord i vald kategori med aktuell sortering."""
+        try:
+            selected = set(self.kw_tree.selection())
+        except Exception:
+            selected = set()
         for row in self.kw_tree.get_children():
             self.kw_tree.delete(row)
         name = self._selected_cat()
@@ -5509,9 +12599,18 @@ class App:
         if not cat:
             return
 
-        needle = normalize(self.var_kwsearch.get())
-        words = [k for k in cat["keywords"]
-                 if not needle or needle in k["text"]]
+        words = list(cat["keywords"])
+        default_word = normalize(cat.get("default_keyword", ""))
+        hide_linked = False
+        hide_var = getattr(self, "var_kw_hide_linked", None)
+        if hide_var is not None:
+            try:
+                hide_linked = bool(hide_var.get())
+            except Exception:
+                hide_linked = False
+        if hide_linked:
+            words = [k for k in words
+                     if not keyword_is_linked(cat, k.get("text", ""))]
 
         col, desc = self._kw_sort
         keyfn = {
@@ -5520,6 +12619,8 @@ class App:
             "weight": lambda k: k["weight"],
             "whole": lambda k: k.get("whole_word", True),
             "hits": lambda k: k.get("hits", 0),
+            "folder": lambda k: keyword_folder_label(cat, k["text"]),
+            "std": lambda k: normalize(k["text"]) == default_word,
             "source": lambda k: k.get("source", ""),
         }.get(col, lambda k: k.get("hits", 0))
         words.sort(key=keyfn, reverse=desc)
@@ -5533,25 +12634,31 @@ class App:
                 tags.append("strong")
             elif not kw.get("hits", 0):
                 tags.append("weak")
+            is_default = bool(default_word) and \
+                normalize(kw["text"]) == default_word
             self.kw_tree.insert("", "end", iid=kw["text"], tags=tags, values=(
                 kw["text"], label, f"{kw['weight']:g}",
                 "ja" if kw.get("whole_word", True) else "nej",
-                kw.get("hits", 0)))
-
-        if needle:
-            self.lbl_cat_stats.configure(
-                text=f"{len(words)} av {len(cat['keywords'])} stödord "
-                     f'matchar "{self.var_kwsearch.get()}"')
+                kw.get("hits", 0), keyword_folder_label(cat, kw["text"]),
+                "★" if is_default else ""))
+        for iid in selected:
+            try:
+                if self.kw_tree.exists(iid):
+                    self.kw_tree.selection_add(iid)
+            except Exception:
+                pass
 
         if hasattr(self, "lbl_kw_sum"):
             starka = sum(1 for k in cat["keywords"] if keyword_strength(k["text"]))
             oanvända = sum(1 for k in cat["keywords"] if not k.get("hits", 0))
-            behov = max(effective_thresholds(self.settings)["min_keywords"],
-                        int(cat.get("min_keywords", 0) or 0))
+            behov = max(1, int(cat.get("min_keywords", 0) or 0))
             delar = [f"{starka} starka bevis (org.nr, VAT, giro, domän)"]
             if oanvända:
                 delar.append(f"{oanvända} har aldrig träffat")
-            delar.append(f"kräver {behov} för automatisk flytt")
+            delar.append(f"auto kräver {behov} exakta stödord")
+            if hide_linked:
+                delar.append(f"visar {len(words)} av {len(cat['keywords'])} "
+                             "(kopplade dolda)")
             self.lbl_kw_sum.configure(text="   ·   ".join(delar))
 
 
@@ -5590,17 +12697,257 @@ class App:
         _PATTERN_CACHE.clear()
         self._refresh_categories()
 
-    def _cat_context(self, event) -> None:
-        """Visa kategorins högerklicksmeny, med raden under pekaren markerad."""
-        rad = self.cat_tree.identify_row(event.y)
-        if rad and rad not in self.cat_tree.selection():
-            self.cat_tree.selection_set(rad)
-        if not self.cat_tree.selection():
+    def _category_clear_backup_files(self) -> List[Path]:
+        rules_path = self.rules.path
+        pattern = f"{rules_path.stem}.before-clear-*{rules_path.suffix}"
+        return sorted(rules_path.parent.glob(pattern))
+
+    def _category_clear_backup_path(self) -> Optional[Path]:
+        backups = self._category_clear_backup_files()
+        return backups[-1] if backups else None
+
+    def _update_category_restore_button(self) -> None:
+        button = getattr(self, "btn_cat_restore", None)
+        if button is not None:
+            button.configure(
+                state="normal" if self._category_clear_backup_path() else "disabled")
+
+    def _cat_clear_all(self) -> None:
+        """Säkerhetskopiera och ta bort alla kategorier efter bekräftelse."""
+        count = len(self.rules.categories)
+        if not count:
+            self.messagebox.showinfo(
+                APP_NAME, "Det finns inga kategorier att tömma.", parent=self.root)
+            return
+        total_words = sum(len(cat.get("keywords", []))
+                          for cat in self.rules.categories)
+        if not self.messagebox.askyesno(
+                APP_NAME,
+                f"Ta bort alla {count} kategorier och deras {total_words} stödord?\n\n"
+                "Kategorierna och stödorden försvinner från reglerna. En "
+                "säkerhetskopia görs så att tömningen kan ångras. Redan "
+                "sorterade filer, historik och originalfiler påverkas inte.",
+                parent=self.root):
+            return
+
+        rules_path = self.rules.path
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup = rules_path.with_name(
+            f"{rules_path.stem}.before-clear-{timestamp}{rules_path.suffix}")
+        temporary = backup.with_name(backup.name + ".tmp")
+        try:
+            self.rules.save()
+            shutil.copy2(rules_path, temporary)
+            os.replace(temporary, backup)
+        except Exception as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.messagebox.showerror(
+                APP_NAME,
+                f"Säkerhetskopian kunde inte skapas. Kategorierna är kvar.\n\n{exc}",
+                parent=self.root)
+            return
+
+        original_categories = self.rules.categories
+        self.rules.categories = []
+        self.rules._rebuild_index()
+        try:
+            self.rules.save()
+        except Exception as exc:
+            self.rules.categories = original_categories
+            self.rules._rebuild_index()
+            try:
+                shutil.copy2(backup, rules_path)
+            except OSError:
+                pass
+            self._update_category_restore_button()
+            self.messagebox.showerror(
+                APP_NAME,
+                f"Reglerna kunde inte tömmas; de ursprungliga kategorierna har "
+                f"behållits i minnet. Säkerhetskopia: {backup}\n\n{exc}",
+                parent=self.root)
+            return
+
+        _PATTERN_CACHE.clear()
+        self._update_category_restore_button()
+        self._refresh_categories()
+        self._log(f"Tog bort alla {count} kategorier och {total_words} stödord", "warn")
+
+    def _cat_restore_clear_backup(self) -> None:
+        """Återställ den senaste säkerhetskopian från en kategoritömning."""
+        backup = self._category_clear_backup_path()
+        if backup is None:
+            self._update_category_restore_button()
+            self.messagebox.showinfo(
+                APP_NAME, "Det finns ingen säkerhetskopia att återställa.",
+                parent=self.root)
+            return
+        if self.rules.categories and not self.messagebox.askyesno(
+                APP_NAME,
+                "Återställa kategorier och stödord från den senaste tömningen?\n\n"
+                "Detta ersätter de nuvarande reglerna. Filer och historik påverkas inte.",
+                parent=self.root):
             return
         try:
-            self.cat_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.cat_menu.grab_release()
+            restored = Rules.load(backup)
+            if not restored.categories:
+                raise ValueError("Säkerhetskopian innehåller inga kategorier.")
+        except Exception as exc:
+            self.messagebox.showerror(
+                APP_NAME, f"Säkerhetskopian kunde inte läsas:\n{backup}\n\n{exc}",
+                parent=self.root)
+            return
+
+        current_categories = self.rules.categories
+        self.rules.categories = restored.categories
+        self.rules._rebuild_index()
+        try:
+            self.rules.save()
+        except Exception as exc:
+            self.rules.categories = current_categories
+            self.rules._rebuild_index()
+            self.messagebox.showerror(
+                APP_NAME, f"Reglerna kunde inte återställas.\n\n{exc}",
+                parent=self.root)
+            return
+
+        try:
+            backup.unlink()
+        except OSError:
+            pass
+        _PATTERN_CACHE.clear()
+        self._warm_patterns()
+        self._update_category_restore_button()
+        self._refresh_categories()
+        self._log("Återställde kategorier från säkerhetskopian", "info")
+
+    def _category_subfolder_base(self, cat: Dict[str, Any],
+                                 when: Optional[date] = None) -> Path:
+        """Dagens datum-/årsmapp under vald kategori."""
+        when = when or date.today()
+        dated = ""
+        if self.settings.get("date_enabled", False):
+            template = (cat.get("subfolder", "")
+                        or self.settings.get("date_default_template", "{år}"))
+            if template:
+                dated = render_subfolder(template, when)
+        if self.settings.get("year_subfolder", True):
+            year = str(when.year)
+            levels = [part for part in dated.split("/") if part and part != year]
+            dated = "/".join([year, *levels])
+        base = (Path(self.settings.get("output_dir") or ".")
+                / safe_folder_name(cat["folder"])
+        )
+        for part in dated.split("/"):
+            if part:
+                base = base / safe_folder_name(part)
+        return base
+
+    def _category_subfolder_mapping_base(self, cat: Dict[str, Any]) -> Path:
+        """Base where created document-type folders live for this category."""
+        base = self._category_subfolder_base(cat)
+        category_sub, error = validate_subfolder_override(
+            str(cat.get("subfolder_path", "") or ""))
+        if not error:
+            for part in category_sub.split("/"):
+                if part:
+                    base /= safe_folder_name(part)
+        return base
+
+    def _create_category_mapping_folder(
+            self, cat: Dict[str, Any], raw_folder: str) -> Tuple[str, str]:
+        """Create an explicitly requested subfolder under the category target."""
+        folder, error = validate_subfolder_override(str(raw_folder or ""))
+        if error or not folder:
+            return "", error or "Ange ett mappnamn."
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if not output:
+            return "", "Välj först en arkivmapp under Start."
+        base = self._category_subfolder_mapping_base(cat)
+        try:
+            base_resolved = base.resolve()
+            target = base.joinpath(*(safe_folder_name(p) for p in folder.split("/")))
+            target_resolved = target.resolve()
+            target_resolved.relative_to(base_resolved)
+            target.mkdir(parents=True, exist_ok=True)
+        except (OSError, ValueError) as exc:
+            return "", f"Mappen kunde inte skapas: {exc}"
+        return folder, ""
+
+    def _cat_browse_subpath(self) -> None:
+        """Välj en befintlig standardundermapp under dagens kategori-/datummapp."""
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            return
+        if not self.settings.get("output_dir"):
+            self.messagebox.showinfo(
+                APP_NAME, "Välj först en arkivmapp under Start.", parent=self.root)
+            return
+        base = self._category_subfolder_base(cat).resolve()
+        if not base.is_dir():
+            self.messagebox.showinfo(
+                APP_NAME,
+                "Målmappen finns inte ännu. Skriv eller skapa en standardundermapp; "
+                "den skapas när den första filen sorteras dit.", parent=self.root)
+            return
+        chosen = self.filedialog.askdirectory(
+            parent=self.root, title="Välj standardundermapp",
+            initialdir=str(base), mustexist=True)
+        if not chosen:
+            return
+        try:
+            relative = Path(chosen).resolve().relative_to(base)
+        except (OSError, ValueError):
+            self.messagebox.showerror(
+                APP_NAME, "Välj en undermapp inuti kategoriens datum-/årsmapp.",
+                parent=self.root)
+            return
+        value, error = validate_subfolder_override(
+            "" if relative == Path(".") else relative.as_posix())
+        if error:
+            self.messagebox.showerror(APP_NAME, error, parent=self.root)
+            return
+        self.var_cat_subpath.set(value)
+        self._cat_save_subpath()
+
+    def _cat_create_subpath(self) -> None:
+        """Ange en relativ standardundermapp som skapas vid första flytten."""
+        if not self._selected_cat():
+            return
+        value = self.simpledialog.askstring(
+            APP_NAME,
+            "Standardundermapp relativt datum-/årsmappen (exempel: Fakturor/2025). "
+            "Den skapas när första filen sorteras dit:",
+            initialvalue=self.var_cat_subpath.get(), parent=self.root)
+        if value is None:
+            return
+        self.var_cat_subpath.set(value)
+        self._cat_save_subpath()
+
+    def _cat_save_subpath(self) -> None:
+        """Validera och spara kategorins standardundermapp."""
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            return
+        value, error = validate_subfolder_override(self.var_cat_subpath.get())
+        if error:
+            self.messagebox.showerror(APP_NAME, error, parent=self.root)
+            self.var_cat_subpath.set(cat.get("subfolder_path", ""))
+            return
+        self.var_cat_subpath.set(value)
+        if value == cat.get("subfolder_path", ""):
+            self._show_sub_example(cat)
+            return
+        cat["subfolder_path"] = value
+        self.rules.save()
+        self._show_sub_example(cat)
+        self._log(
+            f"Sparade standardundermapp för {cat['name']}: {value or '(ingen)'}",
+            "info")
 
     def _cat_save_sub(self) -> None:
         """Spara vald undermappsmall och visa ett exempel med dagens datum."""
@@ -5618,16 +12965,316 @@ class App:
                       "Slå på den under Inställningar.", "warn")
 
     def _show_sub_example(self, cat: Dict[str, Any]) -> None:
-        """Grå exempelrad: så här hamnar en fil som sorteras idag."""
-        mall = cat.get("subfolder", "")
-        if not mall:
+        """Visa dagens exempel på standard- och datumundermappar."""
+        today = date.today()
+        dated = ""
+        if self.settings.get("date_enabled", False):
+            template = (cat.get("subfolder", "")
+                        or self.settings.get("date_default_template", "{år}"))
+            if template:
+                dated = render_subfolder(template, today)
+        if self.settings.get("year_subfolder", True):
+            year = str(today.year)
+            levels = [part for part in dated.split("/") if part and part != year]
+            dated = "/".join([year, *levels])
+        standard, error = validate_subfolder_override(
+            cat.get("subfolder_path", ""))
+        parts = [part for part in (dated, standard) if part]
+        if error:
+            self.lbl_sub_ex.configure(text="Ogiltig standardundermapp")
+            return
+        if not parts:
             self.lbl_sub_ex.configure(text="")
             return
-        ex = render_subfolder(mall, date.today())
-        på = self.settings.get("date_enabled", False)
+        example = "/".join(parts)
+        suffix = ("   (datummall avstängd)"
+                  if cat.get("subfolder") and not self.settings.get("date_enabled", False)
+                  else "")
         self.lbl_sub_ex.configure(
-            text=f"idag → {cat['folder']}/{ex}/"
-                 + ("" if på else "   (datumsortering är av)"))
+            text=f"idag → {cat['folder']}/{example}/" + suffix)
+
+    def _subfolder_mapping_options(self, cat: Dict[str, Any]) -> List[str]:
+        """List only created folders, unique across years, relative to the target base."""
+        folders: Dict[str, str] = {}
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if not output:
+            return []
+        category_root = Path(output) / safe_folder_name(cat["folder"])
+        if not category_root.is_dir():
+            return []
+        try:
+            base = self._category_subfolder_mapping_base(cat)
+            base_parts = list(base.relative_to(category_root).parts)
+            base_parts = [part for part in base_parts
+                          if not (len(part) == 4 and part.isdigit())]
+        except (OSError, ValueError):
+            base_parts = []
+        try:
+            for path in category_root.rglob("*"):
+                if not path.is_dir():
+                    continue
+                try:
+                    if not path.resolve().is_relative_to(category_root.resolve()):
+                        continue
+                    relative_parts = list(path.relative_to(category_root).parts)
+                except (OSError, ValueError):
+                    continue
+                # Year folders differ across archive years; omit each year
+                # component before stripping the current date/category base.
+                relative_parts = [part for part in relative_parts
+                                  if not (len(part) == 4 and part.isdigit())]
+                if (base_parts and relative_parts[:len(base_parts)] == base_parts):
+                    relative_parts = relative_parts[len(base_parts):]
+                value = "/".join(relative_parts)
+                if value:
+                    folders.setdefault(value.casefold(), value)
+        except OSError:
+            pass
+        return sorted(folders.values(), key=str.casefold)
+
+    def _open_subfolder_keyword_editor(self) -> None:
+        """Let the user drag category support words onto document-type folders."""
+        name = self._selected_cat()
+        cat = self.rules.get(name) if name else None
+        if not cat:
+            self.messagebox.showinfo(APP_NAME, "Välj först en kategori.", parent=self.root)
+            return
+        tk, ttk = self.tk, self.ttk
+        dialog = tk.Toplevel(self.root)
+        dialog._icon_ref = brand_window(dialog)
+        dialog.title(f"Stödord och undermappar · {cat['name']}")
+        dialog.transient(self.root)
+        screen_w = max(520, int(self.root.winfo_screenwidth()) - 80)
+        screen_h = max(380, int(self.root.winfo_screenheight()) - 120)
+        dialog_w = min(860, screen_w)
+        dialog_h = min(660, screen_h)
+        dialog.minsize(min(520, dialog_w), min(360, dialog_h))
+        dialog.geometry(f"{dialog_w}x{dialog_h}")
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(2, weight=1)
+        try:
+            dialog.configure(background=self.theme.c["bg"])
+        except Exception:
+            pass
+
+        ttk.Label(
+            dialog,
+            text=(f"{cat['name']}  ·  dra ett stödord från vänster till en "
+                  "mapp till höger"),
+            style="CardTitle.TLabel", wraplength=dialog_w - 40, justify="left"
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 4))
+        ttk.Label(
+            dialog,
+            text=("Välj också ett standardord för kategorin. Dra ett stödord "
+                  "till en mapp, eller markera ord och mapp och tryck Ctrl+M. "
+                  "Kopplingen styr dokumenttypen men ersätter inte säker kategorimatchning."),
+            style="CardMuted.TLabel", wraplength=dialog_w - 40, justify="left"
+        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 10))
+
+        body = ttk.Frame(dialog, style="Card.TFrame")
+        body.grid(row=2, column=0, sticky="nsew", padx=14, pady=(0, 8))
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=1)
+        ttk.Label(body, text="SPARDA STÖDORD", style="CardKey.TLabel").grid(
+            row=0, column=0, sticky="w", padx=10, pady=(10, 4))
+        ttk.Label(body, text="SKAPADE MAPPAR", style="CardKey.TLabel").grid(
+            row=0, column=1, sticky="w", padx=10, pady=(10, 4))
+
+        left_frame = ttk.Frame(body, style="CardInner.TFrame")
+        left_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=(0, 10))
+        left_frame.columnconfigure(0, weight=1)
+        left_frame.rowconfigure(0, weight=1)
+        left_tree = ttk.Treeview(
+            left_frame, columns=("word",), show="headings",
+            selectmode="extended", height=12)
+        left_tree.heading("word", text="STÖDORD")
+        left_tree.column("word", width=220, anchor="w", stretch=True)
+        left_tree.grid(row=0, column=0, sticky="nsew")
+        left_scroll = ttk.Scrollbar(left_frame, orient="vertical",
+                                   command=left_tree.yview)
+        left_scroll.grid(row=0, column=1, sticky="ns")
+        left_tree.configure(yscrollcommand=left_scroll.set)
+
+        right_frame = ttk.Frame(body, style="CardInner.TFrame")
+        right_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=(0, 10))
+        right_frame.columnconfigure(0, weight=1)
+        right_frame.rowconfigure(0, weight=1)
+        right_tree = ttk.Treeview(
+            right_frame, columns=("folder",), show="headings",
+            selectmode="browse", height=12)
+        right_tree.heading("folder", text="SKAPADE MAPPAR")
+        right_tree.column("folder", width=220, anchor="w", stretch=True)
+        right_tree.grid(row=0, column=0, sticky="nsew")
+        right_scroll = ttk.Scrollbar(right_frame, orient="vertical",
+                                     command=right_tree.yview)
+        right_scroll.grid(row=0, column=1, sticky="ns")
+        right_tree.configure(yscrollcommand=right_scroll.set)
+
+        footer = ttk.Frame(dialog, style="CardInner.TFrame")
+        footer.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
+        footer.columnconfigure(0, weight=1)
+        footer.columnconfigure(1, weight=1)
+        status = ttk.Label(footer, text="Dra stödord till en mapp för att koppla.",
+                           style="CardMuted.TLabel", wraplength=dialog_w - 48)
+        status.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        default_button = ttk.Button(
+            footer, text="Använd markerat som standardord")
+        default_button.grid(row=1, column=0, padx=(0, 4), pady=2, sticky="ew")
+        add_folder_button = ttk.Button(footer, text="+ Skapa mapp…")
+        add_folder_button.grid(row=1, column=1, padx=4, pady=2, sticky="ew")
+        remove_button = ttk.Button(footer, text="Koppla loss markerat")
+        remove_button.grid(row=2, column=0, padx=(0, 4), pady=2, sticky="ew")
+        ttk.Button(footer, text="Klart", command=dialog.destroy).grid(
+            row=2, column=1, padx=4, pady=2, sticky="e")
+        assign_button = ttk.Button(footer, text="Koppla markerade stödord (Ctrl+M)")
+        assign_button.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+
+        dragged = {"word": ""}
+        def refresh(select_word: str = "") -> None:
+            for tree in (left_tree, right_tree):
+                for item in tree.get_children():
+                    tree.delete(item)
+            for index, kw in enumerate(cat.get("keywords", [])):
+                word = normalize(kw.get("text", ""))
+                left_tree.insert("", "end", iid=f"word-{index}",
+                                 values=(word,))
+                if word == select_word:
+                    left_tree.selection_set(f"word-{index}")
+                    left_tree.see(f"word-{index}")
+            folders = self._subfolder_mapping_options(cat)
+            for index, folder in enumerate(folders):
+                right_tree.insert("", "end", iid=f"folder-{index}",
+                                  values=(folder,))
+
+        def assign_selected(_event=None):
+            words = [normalize(left_tree.item(row, "values")[0])
+                     for row in left_tree.selection()]
+            words = [word for word in words if word]
+            folders = right_tree.selection()
+            if not words:
+                status.configure(text="Markera ett eller flera stödord till vänster.")
+                return "break"
+            if len(folders) != 1:
+                status.configure(text="Markera en skapad mapp till höger.")
+                return "break"
+            row = right_tree.item(folders[0], "values")
+            folder = str(row[0]) if row else ""
+            if not folder:
+                status.configure(text="Markera en skapad mapp till höger.")
+                return "break"
+            mapping = cat.setdefault("subfolder_keyword_map", {})
+            for word in words:
+                mapping[word] = folder
+            self.rules.save()
+            refresh(words[0])
+            status.configure(text=f"Kopplade {len(words)} stödord till ‘{folder}’.")
+            return "break"
+
+        def set_default(_event=None) -> None:
+            selection = left_tree.selection()
+            if not selection:
+                status.configure(text="Välj först ett sparat stödord till vänster.")
+                return
+            row = left_tree.item(selection[0], "values")
+            word = normalize(row[0]) if row else ""
+            if word:
+                cat["default_keyword"] = word
+                self.rules.save()
+                refresh(word)
+                status.configure(text=f"{word} är nu standardordet för {cat['name']}.")
+                self._refresh_categories(name)
+
+        def add_folder(_event=None) -> None:
+            value = self.simpledialog.askstring(
+                APP_NAME,
+                "Mapp relativt kategoriens datum-/årsmapp "
+                "(exempel: Faktura eller Transaktioner/Inbetalningar):",
+                parent=dialog)
+            if value is None:
+                return
+            folder, error = validate_subfolder_override(value)
+            if error or not folder:
+                if error:
+                    self.messagebox.showwarning(APP_NAME, error, parent=dialog)
+                return
+            folder, error = self._create_category_mapping_folder(cat, folder)
+            if error:
+                self.messagebox.showwarning(APP_NAME, error, parent=dialog)
+                return
+            refresh()
+            status.configure(text=f"Skapade mappen ‘{folder}’ i kategorin {cat['name']}.")
+
+        def remove_mapping(_event=None) -> None:
+            selection = left_tree.selection()
+            if not selection:
+                status.configure(text="Välj först ett sparat stödord till vänster.")
+                return
+            row = left_tree.item(selection[0], "values")
+            word = normalize(row[0]) if row else ""
+            mapping = cat.setdefault("subfolder_keyword_map", {})
+            if word in mapping:
+                mapping.pop(word, None)
+                self.rules.save()
+                refresh(word)
+                status.configure(text=f"Kopplingen för {word} togs bort.")
+            else:
+                status.configure(text="Det markerade stödordet har ingen mappkoppling.")
+
+        def on_press(event) -> None:
+            row_id = left_tree.identify_row(event.y)
+            if row_id:
+                values = left_tree.item(row_id, "values")
+                dragged["word"] = normalize(values[0]) if values else ""
+                if row_id not in left_tree.selection():
+                    left_tree.selection_set(row_id)
+
+        def on_motion(event) -> None:
+            if not dragged["word"]:
+                return
+            target = dialog.winfo_containing(event.x_root, event.y_root)
+            status.configure(
+                text=(f"Släpp {dragged['word']} på en skapad mapp" if target is right_tree
+                      else f"Dra {dragged['word']} till en skapad mapp →"))
+
+        def on_release(event) -> None:
+            word = dragged.pop("word", "")
+            dragged["word"] = ""
+            if not word:
+                return
+            target = dialog.winfo_containing(event.x_root, event.y_root)
+            if target is not right_tree:
+                status.configure(text="Dra stödordet till en skapad mapp i högra kolumnen.")
+                return
+            row_y = event.y_root - right_tree.winfo_rooty()
+            row_id = right_tree.identify_row(row_y)
+            if not row_id:
+                status.configure(text="Släpp på en skapad mapp i listan.")
+                return
+            row = right_tree.item(row_id, "values")
+            folder = str(row[0]) if row else ""
+            if not folder:
+                return
+            cat.setdefault("subfolder_keyword_map", {})[word] = folder
+            self.rules.save()
+            refresh(word)
+            status.configure(text=f"Kopplade ‘{word}’ till ‘{folder}’.")
+
+        left_tree.bind("<ButtonPress-1>", on_press)
+        left_tree.bind("<B1-Motion>", on_motion)
+        left_tree.bind("<ButtonRelease-1>", on_release)
+        left_tree.bind("<Double-1>", set_default, add="+")
+        default_button.configure(command=set_default)
+        add_folder_button.configure(command=add_folder)
+        remove_button.configure(command=remove_mapping)
+        assign_button.configure(command=assign_selected)
+        dialog.bind("<Control-m>", assign_selected, add="+")
+        left_tree.bind("<Delete>", remove_mapping)
+        refresh()
+        if self.settings.get("ui_language") == "en":
+            _translate_ui_tree(dialog, _UI_EN)
+        dialog.grab_set()
+        dialog.wait_window()
 
     def _cat_save_kw(self) -> None:
         """Spara kategorins eget krav på antal matchade stödord."""
@@ -5664,12 +13311,93 @@ class App:
                 text=f"olika stödord innan filen flyttas hit "
                      f"(nivån kräver {nivå})")
 
+    def _rename_category_archive_folder(self, old_folder: str,
+                                        new_folder: str) -> Tuple[bool, str]:
+        """Safely rename one category's physical archive folder, if present.
+
+        Missing old folders are allowed: this covers a folder already renamed
+        in Explorer, so saving its new name simply updates the app's mapping.
+        Existing destination folders are never merged or overwritten.
+        """
+        output = str(self.settings.get("output_dir", "") or "").strip()
+        if not output:
+            return True, ""
+        root = Path(output).expanduser()
+        old_path = root / safe_folder_name(old_folder)
+        new_path = root / safe_folder_name(new_folder)
+        try:
+            root_resolved = root.resolve()
+            if old_path.parent.resolve() != root_resolved:
+                return False, "Den gamla arkivmappen ligger inte direkt i arkivet."
+            if new_path.parent.resolve() != root_resolved:
+                return False, "Den nya arkivmappen ligger inte direkt i arkivet."
+            if old_path.is_symlink():
+                return False, "Den gamla arkivmappen är en genväg/länk; den ändrades inte."
+
+            old_norm = os.path.normcase(os.path.abspath(str(old_path)))
+            new_norm = os.path.normcase(os.path.abspath(str(new_path)))
+            if old_norm == new_norm:
+                # Handle case-only renames on case-insensitive filesystems.
+                if str(old_path) == str(new_path) or not old_path.is_dir():
+                    return True, ""
+                temporary = old_path.with_name(
+                    f".{old_path.name}.rename-{os.getpid()}-{time.time_ns()}")
+                old_path.rename(temporary)
+                try:
+                    temporary.rename(new_path)
+                except OSError:
+                    try:
+                        temporary.rename(old_path)
+                    except OSError:
+                        pass
+                    raise
+                return True, ""
+
+            if not old_path.exists():
+                return True, ""
+            if not old_path.is_dir():
+                return False, "Det gamla namnet finns, men det är inte en mapp."
+            if new_path.exists() or new_path.is_symlink():
+                return False, (f"Mappen ‘{new_path.name}’ finns redan. "
+                               "Inget ändrades; mappar slås aldrig ihop automatiskt.")
+            old_path.rename(new_path)
+            return True, ""
+        except OSError as exc:
+            return False, f"Mappen kunde inte döpas om: {exc}"
+
     def _cat_save_meta(self) -> None:
         name = self._selected_cat()
         cat = self.rules.get(name) if name else None
         if not cat:
             return
-        cat["folder"] = safe_folder_name(self.var_folder.get() or cat["name"])
+        old_folder = safe_folder_name(cat.get("folder") or cat["name"])
+        new_folder = safe_folder_name(self.var_folder.get() or cat["name"])
+        if old_folder != new_folder:
+            if self._busy or getattr(self, "_rescanning", False):
+                self.messagebox.showwarning(
+                    APP_NAME,
+                    "Vänta tills sortering och omskanning är klara innan du "
+                    "byter namn på arkivmappen.", parent=self.root)
+                self.var_folder.set(old_folder)
+                return
+            if not self.messagebox.askyesno(
+                    APP_NAME,
+                    f"Byta arkivmapp från ‘{old_folder}’ till ‘{new_folder}’?\n\n"
+                    "Om den gamla mappen finns döps den om i Utforskaren. "
+                    "Alla årsmappar, undermappar och filer följer med. "
+                    "Befintliga mappar slås aldrig ihop.",
+                    parent=self.root):
+                self.var_folder.set(old_folder)
+                self.var_cat_enabled.set(bool(cat.get("enabled", True)))
+                return
+            ok, error = self._rename_category_archive_folder(
+                old_folder, new_folder)
+            if not ok:
+                self.messagebox.showerror(APP_NAME, error, parent=self.root)
+                self.var_folder.set(old_folder)
+                self.var_cat_enabled.set(bool(cat.get("enabled", True)))
+                return
+        cat["folder"] = new_folder
         cat["enabled"] = bool(self.var_cat_enabled.get())
         self.rules.save()
         self.var_folder.set(cat["folder"])
@@ -5719,6 +13447,27 @@ class App:
         _PATTERN_CACHE.clear()
         self._log(f"Tog bort {len(words)} stödord från \"{name}\"", "info")
         self._refresh_categories(name)
+
+    def _kw_clear_all(self) -> None:
+        """Rensa samtliga stödord i alla kategorier efter dubbel bekräftelse."""
+        total = sum(len(cat.get("keywords", [])) for cat in self.rules.categories)
+        if not total:
+            self.messagebox.showinfo(
+                APP_NAME, "Det finns inga stödord att rensa.", parent=self.root)
+            return
+        if not self.messagebox.askyesno(
+                APP_NAME,
+                f"Rensa alla {total} stödord i samtliga kategorier?\n\n"
+                "Kategorierna finns kvar, men framtida filer matchas inte längre "
+                "på dessa stödord.", parent=self.root):
+            return
+        for cat in self.rules.categories:
+            cat["keywords"] = []
+        self.rules._rebuild_index()
+        self.rules.save()
+        _PATTERN_CACHE.clear()
+        self._refresh_categories()
+        self._log(f"Rensade alla {total} stödord i samtliga kategorier", "warn")
 
     def _kw_prune(self) -> None:
         """Rensa stödord som aldrig gett en träff.
@@ -5861,11 +13610,15 @@ class App:
         """Liten dialog med en rullgardin. Returnerar valt värde."""
         tk, ttk = self.tk, self.ttk
         win = tk.Toplevel(self.root)
+        brand_window(win)
         win.title(titel)
         win.configure(background=self.C["bg"])
         win.transient(self.root)
-        win.resizable(False, False)
-        ttk.Label(win, text=fråga).pack(padx=18, pady=(16, 8), anchor="w")
+        win.resizable(True, False)
+        _fit_geometry(win, 620, 250, 440, 210)
+        ttk.Label(win, text=fråga, wraplength=max(
+            260, min(540, win.winfo_screenwidth() - 80)),
+            justify="left").pack(padx=18, pady=(16, 8), anchor="w", fill="x")
         combo = ttk.Combobox(win, state="readonly", values=val, width=34)
         combo.current(0)
         combo.pack(padx=18, fill="x")
@@ -5919,44 +13672,100 @@ class App:
         self._refresh_categories(name)
 
     def _export(self) -> None:
+        try:
+            initialdir = rules_transfer_dir("exports")
+        except OSError as exc:
+            self._fel(exc, "förbereda exportmapp")
+            return
         path = self.filedialog.asksaveasfilename(
             parent=self.root, defaultextension=".json",
-            initialfile="pdfsorter-rules.json",
+            initialdir=str(initialdir), initialfile="pdfsorter-rules.json",
             filetypes=[("JSON", "*.json")])
         if not path:
             return
-        _write_json(Path(path), {"schema_version": SCHEMA_VERSION, "updated": now_iso(),
+        _write_json(Path(path), {"app_version": APP_VERSION,
+                                 "schema_version": SCHEMA_VERSION, "updated": now_iso(),
                                  "categories": self.rules.categories})
-        self.messagebox.showinfo(APP_NAME, f"Sparade till:\n{path}", parent=self.root)
+        count = sum(len(cat.get("keywords", [])) for cat in self.rules.categories)
+        self.messagebox.showinfo(
+            APP_NAME,
+            f"Exporterade {len(self.rules.categories)} kategorier och "
+            f"{count} stödord till:\n{path}", parent=self.root)
 
     def _import(self) -> None:
-        path = self.filedialog.askopenfilename(parent=self.root,
-                                               filetypes=[("JSON", "*.json")])
+        try:
+            initialdir = rules_transfer_dir("imports")
+        except OSError as exc:
+            self._fel(exc, "förbereda importmapp")
+            return
+        path = self.filedialog.askopenfilename(
+            parent=self.root, initialdir=str(initialdir),
+            filetypes=[("JSON", "*.json")])
         if not path:
             return
-        incoming = Rules(_read_json(Path(path), {}), self.rules.path)
-        if not incoming.categories:
-            self.messagebox.showwarning(APP_NAME, "Filen innehöll inga kategorier.", parent=self.root)
+        # Läs rått: _read_json() skulle döpa om en trasig importfil till
+        # .broken och är till för appens egna filer, inte användarens.
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, UnicodeDecodeError) as exc:
+            self.messagebox.showerror(
+                APP_NAME, f"Filen kunde inte läsas:\n{path}\n\n{exc}",
+                parent=self.root)
             return
+        except ValueError as exc:
+            self.messagebox.showerror(
+                APP_NAME, f"Filen är inte giltig JSON:\n{path}\n\n{exc}",
+                parent=self.root)
+            return
+        incoming, error = validate_rules_transfer(data)
+        if error:
+            self.messagebox.showwarning(APP_NAME, error, parent=self.root)
+            return
+        total_words = sum(len(cat.get("keywords", [])) for cat in incoming)
         merge = self.messagebox.askyesnocancel(
-            APP_NAME, f"{len(incoming.categories)} kategorier hittades.\n\n"
+            APP_NAME, f"{len(incoming)} kategorier och {total_words} stödord hittades.\n\n"
                       "Ja = slå ihop med befintliga\nNej = ersätt allt", parent=self.root)
         if merge is None:
             return
+        backup = None
         if merge:
-            for cat in incoming.categories:
-                self.rules.ensure_category(cat["name"], cat["folder"])
-                self.rules.add_keywords(cat["name"], [k["text"] for k in cat["keywords"]],
-                                        source="import")
+            counts = self.rules.merge_transfer_categories(incoming)
+            summary = (f"Importen är klar.\n\nNya kategorier: {counts['new_categories']}\n"
+                       f"Nya stödord: {counts['new_keywords']}\n"
+                       f"Befintliga kategorier som berörts: {counts['updated_categories']}\n\n"
+                       "Befintliga stödord, vikter och mappnamn är orörda.")
         else:
-            self.rules.categories = incoming.categories
+            rules_path = self.rules.path
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup = rules_path.with_name(
+                f"{rules_path.stem}.before-import-{timestamp}{rules_path.suffix}")
+            temporary = backup.with_name(backup.name + ".tmp")
+            try:
+                self.rules.save()
+                shutil.copy2(rules_path, temporary)
+                os.replace(temporary, backup)
+            except Exception as exc:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.messagebox.showerror(
+                    APP_NAME,
+                    f"Säkerhetskopian kunde inte skapas. Inget har ersatts.\n\n{exc}",
+                    parent=self.root)
+                return
+            self.rules.categories = incoming
+            summary = (f"Ersatte alla regler med {len(incoming)} kategorier och "
+                       f"{total_words} stödord.\n\nSäkerhetskopia: {backup}")
         self.rules.save()
         _PATTERN_CACHE.clear()
         self._warm_patterns()
         self._refresh_categories()
+        self.messagebox.showinfo(APP_NAME, summary, parent=self.root)
 
     # ======================================================================
-    # Flik 3 - Granska
+    # Flik 2 - Granska
     # ======================================================================
     def _build_review_tab(self) -> None:
         ttk = self.ttk
@@ -5978,6 +13787,20 @@ class App:
                    command=self._manual_rescan).pack(side="right", padx=6)
         ttk.Button(top, text="Töm kön", style="Danger.TButton",
                    command=self._clear_queue).pack(side="right", padx=6)
+        self.var_review_auto = self.tk.BooleanVar(
+            value=bool(self.settings.get("review_auto_advance", True)))
+        ttk.Checkbutton(
+            top, text="Fortsätt automatiskt efter bekräftat val",
+            style="Card.TCheckbutton", variable=self.var_review_auto,
+            command=self._toggle_review_auto_advance).pack(
+                side="right", padx=6, pady=T.INNER)
+        self.var_review_preview = self.tk.BooleanVar(
+            value=bool(self.settings.get("preview_in_dialog", True)))
+        ttk.Checkbutton(
+            top, text="Visa sidförhandsvisning",
+            style="Card.TCheckbutton", variable=self.var_review_preview,
+            command=self._toggle_review_preview).pack(
+                side="right", padx=6, pady=T.INNER)
 
         cols = ("file", "reason", "guess", "ocr")
         self.q_tree = ttk.Treeview(f, columns=cols, show="headings")
@@ -5990,6 +13813,22 @@ class App:
                          pady=(T.GAP, T.PAD))
         self.theme.zebra(self.q_tree)
         self.q_tree.bind("<Double-1>", lambda e: self._process_queue(self._queue_index()))
+
+    def _toggle_review_auto_advance(self) -> None:
+        enabled = bool(self.var_review_auto.get())
+        self.settings["review_auto_advance"] = enabled
+        save_settings(self.settings)
+        self._log(
+            "Granskningen fortsätter automatiskt efter bekräftat val."
+            if enabled else
+            "Automatisk fortsättning avstängd; granskningen stannar efter varje val.",
+            "info")
+
+    def _toggle_review_preview(self) -> None:
+        enabled = bool(self.var_review_preview.get())
+        self.settings["preview_in_dialog"] = enabled
+        save_settings(self.settings)
+        self._log("PDF-sidförhandsvisning " + ("på." if enabled else "av."), "info")
 
     def _queue_index(self) -> int:
         sel = self.q_tree.selection()
@@ -6020,7 +13859,7 @@ class App:
         """Kör om matchningen mot alla osorterade filer.
 
         Praktiskt sedan man redigerat stödord under Kategorier eller i
-        JSON-fliken - då slipper man vänta på nästa inlärning.
+        Avancerat (JSON) - då slipper man vänta på nästa inlärning.
         """
         if self._rescanning:
             self.messagebox.showinfo(APP_NAME, "En omskanning pågår redan.",
@@ -6050,9 +13889,55 @@ class App:
             self._queued_paths.clear()
             self._refresh_queue()
 
+    def _review_subfolder_base(self, decision: Decision,
+                               category: str) -> Path:
+        """Destination root used to browse/create a per-file subfolder."""
+        cat = self.rules.get(category)
+        folder = cat["folder"] if cat else safe_folder_name(category)
+        template = cat.get("subfolder", "") if cat else ""
+        sub, _when, _source = self.engine.subfolder_for(
+            decision.extraction, template)
+        category_sub, error = validate_subfolder_override(
+            cat.get("subfolder_path", "") if cat else "")
+        if error:
+            category_sub = ""
+        base = Path(self.settings.get("output_dir") or ".") / safe_folder_name(folder)
+        for part in "/".join(p for p in (sub, category_sub) if p).split("/"):
+            if part:
+                base = base / safe_folder_name(part)
+        return base
+
+    def _review_subfolder_choices(self, decision: Decision,
+                                  category: str) -> List[str]:
+        """Subfolder suggestions from the file's year plus all other years."""
+        cat = self.rules.get(category)
+        folder = cat["folder"] if cat else safe_folder_name(category)
+        root = Path(self.settings.get("output_dir") or ".") / safe_folder_name(folder)
+        try:
+            return _sibling_year_subfolder_choices(
+                root.resolve(), self._review_subfolder_base(
+                    decision, category).resolve())
+        except (OSError, ValueError):
+            return _existing_subfolder_choices(
+                self._review_subfolder_base(decision, category))
+
     def _process_queue(self, start: int = 0) -> None:
+        """Visa högst en granskningsdialog/köprocessor åt gången.
+
+        Dialogens väntan driver en nästlad Tk-event-loop. Händelser kan därför
+        anropa _process_queue igen innan den första dialogen stängts.
+        """
+        if getattr(self, "_processing_queue", False):
+            return
+        self._processing_queue = True
+        try:
+            self._process_queue_impl(start)
+        finally:
+            self._processing_queue = False
+
+    def _process_queue_impl(self, start: int = 0) -> None:
         """Visa granskningsdialogen för varje kvarvarande fil."""
-        if not self.queue:
+        if not self.queue or getattr(self, "_closing", False):
             return
         try:
             if not self.root.winfo_exists():
@@ -6062,8 +13947,24 @@ class App:
         existing = self.rules.all_keyword_texts()
         all_learned: List[str] = []
         last_category = ""
+        stopped_review = False
+        paused_after_choice = False
         i = start
         while i < len(self.queue):
+            # Fönstret kan ha rivits medan förra dialogen var öppen (t.ex.
+            # krysset). Då finns ingen Tk kvar att skapa en Toplevel i -
+            # utan den här kontrollen blev det "application has been
+            # destroyed" och en rad nya försök i en död tolk.
+            if getattr(self, "_closing", False):
+                return
+            try:
+                if not self.root.winfo_exists():
+                    return
+            except Exception:
+                return
+            lock_guard = getattr(self, "_locked_dialog_lock", None)
+            if lock_guard is not None and lock_guard.locked():
+                return
             decision = self.queue[i]
             if not decision.path.exists():
                 self.queue.pop(i)
@@ -6071,7 +13972,7 @@ class App:
                 continue
             cands = suggest_keywords(
                 decision.extraction.combined, decision.path.name,
-                limit=int(self.settings.get("keywords_per_file", 10)),
+                limit=int(self.settings.get("keywords_per_file", 25)),
                 existing=existing)
             session_log("granska",
                         f"Dialog öppnas för {decision.path.name} "
@@ -6079,14 +13980,42 @@ class App:
                         f"{len(cands)} stödordsförslag")
             _hint = (self._lookup_sender_hint(decision)
                      if self.settings.get("orgnr_lookup", False) else "")
-            res = ReviewDialog(self.root, decision, self.rules, cands,
-                               index=i + 1, total=len(self.queue),
-                               theme=self.theme,
-                               preview=bool(self.settings.get(
-                                   "preview_in_dialog", False)),
-                               suggested_sender=_hint).show()
-            if res is None:                        # hoppa över
-                session_log("granska", f"Hoppade över {decision.path.name} "
+            try:
+                dlg = ReviewDialog(self.root, decision, self.rules, cands,
+                                   index=i + 1, total=len(self.queue),
+                                   theme=self.theme,
+                                   preview=bool(self.settings.get(
+                                       "preview_in_dialog", True)),
+                                   suggested_sender=_hint,
+                                   subfolder_base_resolver=(
+                                       lambda category, d=decision:
+                                       self._review_subfolder_base(d, category)),
+                                   subfolder_choices_resolver=(
+                                       lambda category, d=decision:
+                                       self._review_subfolder_choices(d, category)),
+                                   ui_language=self.settings.get("ui_language", "sv"))
+                self._review_dialog = dlg
+                res = dlg.show()
+            except self.tk.TclError as exc:
+                session_log("granska", "Kunde inte visa granskningsdialogen: "
+                            f"{type(exc).__name__}: {exc}", "warn")
+                return
+            finally:
+                self._review_dialog = None
+            if res and res.get("stop_review"):
+                stopped_review = True
+                kvar = len(self.queue) - i
+                self._log(f"Granskningen avslutades på begäran. "
+                          f"{kvar} filer ligger kvar i kön.", "warn")
+                self._refresh_queue()
+                break
+            if res and res.get("defer"):
+                session_log("granska", f"Sköt upp {decision.path.name} "
+                            "- filen är orörd och ligger kvar i kön")
+                i += 1
+                continue
+            if res is None:                        # stängd utan beslut
+                session_log("granska", f"Stängde granskningen av {decision.path.name} "
                             "- filen ligger kvar i kön")
                 i += 1
                 continue
@@ -6104,6 +14033,9 @@ class App:
                     self._sync_tray()
                     if self.watcher:
                         self.watcher.forget(decision.path)
+                    if not self.settings.get("review_auto_advance", True):
+                        paused_after_choice = True
+                        break
                     continue
                 # gick inte att läsa/hashen: behandla som hoppa över
                 self._log(f"{decision.path.name}  ✖ kunde inte ignoreras "
@@ -6127,9 +14059,13 @@ class App:
                               f"{', '.join(words[:4])}{'…' if len(words) > 4 else ''}", "info")
                 else:
                     self.engine.learn(cat, [])
-                ok, msg = self.engine.apply(decision, cat, words, "user", learned=words)
+                ok, msg = self.engine.apply(
+                    decision, cat, words, "user", learned=words,
+                    subfolder_override=res.get("subfolder", ""))
+                level = ("ok" if ok else
+                         "warn" if "lämnades kvar" in msg else "err")
                 self._log(f"{decision.path.name}  →  {cat}   (ditt val)" if ok
-                          else f"{decision.path.name}  ✖ {msg}", "ok" if ok else "err")
+                          else f"{decision.path.name}  ✖ {msg}", level)
                 if self.watcher:
                     self.watcher.forget(decision.path)
             self.queue.pop(i)
@@ -6141,22 +14077,29 @@ class App:
                 i -= self._apply_rule_to_queue(i)
 
             self._refresh_queue()
-            self.root.update_idletasks()
+            try:
+                self.root.update_idletasks()
+            except Exception:
+                return
+            if not self.settings.get("review_auto_advance", True):
+                paused_after_choice = True
+                break
 
+        if paused_after_choice:
+            self._log(
+                "Granskningen stannade efter ditt val. Nästa fil ligger kvar i kön; "
+                "välj ‘Granska alla…’ när du vill fortsätta.", "info")
         self._refresh_queue()
         self._refresh_categories()
         self._refresh_history()
 
         # Skanna om resten i bakgrunden - inmappar och _Osorterat
-        if all_learned and self.settings.get("rescan_after_learn", True):
+        if (all_learned and not stopped_review
+                and self.settings.get("rescan_after_learn", True)):
             self.rescan_after_learn(all_learned, last_category)
 
     def _apply_rule_to_queue(self, upto: int) -> int:
-        """Flytta de filer i kön som den nyss inlärda regeln nu täcker.
-
-        Returnerar hur många som togs bort före index `upto`, så att
-        anroparens loopräknare kan justeras.
-        """
+        """Tillämpa exakta nya stödordsträffar; uppdatera övriga förslag."""
         removed_before = 0
         idx = 0
         while idx < len(self.queue):
@@ -6168,22 +14111,24 @@ class App:
                     removed_before += 1
                 continue
             fresh = decide(self.rules, decision.extraction, self.settings)
-            if fresh.status != "auto":
-                idx += 1
-                continue
-            best = fresh.best
-            ok, _ = self.engine.apply(fresh, best.name, best.matched, "rescan")
-            if not ok:
-                idx += 1
-                continue
-            self._log(f"{decision.path.name}  →  {best.name}   "
-                      f"(samma regel)", "ok")
-            if self.watcher:
-                self.watcher.forget(decision.path)
-            self.queue.pop(idx)
-            self._queued_paths.discard(str(decision.path))
-            if idx < upto:
-                removed_before += 1
+            if fresh.status == "auto" and fresh.best:
+                best = fresh.best
+                ok, msg = self.engine.apply(
+                    fresh, best.name, best.matched, "rescan")
+                if ok:
+                    self._log(f"{decision.path.name}  →  {best.name}   "
+                              "(exakt stödord efter inlärning)", "ok")
+                    if self.watcher:
+                        self.watcher.forget(decision.path)
+                    self.queue.pop(idx)
+                    self._queued_paths.discard(str(decision.path))
+                    if idx < upto:
+                        removed_before += 1
+                    continue
+                fresh.status = "ask"
+                fresh.reason = msg
+            self.queue[idx] = fresh
+            idx += 1
         return removed_before
 
     # ======================================================================
@@ -6222,11 +14167,7 @@ class App:
         return out
 
     def rescan_after_learn(self, learned: List[str], category: str) -> None:
-        """Skanna om allt osorterat sedan användaren lärt appen ett nytt ord.
-
-        Poängen med att svara på en fråga är att slippa svara på samma sak
-        igen. Lär man appen att "offert" betyder Offerter ska alla väntande
-        offerter flyttas dit på en gång, inte en i taget.
+        """Flytta unika, exakta stödordsträffar; köa övriga för granskning.
 
         Körs i bakgrunden så gränssnittet inte fryser.
         """
@@ -6243,11 +14184,11 @@ class App:
                          daemon=True, name="pdfsorter-rescan").start()
 
     def _rescan_worker(self, files: List[Path], category: str) -> None:
-        # Samma parallellmönster som _sort_worker: läsningen delas upp på
-        # trådar, flytten serialiseras av motorn.
-        counters = {"moved": 0, "still": 0}
+        # Läsning och matchning delas upp på trådar; endast verifierade,
+        # unika, exakta stödordsträffar får flyttas vid omskanning.
+        counters = {"moved": 0, "review": 0, "still": 0}
         lock = threading.Lock()
-        workers = max(2, min(8, os.cpu_count() or 2))
+        workers = processing_worker_count(self.settings)
 
         def job(path: Path) -> None:
             if not path.exists():
@@ -6255,62 +14196,80 @@ class App:
             try:
                 decision = self.engine.analyze(path)
             except Exception:
-                return
-            if decision.status != "auto":
                 with lock:
                     counters["still"] += 1
                 return
-            best = decision.best
-            ok, msg = self.engine.apply(decision, best.name, best.matched, "rescan")
-            if ok:
+            if decision.status == "auto" and decision.best:
+                best = decision.best
+                ok, msg = self.engine.apply(
+                    decision, best.name, best.matched, "rescan")
+                if ok:
+                    with lock:
+                        counters["moved"] += 1
+                    self._log_threadsafe(
+                        f"{path.name}  →  {best.name}   (exakt stödord vid omskanning)",
+                        "ok")
+                    self._post(lambda pth=path: self._drop_from_queue(pth))
+                    if self.watcher:
+                        self.watcher.forget(path)
+                    return
+                decision.status = "ask"
+                decision.reason = msg
+            if decision.status == "ask":
+                self._handle(decision, from_watch=False)
                 with lock:
-                    counters["moved"] += 1
-                self._log_threadsafe(
-                    f"{path.name}  →  {best.name}   (omskanning)", "ok")
-                self._post(lambda pth=path: self._drop_from_queue(pth))
-                if self.watcher:
-                    self.watcher.forget(path)
+                    counters["review"] += 1
             else:
                 with lock:
                     counters["still"] += 1
 
         try:
+            batch_size = processing_batch_size(self.settings, workers, len(files))
             with concurrent.futures.ThreadPoolExecutor(
                     max_workers=workers,
                     thread_name_prefix="pdfsorter-rescan") as pool:
-                for _ in pool.map(job, files):
-                    pass
+                for start in range(0, len(files), batch_size):
+                    batch = files[start:start + batch_size]
+                    for _ in pool.map(job, batch):
+                        pass
         except Exception as exc:
             self._log_threadsafe(f"Omskanningen avbröts: {exc}", "err")
         finally:
             # _rescanning måste nollställas oavsett vad som händer, annars
             # låser sig knappen "Skanna om alla" för alltid.
             self._post(lambda: self._rescan_done(
-                counters["moved"], counters["still"], category))
+                counters["moved"], counters["review"], counters["still"], category))
 
     def _drop_from_queue(self, path: Path) -> None:
-        """Ta bort en fil ur granskningskön sedan omskanningen flyttat den."""
+        """Ta bort en fil ur kön som reskanningen flyttade säkert."""
         key = str(path)
-        self.queue = [d for d in self.queue if str(d.path) != key]
+        self.queue = [decision for decision in self.queue
+                      if str(decision.path) != key]
         self._queued_paths.discard(key)
 
-    def _rescan_done(self, moved: int, still: int, category: str) -> None:
+    def _rescan_done(self, moved: int, review: int, still: int,
+                     category: str) -> None:
         self._rescanning = False
         self.engine.flush_rules()
-        if moved:
-            self._log(f"— Omskanning klar: {moved} filer flyttade, "
+        if moved or review:
+            self._log(f"— Omskanning klar: {moved} exakta träffar flyttade, "
+                      f"{review} filer behöver granskas, "
                       f"{still} väntar fortfarande —", "ok")
-            if not self.visible:
-                self._notify(f"{moved} filer flyttades av den nya regeln")
+            if not self.visible and review:
+                self._notify(f"{review} filer väntar på granskning efter inlärning")
         else:
             self._log("— Omskanning klar: inga fler filer matchade —", "info")
         self._log(f"    Textcache: {TEXT_CACHE.stats()}", "info")
         self._refresh_queue()
         self._refresh_categories()
         self._refresh_history()
+        if self.queue and self.visible:
+            self._process_queue()
+        elif self.queue:
+            self._notify(f"{len(self.queue)} filer väntar på manuell granskning")
 
     # ======================================================================
-    # Flik 4 - Historik
+    # Flik 5 - Historik
     # ======================================================================
     def _build_hist_tab(self) -> None:
         tk, ttk = self.tk, self.ttk
@@ -6484,7 +14443,7 @@ class App:
                                                   "(kräver Pillow).", parent=self.root)
 
     # ======================================================================
-    # Flik 5 - Matchningar (JSON)
+    # Flik 7 - Avancerat (JSON)
     # ======================================================================
     def _build_json_tab(self) -> None:
         tk, ttk = self.tk, self.ttk
@@ -6497,7 +14456,7 @@ class App:
         top.grid(row=0, column=0, sticky="ew", padx=T.PAD, pady=(T.PAD, 4))
         ttk.Label(top, text="Rådata", style="Head.TLabel").pack(side="left")
         ttk.Label(top, text="   För dig som vill redigera filerna direkt. "
-                            "Vanlig hantering sker under Matchningar.",
+                            "Vanlig hantering sker under Kategorier.",
                   style="Muted.TLabel").pack(side="left")
 
         bar = ttk.Frame(f)
@@ -6621,8 +14580,10 @@ class App:
                 self.messagebox.showerror(APP_NAME, "Inställningarna måste vara ett JSON-objekt.",
                                           parent=self.root)
                 return
+            data["ask_when_unsure"] = True
             save_settings(data)
             self.settings = load_settings()
+            self.settings["ask_when_unsure"] = True
             self.engine.settings = self.settings
             self._reload_settings_into_gui()
             self._log("Inställningar sparade från JSON-fliken", "ok")
@@ -6633,7 +14594,8 @@ class App:
         try:
             self.var_out.set(self.settings.get("output_dir", ""))
             self.var_recursive.set(self.settings.get("recursive", False))
-            self.var_ask.set(self.settings.get("ask_when_unsure", True))
+            self.settings["ask_when_unsure"] = True
+            self.var_ask.set(True)
             self.var_ocr.set(self.settings.get("ocr_enabled", True))
             self.var_ocr_quality.set(
                 str(self.settings.get("ocr_quality", "high")) == "high")
@@ -6658,9 +14620,17 @@ class App:
                 self.var_theme.set(self.settings.get("theme", "ljus"))
             self.var_tray.set(self.settings.get("tray_enabled", True))
             self.var_close_tray.set(self.settings.get("close_to_tray", True))
-            self.var_startmin.set(self.settings.get("start_minimized", False))
+            self.var_min_tray.set(
+                self.settings.get("minimize_to_tray", True))
+            self.var_startmin.set(True)
             self.var_autowatch.set(self.settings.get("autowatch_on_start", False))
             self.var_notify.set(self.settings.get("notify", True))
+            if hasattr(self, "var_cache_cleanup"):
+                self.var_cache_cleanup.set(
+                    self.settings.get("cache_cleanup_enabled", True))
+            if hasattr(self, "var_low_memory_mode"):
+                self.var_low_memory_mode.set(
+                    bool(self.settings.get("low_memory_mode", False)))
             self.var_date_on.set(self.settings.get("date_enabled", False))
             self.var_date_fb.set(self.settings.get("date_fallback", "none"))
             mallar = [t for t, _ in SUBFOLDER_TEMPLATES if t]
@@ -6720,49 +14690,56 @@ class App:
         bar = ttk.Frame(f)
         bar.grid(row=1, column=0, sticky="ew",
                  padx=self.theme.PAD, pady=(self.theme.GAP, self.theme.GAP))
-        ttk.Button(bar, text="Spara hjälpen som textfil…",
-                   command=self._save_help).pack(side="left")
-        ttk.Button(bar, text="Öppna inställningsmappen",
-                   command=lambda: open_externally(config_dir())).pack(side="left", padx=6)
-        ttk.Button(bar, text="Kopiera diagnostik för support",
-                   command=self._copy_support_log).pack(side="left", padx=6)
-        ttk.Button(bar, text="Öppna log-mappen",
-                   command=self._open_log_dir).pack(side="left", padx=6)
-        ttk.Button(bar, text="Visa samlad fellogg",
-                   command=self._show_fel_log).pack(side="left", padx=6)
-        ttk.Button(bar, text="Stöd projektet 💖",
-                   command=self._visa_stod).pack(side="left", padx=6)
-        ttk.Button(bar, text="Sök efter uppdateringar…",
-                   command=lambda: self._check_updates_gui(manual=True)).pack(side="left", padx=6)
-        ttk.Label(bar, text=f"{APP_NAME} {APP_VERSION}",
-                  style="Faint.TLabel").pack(side="right")
+        actions = [
+            ("Spara hjälpen som textfil…", self._save_help),
+            ("Tangentbordsgenvägar…", self._show_shortcuts),
+            ("Öppna inställningsmappen", lambda: open_externally(config_dir())),
+            ("Kopiera AI-rapport (alla fel)", self._copy_ai_report),
+            ("Kopiera diagnostik för support", self._copy_support_log),
+            ("Öppna log-mappen", self._open_log_dir),
+            ("Stöd projektet 💖", self._visa_stod),
+            ("Tillägg och OCR…",
+             lambda: self._tillaggserbjudande(force=True)),
+            ("Sök efter uppdateringar…",
+             lambda: self._check_updates_gui(manual=True)),
+        ]
+        buttons = [ttk.Button(bar, text=label, command=command)
+                   for label, command in actions]
+        version = ttk.Label(bar, text=f"{APP_NAME} {APP_VERSION}",
+                             style="Faint.TLabel")
+        last_columns = None
+
+        def layout_help_bar(_event=None):
+            nonlocal last_columns
+            width = max(1, bar.winfo_width())
+            columns = 4 if width >= 900 else 2 if width >= 560 else 1
+            if columns == last_columns:
+                return
+            last_columns = columns
+            for col in range(4):
+                bar.columnconfigure(col, weight=0, uniform="")
+            for col in range(columns):
+                bar.columnconfigure(col, weight=1, uniform="help-actions")
+            for index, button in enumerate(buttons):
+                button.grid(row=index // columns, column=index % columns,
+                            sticky="ew", padx=4, pady=3)
+            version.grid(row=(len(buttons) + columns - 1) // columns,
+                         column=columns - 1, sticky="e", padx=4,
+                         pady=(2, 0))
+
+        bar.bind("<Configure>", layout_help_bar, add="+")
+        self.root.after_idle(layout_help_bar)
 
     # -- uppdatering från Git (2026-10-16) ------------------------------
-    # 2026-10-19: autosök tyst 2 ggr/dygn + tyst omstart vid version
-    def _should_auto_check_updates(self) -> bool:
-        """Ska en tyst autosökning köras nu? 2 ggr/dygn = var 12:e timme."""
-        if not self.settings.get("check_updates", True):
-            return False
-        if getattr(self, "_checking_updates", False):
-            return False
-        last = str(self.settings.get("last_update_check", "") or "").strip()
-        if not last:
-            return False  # första checken görs redan vid start (after 5s), spara tiden där
-        try:
-            last_dt = __import__("datetime").datetime.fromisoformat(last)
-            if last_dt.tzinfo is None:
-                last_dt = last_dt.astimezone()
-            now = __import__("datetime").datetime.now().astimezone()
-            return (now - last_dt).total_seconds() >= 43200  # 12h = 2 ggr/dygn
-        except Exception:
-            return True  # korrupt stämpel → försök igen
-
     def _schedule_tick(self) -> None:
         """1.1.0: schemalagd sortering - kör en sortering per dag vid
-        inställt klockslag medan appen är igång (även i systemfältet).
-        2026-10-19: här körs även tyst autosök efter ny version 2 ggr/dygn."""
+        inställt klockslag medan appen är igång (även i systemfältet)."""
         try:
-            if self.settings.get("schedule_enabled", False) and not self._busy:
+            bevakar = bool(getattr(self, "watcher", None)
+                           and self.watcher.running)
+            if (self.settings.get("schedule_enabled", False) and bevakar
+                    and not self._busy
+                    and not getattr(self, "_processing_queue", False)):
                 tid = str(self.settings.get("schedule_time", "07:00"))[:5]
                 idag = time.strftime("%Y-%m-%d")
                 if (time.strftime("%H:%M") >= tid
@@ -6771,12 +14748,6 @@ class App:
                     save_settings(self.settings)
                     self._log(f"⏰ Schemalagd sortering (kl. {tid}) startar", "info")
                     self._sort_now()
-        except Exception:
-            pass
-        # Tyst autosök 2 ggr/dygn
-        try:
-            if self._should_auto_check_updates():
-                self._check_updates_gui(manual=False)
         except Exception:
             pass
         try:
@@ -6846,299 +14817,1051 @@ class App:
             pass
         return ""
 
-    def _record_update_check(self) -> None:
-        """Spara tidpunkt för senaste tysta autosök (2 ggr/dygn)."""
+    # -- tyst versionsvakt (2 ggr/dygn) -----------------------------------
+    def _starta_uppdateringsvakt(self) -> None:
+        """Starta den tysta versionsvakten en gång per programkörning."""
+        if self._uppdateringsvakt:
+            return
+        self._uppdateringsvakt = True
+        # Första kontrollen strax efter start - men bara om det är dags.
         try:
-            self.settings["last_update_check"] = __import__("datetime").datetime.now().astimezone().isoformat(timespec="seconds")
-            save_settings(self.settings)
+            self.root.after(5000, self._uppdateringsvakt_tick)
         except Exception:
             pass
 
+    def _uppdateringsvakt_tick(self) -> None:
+        """Vaknar varje minut och söker bara när det är dags.
+
+        Tyst: ingen dialog, ingen statusrad - bara en rad i sessionsloggen.
+        """
+        try:
+            if (self.settings.get("check_updates", True)
+                    and self._uppdatering_dags()):
+                self._check_updates_gui(manual=False)
+        except Exception as exc:
+            session_error("uppdatering", exc)
+        finally:
+            try:
+                self.root.after(UPPDATERING_VAKT_SEKUNDER * 1000,
+                                self._uppdateringsvakt_tick)
+            except Exception:
+                pass
+
+    def _uppdatering_dags(self) -> bool:
+        """Är det dags för nästa tysta sökning (2 ggr/dygn)?"""
+        return uppdaterings_dags(
+            self.settings.get("last_update_check", ""),
+            per_dygn=uppdateringar_per_dygn(self.settings),
+            forra_lyckades=bool(self.settings.get("last_update_check_ok", True)))
+
+    def _uppdatering_nasta(self) -> str:
+        text = uppdaterings_nasta_text(
+            self.settings.get("last_update_check", ""),
+            per_dygn=uppdateringar_per_dygn(self.settings),
+            forra_lyckades=bool(self.settings.get("last_update_check_ok", True)))
+        return "nästa sökning nu" if text == "nu" else f"nästa sökning {text}"
+
+    def _check_updates_from_tray(self) -> None:
+        """Visa appen och starta en manuell uppdateringssökning från tray-menyn."""
+        self.show_window("uppdatering via systemfältet")
+        self._check_updates_gui(manual=True)
+
     def _check_updates_gui(self, manual: bool = False) -> None:
-        """Sök uppdatering i bakgrunden; fråga före installation.
-        2026-10-19: tyst autosök 2 ggr/dygn — sparar last_update_check."""
-        if getattr(self, "_checking_updates", False) and not manual:
+        """Sök efter ny version i bakgrunden (enbart GitHub Releases).
+
+        ``manual`` är användarens egen knapp: då visas svaret i en dialog och
+        gränsen två gånger per dygn gäller inte. Den tysta sökningen sparar
+        alltid sin tid i inställningarna, så antalet gäller över omstarter.
+        """
+        if not manual and not self._uppdatering_dags():
+            self._h("uppdatering", "Tyst versionssökning hoppad - "
+                    f"{self._uppdatering_nasta()}")
             return
-        self._checking_updates = True
+        if manual and getattr(self, "_manual_update_checking", False):
+            return
+        if manual:
+            self._manual_update_checking = True
+            button = getattr(self, "btn_update", None)
+            if button is not None:
+                try:
+                    button.configure(state="disabled")
+                except Exception:
+                    pass
+            label = getattr(self, "lbl_uppdatering", None)
+            if label is not None:
+                try:
+                    text = ("Checking GitHub Releases…"
+                            if self.settings.get("ui_language", "sv") == "en"
+                            else "Söker efter uppdateringar på GitHub Releases…")
+                    label.configure(text=text)
+                except Exception:
+                    pass
+        self._h("uppdatering", "Söker efter ny version ("
+                + ("manuellt" if manual else "tyst, enligt schemat") + ")")
+
         def work():
             try:
                 info = check_for_update()
             except Exception as exc:
-                info = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-            def _after():
-                try:
-                    if not manual:
-                        self._record_update_check()
-                    self._update_prompt(info, manual)
-                finally:
-                    self._checking_updates = False
-            try:
-                self.root.after(0, _after)
-            except Exception:
-                self._checking_updates = False
-        threading.Thread(target=work, daemon=True).start()
+                info = {"ok": False, "available": False,
+                        "error": f"{type(exc).__name__}: {exc}"}
 
-    def _update_prompt(self, info: dict, manual: bool) -> None:
-        if not info.get("ok"):
-            if manual:
-                self.messagebox.showwarning(
-                    APP_NAME, "Kunde inte söka efter uppdateringar:\n"
-                    + str(info.get("error", "okänt fel")))
-            else:
-                try:
-                    session_log("uppdatering", f"Autosök misslyckades: {info.get('error', '?')}", "warn")
-                except Exception:
-                    pass
-            return
-        if not info.get("available"):
-            if manual:
-                self.messagebox.showinfo(
-                    APP_NAME, f"Du har den senaste versionen ({APP_VERSION}).")
-            else:
-                try:
-                    session_log("uppdatering", f"Autosök: ingen ny version (har {info.get('current')}, remote {info.get('remote')})", "info")
-                except Exception:
-                    pass
-            return
-        try:
-            session_log("uppdatering", f"Ny version funnen: {info['remote']} (du har {info['current']}) — manual={manual} auto_update={self.settings.get('auto_update', False)}", "info")
-        except Exception:
-            pass
-        if self.settings.get("auto_update", False) and not manual:
-            svar = True
-        else:
-            if not manual and not getattr(self, "visible", True) and self.tray:
-                try:
-                    self._notify(f"Ny version {info['remote']} finns (du har {info['current']}) — öppnar frågan…")
-                except Exception:
-                    pass
-            svar = self.messagebox.askyesno(
-                APP_NAME,
-                f"En ny version finns: {info['remote']} "
-                f"(du har {APP_VERSION}).\n\n"
-                "Uppdatera nu? Appen uppdateras i sin egen mapp, "
-                "dina inställningar, regler och historik rörs inte. "
-                "En säkerhetskopia tas först.")
-        if not svar:
-            return
-
-        silent_restart = (not manual and self.settings.get("auto_update", False)
-                          and self.settings.get("silent_restart", True))
-
-        def install():
-            try:
-                session_log("uppdatering", f"Installerar {info['current']} -> {info['remote']} (silent_restart={silent_restart})", "info")
-            except Exception:
-                pass
-            ok, msg = perform_update()
-            if ok:
-                try:
-                    update_python_packages()
-                except Exception as exc:
-                    try:
-                        session_error("uppdatering", exc)
-                    except Exception:
-                        pass
-            def done():
-                if ok:
-                    if silent_restart:
+            def present():
+                if manual:
+                    self._manual_update_checking = False
+                    button = getattr(self, "btn_update", None)
+                    if button is not None:
                         try:
-                            session_log("uppdatering", f"Tyst omstart efter uppdatering {info['current']} -> {info['remote']}: {msg}", "ok")
-                            self._log(f"🔄 Uppdaterad {info['current']} → {info['remote']} — startar om tyst…", "ok")
-                            if self.tray:
-                                self._notify(f"Uppdaterad till {info['remote']} — startar om…")
+                            button.configure(state="normal")
                         except Exception:
                             pass
-                        try:
-                            self.root.after(1200, self._restart_app)
-                        except Exception:
-                            self._restart_app()
-                    else:
-                        if self.messagebox.askyesno(
-                                APP_NAME, msg + "\n\nStarta om appen nu "
-                                "för att köra den nya versionen?"):
-                            self._restart_app()
-                else:
-                    self.messagebox.showwarning(APP_NAME, msg)
+                self._update_prompt(info, manual)
+
+            self.root.after(0, present)
+        threading.Thread(target=work, daemon=True,
+                         name="versionssok").start()
+
+    def _notera_uppdateringsforsok(self, info: dict) -> None:
+        """Kom ihåg när och hur sökningen gick - grunden för 2 ggr/dygn."""
+        try:
+            self.settings["last_update_check"] = datetime.now().isoformat(
+                timespec="seconds")
+            self.settings["last_update_check_ok"] = bool(info.get("ok"))
+            if info.get("remote"):
+                self.settings["last_update_seen"] = str(info["remote"])
+            if info.get("release_commit"):
+                self.settings["last_update_seen_commit"] = str(info["release_commit"])
+            save_settings(self.settings)
+        except Exception as exc:
+            self._h("uppdatering", f"Kunde inte spara söktiden: {exc}", "warn")
+        self._refresh_update_status()
+
+    def _uppdatering_status_text(self) -> str:
+        """Rad i inställningarna: när appen sökte och när den gör det igen."""
+        if not self.settings.get("check_updates", True):
+            return "Automatisk versionssökning är avstängd."
+        per_dygn = uppdateringar_per_dygn(self.settings)
+        lyckades = bool(self.settings.get("last_update_check_ok", True))
+        senast = self.settings.get("last_update_check", "")
+        nasta = uppdaterings_nasta_text(
+            senast, per_dygn=per_dygn, forra_lyckades=lyckades)
+        text = (f"Tyst sökning {per_dygn} ggr/dygn · senast "
+                f"{tid_kort(senast)} · nästa {nasta}")
+        if not lyckades:
+            text += " (förra försöket misslyckades)"
+        return text
+
+    def _refresh_update_status(self) -> None:
+        lbl = getattr(self, "lbl_uppdatering", None)
+        if lbl is None:
+            return
+        try:
+            lbl.configure(text=self._uppdatering_status_text())
+        except Exception:
+            pass
+
+    def _cache_cleanup_status_text(self) -> str:
+        engelska = self.settings.get("ui_language", "sv") == "en"
+        if not self.settings.get("cache_cleanup_enabled", True):
+            return ("Automatic smart cleanup is off." if engelska else
+                    "Automatisk smart rensning är avstängd.")
+        senast = str(self.settings.get("last_cache_cleanup", "") or "")
+        if not senast:
+            return ("No smart cleanup yet · runs daily and on exit." if engelska
+                    else "Ingen smart rensning ännu · körs dagligen och vid avslut.")
+        if engelska:
             try:
-                self.root.after(0, done)
+                visning = datetime.fromisoformat(senast).strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                visning = senast
+            return (f"Last smart cleanup: {visning} · "
+                    "runs daily and on exit.")
+        return (f"Senast smart rensad: {tid_kort(senast)} · "
+                "automatisk rensning dagligen och vid avslut.")
+
+    def _refresh_cache_cleanup_status(self) -> None:
+        lbl = getattr(self, "lbl_cache_cleanup", None)
+        if lbl is not None:
+            try:
+                lbl.configure(text=self._cache_cleanup_status_text())
             except Exception:
                 pass
-        threading.Thread(target=install, daemon=True).start()
 
-    def _restart_app(self) -> None:
-        """Starta om appen efter uppdatering (samma startväg som vanligt)."""
+    def _toggle_cache_cleanup(self) -> None:
+        self._collect_settings()
+        self._refresh_cache_cleanup_status()
+        self._log("Automatisk smart cache-rensning "
+                  + ("påslagen" if self.var_cache_cleanup.get() else "avstängd"),
+                  "info")
+
+    def _toggle_low_memory_mode(self) -> None:
+        self._collect_settings()
+        workers = processing_worker_count(self.settings)
+        self._log(
+            f"Minnesläge {'på' if self.settings.get('low_memory_mode') else 'av'} "
+            f"· nästa sortering använder högst {workers} parallella PDF-läsningar.",
+            "info")
+
+    def _learned_backtest(self) -> None:
+        events = load_history()
+        result = replay_learned_history(events)
+        if not result["tested"]:
+            self.messagebox.showinfo(
+                APP_NAME, "Historiken innehåller ännu inte tillräckligt många "
+                "tidigare beslut för ett walk-forward-test.", parent=self.root)
+            return
+        percent = 100 * result["accuracy"]
+        by_category = "\n".join(
+            f"• {name}: {values['correct']}/{values['tested']}"
+            for name, values in sorted(result["categories"].items()))
+        self.messagebox.showinfo(
+            APP_NAME,
+            f"Walk-forward-test av inlärningen:\n\n"
+            f"Rätt: {result['correct']} av {result['tested']} "
+            f"({percent:.1f} %).\n\n"
+            f"Per kategori:\n{by_category or '—'}\n\n"
+            "Varje historikrad testades innan just den raden tränades in.",
+            parent=self.root)
+
+    def _rebuild_learned(self) -> None:
+        events = load_history()
+        if not events:
+            self.messagebox.showinfo(APP_NAME, "Historiken är tom.", parent=self.root)
+            return
+        if not self.messagebox.askyesno(
+                APP_NAME, "Ersätt den nuvarande inlärningen med en kronologisk "
+                "återuppspelning av historiken? Den nuvarande modellen sparas "
+                "som säkerhetskopia.", parent=self.root):
+            return
         try:
-            import subprocess as _sp
-            rot = Path(__file__).resolve().parent
-            pyw = rot / "pdfsorter.pyw"
-            exe = sys.executable or "python3"
-            if sys.platform.startswith("win") and pyw.is_file():
-                exe_w = Path(exe).with_name("pythonw.exe")
-                _sp.Popen([str(exe_w if exe_w.exists() else exe), str(pyw)],
-                          cwd=str(rot))
+            with _LEARNED_LOCK:
+                count = rebuild_learned_from_history(events)
+            self.messagebox.showinfo(
+                APP_NAME, f"Inlärningen byggdes om från {count} historikbeslut.",
+                parent=self.root)
+        except Exception as exc:
+            self.messagebox.showerror(APP_NAME, f"Kunde inte bygga om modellen: {exc}",
+                                      parent=self.root)
+
+    def _reset_learned(self) -> None:
+        if not self.messagebox.askyesno(
+                APP_NAME, "Nollställ all kategoriinlärning? Historik och regler "
+                "påverkas inte. Den nuvarande modellen sparas som säkerhetskopia.",
+                parent=self.root):
+            return
+        try:
+            with _LEARNED_LOCK:
+                learner = _learned()
+                learner.cats = {}
+                learner._dirty = True
+                learner.flush()
+            self.messagebox.showinfo(APP_NAME, "Kategorinlärningen har återställts.",
+                                     parent=self.root)
+        except Exception as exc:
+            self.messagebox.showerror(APP_NAME, f"Kunde inte återställa modellen: {exc}",
+                                      parent=self.root)
+
+    def _manage_learned(self) -> None:
+        tk, ttk = self.tk, self.ttk
+        win = tk.Toplevel(self.root)
+        brand_window(win)
+        win.title("Inlärning per kategori")
+        win.transient(self.root)
+        win.resizable(True, True)
+        _fit_geometry(win, 920, 560, 620, 340)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(win, columns=("category", "files", "features", "accuracy", "updated"),
+                            show="headings", selectmode="browse")
+        for key, title, width in (("category", "KATEGORI", 190),
+                                  ("files", "EXEMPEL", 90),
+                                  ("features", "SIGNALER", 90),
+                                  ("accuracy", "KALIBRERING", 110),
+                                  ("updated", "SENAST UPPDATERAD", 180)):
+            tree.heading(key, text=title)
+            tree.column(key, width=width, anchor="w")
+        tree.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        tree_y = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree_y.grid(row=0, column=1, sticky="ns", padx=(0, 10), pady=10)
+        tree_x = ttk.Scrollbar(win, orient="horizontal", command=tree.xview)
+        tree_x.grid(row=1, column=0, sticky="ew", padx=10)
+        tree.configure(yscrollcommand=tree_y.set, xscrollcommand=tree_x.set)
+
+        def refresh() -> None:
+            tree.delete(*tree.get_children())
+            with _LEARNED_LOCK:
+                profiles = [(name, dict(profile))
+                            for name, profile in _learned().cats.items()]
+            for name, profile in sorted(profiles):
+                calibration = profile.get("calibration", {}) or {}
+                total = int(calibration.get("correct", 0)) + int(
+                    calibration.get("incorrect", 0))
+                accuracy = (f"{100 * int(calibration.get('correct', 0)) / total:.0f}%"
+                            if total else "—")
+                updated = str(profile.get("updated", "—"))[:16].replace("T", " ")
+                tree.insert("", "end", values=(
+                    name, int(profile.get("n", 0)),
+                    len(profile.get("w", {})), accuracy, updated))
+
+        def selected_category() -> str:
+            selection = tree.selection()
+            return str(tree.item(selection[0], "values")[0]) if selection else ""
+
+        def reset_selected() -> None:
+            category = selected_category()
+            if not category:
+                return
+            if not self.messagebox.askyesno(
+                    APP_NAME, f"Nollställ bara inlärningen för {category!r}?",
+                    parent=win):
+                return
+            with _LEARNED_LOCK:
+                reset_learned_category(category)
+            refresh()
+
+        def restore_selected() -> None:
+            category = selected_category()
+            if not category:
+                return
+            if not self.messagebox.askyesno(
+                    APP_NAME, f"Ersätt {category!r} med dess beslut och korrigeringar "
+                    "från historiken?", parent=win):
+                return
+            with _LEARNED_LOCK:
+                count = restore_learned_category(category, load_history())
+            refresh()
+            self.messagebox.showinfo(
+                APP_NAME, f"{category}: {count} positiva historikbeslut återställda.",
+                parent=win)
+
+        refresh()
+        ttk.Button(win, text="Återställ kategori",
+                   command=reset_selected).grid(row=2, column=0, sticky="w",
+                                                 padx=10, pady=10)
+        ttk.Button(win, text="Återställ från historik",
+                   command=restore_selected).grid(row=2, column=1, sticky="w",
+                                                   padx=4, pady=10)
+        ttk.Button(win, text="Stäng", command=win.destroy).grid(
+            row=2, column=2, sticky="e", padx=10, pady=10)
+
+    def _error_autofix_tick(self) -> None:
+        """Åtgärda automatiskt fel som slutat återkomma (även vid lång drift)."""
+        try:
+            if not self._quitting:
+                auto_resolve_stale_codes(
+                    self.settings.get("error_autofix_days", 7))
+        except Exception as exc:
+            self._h("logg", f"Kunde inte underhålla felloggen: {exc}",
+                    "warn")
+        if not self._quitting:
+            try:
+                self.root.after(3600000, self._error_autofix_tick)
+            except Exception:
+                pass
+
+    def _cache_cleanup_tick(self) -> None:
+        """Starta max en smart rensning per 24 timmar även vid lång drift."""
+        try:
+            if (not self._quitting
+                    and self.settings.get("cache_cleanup_enabled", True)
+                    and disk_cache_cleanup_due(
+                        self.settings.get("last_cache_cleanup", ""))):
+                self._rensa_cache(manual=False)
+        except Exception as exc:
+            self._h("cache", f"Kunde inte kontrollera rensningsschemat: {exc}",
+                    "warn")
+        if not self._quitting:
+            try:
+                self.root.after(3600000, self._cache_cleanup_tick)
+            except Exception:
+                pass
+
+    def _rensa_cache(self, manual: bool = True) -> None:
+        """Kör smartfiltret i bakgrunden; cachen innehåller bara återskapbar data."""
+        if manual:
+            self._collect_settings()
+        if self._cache_cleanup_running:
+            self._h("cache", "Smart cache-rensning pågår redan", "warn")
+            return
+        self._cache_cleanup_running = True
+        self._h("cache", "Smart cache-rensning startar" +
+                (" (manuell)" if manual else " (daglig)"))
+        self._refresh_cache_cleanup_status()
+
+        def work():
+            try:
+                result = DISK_CACHE.cleanup()
+                error = ""
+            except Exception as exc:
+                result = {}
+                error = f"{type(exc).__name__}: {exc}"
+            self._post(lambda: self._cache_cleanup_finished(result, error))
+
+        threading.Thread(target=work, daemon=True,
+                         name="cache-cleanup").start()
+
+    def _cache_cleanup_on_exit(self) -> None:
+        """Smart-trim persistent cache at real app exit (not tray hiding)."""
+        if not self.settings.get("cache_cleanup_enabled", True):
+            self._h("cache", "Smart cache-rensning vid avslut avstängd")
+            return
+        try:
+            result = DISK_CACHE.cleanup()
+            TEXT_CACHE.clear()
+            self.settings["last_cache_cleanup"] = now_iso()
+            save_settings(self.settings)
+            removed = result.get("removed_age", 0) + result.get("removed_limit", 0)
+            mb = result.get("removed_bytes", 0) / (1024 * 1024)
+            kvar = result.get("remaining", 0)
+            errors = result.get("errors", 0)
+            message = (f"Smart cache-rensning vid avslut: {removed} poster / "
+                       f"{mb:.1f} MB bort, {kvar} cacheposter kvar")
+            if errors:
+                message += f" ({errors} kunde inte tas bort)"
+            self._h("cache", message, "warn" if errors else "ok")
+        except Exception as exc:
+            self._h("cache", f"Smart cache-rensning vid avslut misslyckades: "
+                    f"{type(exc).__name__}: {exc}", "warn")
+
+    def _cache_cleanup_finished(self, result: Dict[str, int], error: str) -> None:
+        self._cache_cleanup_running = False
+        if error:
+            self._h("cache", f"Smart cache-rensning misslyckades: {error}",
+                    "warn")
+            self._refresh_cache_cleanup_status()
+            return
+        self.settings["last_cache_cleanup"] = now_iso()
+        try:
+            save_settings(self.settings)
+        except Exception as exc:
+            self._h("cache", f"Kunde inte spara rensningstiden: {exc}", "warn")
+        removed = result.get("removed_age", 0) + result.get("removed_limit", 0)
+        mb = result.get("removed_bytes", 0) / (1024 * 1024)
+        kvar = result.get("remaining", 0)
+        fel = result.get("errors", 0)
+        msg = (f"Smart rensning klar: {removed} poster / {mb:.1f} MB bort, "
+               f"{kvar} cacheposter kvar")
+        if fel:
+            msg += f" ({fel} kunde inte tas bort)"
+        self._h("cache", msg, "warn" if fel else "ok")
+        self._refresh_cache_cleanup_status()
+        lbl = getattr(self, "lbl_cache_cleanup", None)
+        if lbl is not None:
+            try:
+                if self.settings.get("ui_language", "sv") == "en":
+                    last = datetime.fromisoformat(
+                        self.settings["last_cache_cleanup"]).strftime("%Y-%m-%d %H:%M")
+                    text = (f"Last cleanup: {last} · {removed} entries / "
+                            f"{mb:.1f} MB removed · {kvar} kept")
+                else:
+                    text = (f"Senast rensad: "
+                            f"{tid_kort(self.settings['last_cache_cleanup'])} · "
+                            f"{removed} poster / {mb:.1f} MB bort · {kvar} kvar")
+                lbl.configure(text=text)
+            except Exception:
+                pass
+
+    # -- uppdatering från Git (2026-10-16) ------------------------------
+    def _update_prompt(self, info: dict, manual: bool) -> None:
+        plan = uppdateringsplan(info, manual, self.settings)
+        self._notera_uppdateringsforsok(info)
+        steg = plan["steg"]
+        if steg == "fel":
+            fel = str(info.get("error", "okänt fel"))
+            self._h("uppdatering", "Kunde inte söka uppdatering: " + fel, "warn")
+            if manual:
+                self.messagebox.showwarning(
+                    APP_NAME, "Kunde inte söka efter uppdateringar:\n" + fel,
+                    parent=self.root)
+            return
+        if steg == "aktuell":
+            bygge = str(info.get("local_commit") or "")[:12]
+            self._h("uppdatering",
+                    f"Ingen nyare version (kör {APP_VERSION}, "
+                    f"GitHub: {info.get('remote')}"
+                    + (f", bygge {bygge}" if bygge else "") + ")")
+            if manual:
+                # Samma versionsnummer kan byggas om flera gånger: visa
+                # vilket bygge som är installerat så att det går att jämföra
+                # med "Paket byggt från ..." i releasen.
+                text = f"Du har den senaste versionen ({APP_VERSION})."
+                if bygge:
+                    text += f"\nBygge: {bygge}"
+                self.messagebox.showinfo(APP_NAME, text, parent=self.root)
+            return
+        if steg == "osaker":
+            self._h("uppdatering",
+                    f"Releasen {info.get('remote')} saknar kontrollsumma - "
+                    "uppdateringen kan inte verifieras", "warn")
+            if manual:
+                self.messagebox.showwarning(
+                    APP_NAME,
+                    f"Releasen {info.get('remote')} saknar kontrollsumma "
+                    "(SHA256SUMS.txt eller SHA-256 i release-texten).\n\n"
+                    "Appen installerar inte ett paket som inte kan "
+                    "verifieras. Ladda ner den manuellt från releasesidan.",
+                    parent=self.root)
+            return
+        kalla = "GitHub Releases"
+        build_label = (f"Ett nytt bygge av version {info.get('remote')}"
+                       if info.get("build_update") else
+                       f"Ny version {info.get('remote')}")
+        changed_files = list(info.get("changed_files") or [])
+        build_details = ""
+        if info.get("build_update"):
+            if changed_files:
+                listed = ", ".join(changed_files[:8])
+                suffix = " …" if len(changed_files) > 8 else ""
+                build_details += f"\nFiler som skiljer: {listed}{suffix}"
+            local_commit = str(info.get("local_commit") or "")[:12]
+            release_commit = str(info.get("release_commit") or "")[:12]
+            if local_commit and release_commit and local_commit != release_commit:
+                build_details += (f"\nCommit: {local_commit} → "
+                                  f"{release_commit}")
+        if steg == "erbjudande":
+            self._h("uppdatering",
+                    f"{build_label} finns (kör {APP_VERSION}) - "
+                    "autouppdatering är avstängd, så appen installerar "
+                    "det inte själv" + build_details, "ok")
+            self._notify(f"Uppdatering finns: {build_label}. "
+                         "Hjälp → Sök efter uppdateringar installerar den.")
+            return
+        tyst = steg == "installera"
+        if tyst:
+            svar = True
+            self._h("uppdatering",
+                    f"Tyst uppdatering: {build_label} hittades på {kalla} - "
+                    "verifierar SHA-256 och installerar", "ok")
+            self._log(f"Uppdatering hittad: {build_label} - installeras i "
+                      "bakgrunden.", "info")
+        else:
+            svar = self.messagebox.askyesno(
+                APP_NAME,
+                f"En uppdatering finns: {build_label} "
+                f"(installerad version {APP_VERSION}).\n\n"
+                f"Källa: {kalla}."
+                + build_details
+                + ("\nPaketet verifieras med SHA-256 före installation."
+                   if info.get("sha256_url") else
+                   "\nVarning: releasen saknar kontrollsumma.")
+                + "\n\nAppen uppdateras i sin egen mapp, dina "
+                "inställningar, regler och historik rörs inte. "
+                "En säkerhetskopia tas först.", parent=self.root)
+        if not svar:
+            self._h("uppdatering", "Uppdateringen avböjd av användaren")
+            return
+
+        def install():
+            ok, msg = perform_update()
+
+            def done():
+                self._h("uppdatering", msg, "ok" if ok else "warn")
+                if not ok:
+                    if manual:
+                        self.messagebox.showwarning(APP_NAME, msg,
+                                                    parent=self.root)
+                    else:
+                        self._log(f"Uppdateringen misslyckades: {msg}", "warn")
+                    return
+                self._log(msg, "ok")
+                if plan["omstart"] == "tyst":
+                    self._h("uppdatering",
+                            "Uppdateringen är klar; appen startar om automatiskt "
+                            "med den nya versionen.", "ok")
+                    self._planera_omstart(tyst=True)
+                else:
+                    self._h("uppdatering",
+                            "Uppdateringen är klar; appen startar om automatiskt "
+                            "om 10 sekunder.", "ok")
+                    self._visa_omstart_nedrakning()
+            self.root.after(0, done)
+        threading.Thread(target=install, daemon=True,
+                         name="uppdatering").start()
+
+    # -- omstart ----------------------------------------------------------
+    def _visa_omstart_nedrakning(self) -> None:
+        """Show a clear, non-cancellable countdown before the updated app opens."""
+        current = getattr(self, "_update_restart_state", None)
+        if current is not None:
+            return
+        tk, ttk = self.tk, self.ttk
+        dialog = tk.Toplevel(self.root)
+        dialog._icon_ref = brand_window(dialog)
+        dialog.title("Uppdateringen är klar" if self.settings.get(
+            "ui_language", "sv") != "en" else "Update complete")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.geometry("520x270")
+        dialog.columnconfigure(0, weight=1)
+        english = self.settings.get("ui_language", "sv") == "en"
+
+        card = ttk.Frame(dialog, style="Card.TFrame")
+        card.grid(row=0, column=0, sticky="nsew", padx=16, pady=16)
+        card.columnconfigure(0, weight=1)
+        title = ("Update installed successfully" if english else
+                 "Uppdateringen är installerad")
+        ttk.Label(card, text=title, style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", padx=18, pady=(16, 4))
+        intro = ("ArkivPiloten will restart automatically to finish the update."
+                 if english else
+                 "ArkivPiloten startar om automatiskt för att börja använda "
+                 "den nya versionen.")
+        ttk.Label(card, text=intro, style="CardMuted.TLabel",
+                  wraplength=450, justify="left").grid(
+                      row=1, column=0, sticky="w", padx=18, pady=(0, 12))
+
+        timing = ttk.Frame(card, style="CardInner.TFrame")
+        timing.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 8))
+        timing.columnconfigure(1, weight=1)
+        countdown_value = ttk.Label(timing, style="CardHuge.TLabel", width=3,
+                                    anchor="center")
+        countdown_value.grid(row=0, column=0, rowspan=2, sticky="nsw",
+                             padx=(0, 14))
+        countdown_label = ttk.Label(timing, style="CardHead.TLabel")
+        countdown_label.grid(row=0, column=1, sticky="sw")
+        status = ttk.Label(timing, style="CardMuted.TLabel", justify="left",
+                           wraplength=360)
+        status.grid(row=1, column=1, sticky="nw")
+
+        note = ("You can close this notice; the restart will continue." if english
+                else "Du kan stänga rutan – omstarten fortsätter ändå.")
+        ttk.Label(card, text=note, style="CardMuted.TLabel",
+                  wraplength=450, justify="left").grid(
+                      row=3, column=0, sticky="w", padx=18, pady=(0, 12))
+        actions = ttk.Frame(card, style="CardInner.TFrame")
+        actions.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 16))
+        actions.columnconfigure(0, weight=1)
+        state = {"dialog": dialog, "remaining": UPDATE_RESTART_COUNTDOWN_SECONDS,
+                 "status": status, "countdown_value": countdown_value,
+                 "countdown_label": countdown_label, "english": english}
+        self._update_restart_state = state
+
+        def close_dialog() -> None:
+            if getattr(self, "_update_restart_state", None) is not state:
+                return
+            self._update_restart_state = None
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        def restart_now() -> None:
+            close_dialog()
+            self._planera_omstart(tyst=True)
+
+        ttk.Button(actions,
+                   text="Restart now" if english else "Starta om nu",
+                   style="Accent.TButton", command=restart_now).grid(
+                       row=0, column=1, sticky="e")
+        # Hiding the notice never cancels the automatic restart.
+        dialog.protocol("WM_DELETE_WINDOW", dialog.withdraw)
+
+        def show_countdown() -> None:
+            remaining = state["remaining"]
+            countdown_value.configure(text=str(remaining))
+            countdown_label.configure(
+                text=("seconds until restart" if english else
+                      "sekunder till omstart"))
+            status.configure(text=("The app will reopen with the update." if english
+                                   else "Appen öppnas igen med uppdateringen."))
+
+        def show_waiting(reason: str) -> None:
+            if english:
+                message = {
+                    "en sortering pågår": "Waiting for sorting to finish safely.",
+                    "en omskanning pågår": "Waiting for the rescan to finish safely.",
+                    "granskningsrutan är öppen": "Waiting for the review window to close.",
+                    "appen avslutas redan": "Waiting for the app to finish closing.",
+                }.get(reason, "Waiting until it is safe to restart.")
+                countdown_label.configure(text="Restarting as soon as it is safe")
             else:
-                _sp.Popen([exe, str(rot / "pdfsorter.py")], cwd=str(rot))
+                message = {
+                    "en sortering pågår": "Väntar på att sorteringen ska bli klar.",
+                    "en omskanning pågår": "Väntar på att omskanningen ska bli klar.",
+                    "granskningsrutan är öppen": "Väntar tills granskningsrutan stängs.",
+                    "appen avslutas redan": "Väntar på att appen ska avslutas.",
+                }.get(reason, "Väntar tills det är säkert att starta om.")
+                countdown_label.configure(text="Startar om så snart det är säkert")
+            countdown_value.configure(text="…")
+            status.configure(text=message)
+
+        def tick() -> None:
+            if getattr(self, "_update_restart_state", None) is not state:
+                return
+            if state["remaining"] > 0:
+                state["remaining"] -= 1
+            if state["remaining"] <= 0:
+                ready, reason = self._kan_starta_om()
+                if ready:
+                    close_dialog()
+                    self._planera_omstart(tyst=True)
+                    return
+                show_waiting(reason)
+            else:
+                show_countdown()
+            try:
+                self.root.after(1000, tick)
+            except Exception:
+                close_dialog()
+                self._planera_omstart(tyst=True)
+
+        show_countdown()
+        try:
+            self.root.after(1000, tick)
+        except Exception:
+            close_dialog()
+            self._planera_omstart(tyst=True)
+
+    def _kan_starta_om(self) -> Tuple[bool, str]:
+        """Får appen startas om nu utan att tappa något?"""
+        if self._quitting:
+            return False, "appen avslutas redan"
+        if self._busy:
+            return False, "en sortering pågår"
+        if getattr(self, "_rescanning", False):
+            return False, "en omskanning pågår"
+        if self._review_is_open():
+            return False, "granskningsrutan är öppen"
+        # Pending queue paths are persisted and reanalyzed by the new process.
+        # Do not hold an installed update hostage until every review is done.
+        return True, ""
+
+    def _planera_omstart(self, tyst: bool = True) -> None:
+        """Starta om nu, eller så snart appen är ledig.
+
+        En uppdatering får aldrig avbryta en sortering, omskanning eller
+        öppen granskningsdialog. Köade filer sparas och återställs efteråt.
+        """
+        ok, orsak = self._kan_starta_om()
+        if ok:
+            self._restart_app(tyst=tyst)
+            return
+        if self._omstart_vantar:
+            return
+        self._omstart_vantar = True
+        self._h("uppdatering", f"Omstarten väntar: {orsak} - görs när appen "
+                "är ledig", "warn")
+        self._log(f"Den nya versionen är installerad, men appen är upptagen "
+                  f"({orsak}). Den startar om automatiskt när den är ledig - "
+                  "eller nästa gång du startar appen.", "info")
+        try:
+            self.root.after(60000, self._omstart_nar_ledig)
         except Exception:
             pass
+
+    def _omstart_nar_ledig(self) -> None:
+        if not self._omstart_vantar:
+            return
+        ok, _orsak = self._kan_starta_om()
+        if ok:
+            self._omstart_vantar = False
+            self._restart_app(tyst=True)
+            return
+        try:
+            self.root.after(60000, self._omstart_nar_ledig)
+        except Exception:
+            pass
+
+    def _spara_fore_omstart(self) -> None:
+        """Spara inställningar och väntande granskningar före processbyte."""
+        try:
+            self._collect_settings()
+        except Exception as exc:
+            session_error("uppdatering", exc)
+        try:
+            # Köbeslut finns bara i minnet. Spara filvägar så de kan läsas om
+            # och återställas efter att uppdateraren startat den nya processen.
+            paths = list(self.settings.get("pending_review_paths", []) or [])
+            paths.extend(str(item.path) for item in getattr(self, "queue", [])
+                         if getattr(item, "path", None) is not None)
+            unique = []
+            seen = set()
+            for raw in paths:
+                try:
+                    path = Path(raw).expanduser().resolve()
+                    key = os.path.normcase(str(path))
+                    if key not in seen and path.is_file():
+                        seen.add(key)
+                        unique.append(str(path))
+                except (OSError, TypeError, ValueError):
+                    continue
+            self.settings["pending_review_paths"] = unique
+            save_settings(self.settings)
+        except Exception as exc:
+            session_error("uppdatering", exc)
+            self._log("Granskningskön kunde inte sparas före omstarten: "
+                      f"{exc}", "warn")
+        try:
+            if self.watcher:
+                self.watcher.stop()
+            self._stop_archive_watch()
+            self.rules.save()
+            flush_history()
+        except Exception as exc:
+            session_error("uppdatering", exc)
+
+    def _restore_pending_review_queue(self) -> None:
+        """Reanalyze persisted queue paths so an update restart loses no work."""
+        raw = self.settings.get("pending_review_paths", [])
+        if not isinstance(raw, list) or not raw:
+            return
+        paths = []
+        seen = set()
+        for value in raw:
+            try:
+                path = Path(str(value)).expanduser().resolve()
+                key = os.path.normcase(str(path))
+                if key not in seen and path.is_file():
+                    seen.add(key)
+                    paths.append(path)
+            except (OSError, TypeError, ValueError):
+                continue
+
+        def worker() -> None:
+            decisions = []
+            for path in paths:
+                try:
+                    decision = self.engine.analyze(path)
+                except Exception as exc:
+                    decision = Decision(
+                        path, Extraction(path=path), [], "ask",
+                        f"Kunde inte läsa om efter uppdatering: {exc}")
+                # Återställda objekt kräver fortfarande ett uttryckligt
+                # användarval, även om nya regler nu skulle auto-matcha dem.
+                decision.status = "ask"
+                decision.reason = ("Återställd från granskningskön efter "
+                                   "uppdatering; välj kategori igen.")
+                decisions.append(decision)
+            self._post(lambda: finish(decisions))
+
+        def finish(decisions: List[Decision]) -> None:
+            added = 0
+            for decision in decisions:
+                key = os.path.normcase(os.path.abspath(str(decision.path)))
+                if key not in self._queued_paths:
+                    self._queued_paths.add(key)
+                    self.queue.append(decision)
+                    added += 1
+            self.settings["pending_review_paths"] = []
+            try:
+                save_settings(self.settings)
+            except Exception as exc:
+                session_error("uppdatering", exc)
+            self._refresh_queue()
+            if added:
+                self._log(f"Återställde {added} filer från granskningskön "
+                          "efter uppdateringen.", "info")
+
+        if not paths:
+            self.settings["pending_review_paths"] = []
+            save_settings(self.settings)
+            return
+        threading.Thread(target=worker, daemon=True,
+                         name="återställ-granskningskö").start()
+
+    def _restart_app(self, tyst: bool = False) -> bool:
+        """Starta om appen. ``tyst`` = inga frågor, ingen konsol, inget hopp.
+
+        Den nya processen startas innan den här stängs, och instanslåset
+        släpps först - annars skulle den nya instansen tro att appen redan
+        kör och bara be den döende processen visa fönstret.
+        """
+        # An update restart should reopen the window so it is unmistakable
+        # that the new process started; normal app launches stay minimized.
+        dold = False
+        bevaka = bool(self.watcher and self.watcher.running)
+        rot = Path(__file__).resolve().parent
+        cmd = omstart_kommando(
+            rot, sys.executable or "", dold=dold, bevaka_igen=bevaka,
+            restart_after_update=True)
+        self._spara_fore_omstart()
+        lås = self.instanslås
+        if lås is not None:
+            try:
+                lås.release()
+            except Exception:
+                pass
+        try:
+            popen_kw: Dict[str, Any] = {"cwd": str(rot)}
+            if sys.platform.startswith("win"):
+                popen_kw["creationflags"] = getattr(
+                    subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.Popen(cmd, **popen_kw)
+        except Exception as exc:
+            session_error("uppdatering", exc)
+            if lås is not None:                   # ta tillbaka låset
+                try:
+                    lås.acquire()
+                except Exception:
+                    pass
+            self._h("uppdatering", f"Kunde inte starta om appen: "
+                    f"{type(exc).__name__}: {exc} - den fortsätter som förut",
+                    "warn")
+            self._log("Omstarten gick inte att göra - appen fortsätter i den "
+                      "gamla versionen. Starta om den själv när det passar; "
+                      "den nya versionen ligger redan på plats.", "warn")
+            return False
+        self._h("uppdatering",
+                f"Appen startar om ({'tyst' if tyst else 'efter fråga'}) med "
+                f"{cmd[0]} - dold={dold}, bevakning={bevaka}", "ok")
+        # Stäng systemfältet och töm loggen innan processen lämnar: annars
+        # kan de sista raderna ligga kvar i bufferten när processen dör.
+        try:
+            if self.tray:
+                self.tray.stop()
+                self.tray = None
+        except Exception as exc:
+            session_error("uppdatering", exc)
+        try:
+            close_session()
+        except Exception:
+            pass
+        self._quitting = True
+        self._close_open_review()
         try:
             self.root.destroy()
-        except Exception:
-            pass
+        except Exception as exc:
+            session_error("uppdatering", exc)
+        return True
 
-    # -- donationsvy (N15, ANVÄNDARORDER 2026-10-15) -------------------
+    # -- donationsvy -----------------------------------------------------
+    # These built-in donation destinations are deliberately not configurable
+    # from the application's settings or dialogs.
+    DONATION_SWISH_NUMBER = "0721817177"
+    DONATION_PAYPAL_URL = "https://paypal.me/Rickard3dPrint"
+    DONATION_KOFI_URL = "https://ko-fi.com/tokke2"
+
     STOD_TEXT = {
         "sv": {
-            "titel": "Stöd ArkivPiloten 💖",
-            "undre": "Gratis, utan reklam. Din donation håller sortering, "
-                     "OCR och matchning vid liv.",
-            "t1": "☕ En kaffe — 39 kr",
-            "t1d": "Ett litet tack som ger energi till kvällskodning.",
-            "t2": "📚 Bokvän — 99 kr (mest vald)",
-            "t2d": "Täcker en månads underhåll och testfiler.",
-            "t3": "🌟 Hjälte — 299 kr",
-            "t3d": "Bär projektet en extra bit; din idé hamnar högt i kön.",
+            "title": "Stöd ArkivPiloten 💚",
+            "intro": "ArkivPiloten hjälper dig få ordning på dina PDF:er — utan "
+                     "reklam och prenumeration. Om appen sparar tid för dig får "
+                     "du gärna stötta fortsatt utveckling. Helt frivilligt; "
+                     "appen förblir gratis.",
+            "swish": "Swish · skanna QR-koden",
             "paypal": "💙 PayPal", "kofi": "☕ Ko-fi",
-            "valfritt": "Valfritt belopp",
-            "nr": "Ditt Swish-nummer (12 siffror):",
-            "qr": "Skanna med Swish — jämför med originalet: båda ska "
-                  "öppna samma betalning.",
-            "payload": "Payload (kopiera för jämförelse med original-QR):",
-            "kopiera_nr": "Kopiera nummer",
-            "kopiera_payload": "Kopiera payload",
-            "utan_nr": "Fyll i ditt Swish-nummer så ritas QR-koden direkt "
-                       "(beroendefri QR, verifierad mot oberoende avkodare).",
-            "tack": "Tack för att du håller appen gratis för alla! ✨",
+            "privacy": "Swish-mottagaren är fast inbyggd. Betalningen hanteras "
+                       "av respektive betaltjänst.",
+            "thanks": "Tack för att du hjälper till att hålla ArkivPiloten "
+                      "öppen och gratis!",
+            "language": "Språk / Language:",
         },
         "en": {
-            "titel": "Support ArkivPiloten 💖",
-            "undre": "Free, ad-free. Your donation keeps sorting, OCR and "
-                     "matching alive.",
-            "t1": "☕ A coffee — 39 SEK",
-            "t1d": "A small thanks that fuels evening coding.",
-            "t2": "📚 Book friend — 99 SEK (most picked)",
-            "t2d": "Covers a month of maintenance and test files.",
-            "t3": "🌟 Hero — 299 SEK",
-            "t3d": "Carries the project further; your idea jumps the queue.",
+            "title": "Support ArkivPiloten 💚",
+            "intro": "ArkivPiloten helps you keep your PDFs organised — with no "
+                     "ads or subscriptions. If the app saves you time, you are "
+                     "welcome to support its continued development. Entirely "
+                     "optional; the app stays free.",
+            "swish": "Swish · scan the QR code",
             "paypal": "💙 PayPal", "kofi": "☕ Ko-fi",
-            "valfritt": "Custom amount",
-            "nr": "Your Swish number (12 digits):",
-            "qr": "Scan with Swish — compare with the original: both should "
-                  "open the same payment.",
-            "payload": "Payload (copy to compare with the original QR):",
-            "kopiera_nr": "Copy number",
-            "kopiera_payload": "Copy payload",
-            "utan_nr": "Enter your Swish number and the QR is drawn "
-                       "instantly (dependency-free QR, verified against an "
-                       "independent decoder).",
-            "tack": "Thanks for keeping the app free for everyone! ✨",
+            "privacy": "The Swish recipient is fixed in the app. Payments "
+                       "are handled by the respective payment provider.",
+            "thanks": "Thank you for helping keep ArkivPiloten open and free!",
+            "language": "Språk / Language:",
         },
     }
 
     def _visa_stod(self) -> None:
-        """Donationsvy med SV/EN-växel, nivåer, PayPal/Ko-fi och Swish-QR
-        (N15). QR-koden ritas beroendefritt; payloaden visas för jämförelse
-        med originalkoden."""
+        """Show the fixed Swish QR and payment buttons inside the app."""
         tk, ttk = self.tk, self.ttk
         win = tk.Toplevel(self.root)
+        brand_window(win)
         win.title("ArkivPiloten — stöd")
         win.transient(self.root)
-        win.resizable(False, False)
+        win.resizable(True, True)
+        _fit_geometry(win, 660, 700, 440, 420)
         try:
             win.configure(background=self.C["bg"])
             win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
         except Exception:
             pass
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(0, weight=1)
+        outer = ttk.Frame(win)
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0,
+                           background=self.C["bg"])
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scroll.set)
+        content = ttk.Frame(canvas, style="Card.TFrame")
+        content_id = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind("<Configure>", lambda _e: canvas.configure(
+            scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(
+            content_id, width=e.width))
         lang = tk.StringVar(value="sv")
+        image_ref = {"photo": None}
 
-        def T_(nyckel):
-            return self.STOD_TEXT[lang.get()][nyckel]
+        title = ttk.Label(content, text="", style="CardTitle.TLabel",
+                          wraplength=600, justify="left")
+        title.pack(anchor="w", padx=20, pady=(18, 4))
+        intro = ttk.Label(content, text="", style="CardMuted.TLabel",
+                          wraplength=600, justify="left")
+        intro.pack(anchor="w", fill="x", padx=20, pady=(0, 10))
+        langrow = ttk.Frame(content, style="Card.TFrame")
+        langrow.pack(anchor="w", padx=20)
+        lang_label = ttk.Label(langrow, text="", style="CardMuted.TLabel")
+        lang_label.pack(side="left")
+        ttk.Radiobutton(langrow, text="SV", value="sv", variable=lang
+                        ).pack(side="left", padx=(8, 0))
+        ttk.Radiobutton(langrow, text="EN", value="en", variable=lang
+                        ).pack(side="left")
 
-        rub = ttk.Label(win, text="", style="Head.TLabel")
-        rub.pack(anchor="w", padx=18, pady=(16, 2))
-        und = ttk.Label(win, text="", style="CardMuted.TLabel",
-                        wraplength=430)
-        und.pack(anchor="w", padx=18)
-        sprakrad = ttk.Frame(win)
-        sprakrad.pack(anchor="w", padx=18, pady=(10, 0))
-        ttk.Label(sprakrad, text="Språk / Language:",
-                  style="CardMuted.TLabel").pack(side="left")
-        ttk.Radiobutton(sprakrad, text="SV", value="sv",
-                        variable=lang).pack(side="left", padx=(8, 0))
-        ttk.Radiobutton(sprakrad, text="EN", value="en",
-                        variable=lang).pack(side="left")
+        payment_row = ttk.Frame(content, style="Card.TFrame")
+        payment_row.pack(fill="x", padx=20, pady=12)
+        paypal = ttk.Button(
+            payment_row, text="", style="Accent.TButton",
+            command=lambda: open_externally(self.DONATION_PAYPAL_URL))
+        paypal.pack(side="left", padx=(0, 8))
+        kofi = ttk.Button(
+            payment_row, text="",
+            command=lambda: open_externally(self.DONATION_KOFI_URL))
+        kofi.pack(side="left")
 
-        body = ttk.Frame(win)
-        body.pack(fill="both", padx=18, pady=10)
-        tiers = []
-        for nyckel in ("t1", "t2", "t3"):
-            f = ttk.Frame(body, style="Card.TFrame")
-            f.pack(fill="x", pady=4)
-            lbl = ttk.Label(f, text="", style="TLabel")
-            lbl.pack(anchor="w", padx=10, pady=(8, 0))
-            desc = ttk.Label(f, text="", style="CardMuted.TLabel",
-                             wraplength=380)
-            desc.pack(anchor="w", padx=10, pady=(0, 8))
-            tiers.append((nyckel, lbl, desc))
-        btnrad = ttk.Frame(body)
-        btnrad.pack(fill="x", pady=8)
-        b_pay = ttk.Button(btnrad, text="", style="Accent.TButton",
-                           command=lambda: open_externally(
-                               Path("https://paypal.me/Rickard3dPrint")))
-        b_pay.pack(side="left")
-        b_kofi = ttk.Button(btnrad, text="",
-                            command=lambda: open_externally(
-                                Path("https://ko-fi.com/tokke2")))
-        b_kofi.pack(side="left", padx=6)
-        b_fri = ttk.Button(btnrad, text="",
-                           command=lambda: open_externally(
-                               Path("https://paypal.me/Rickard3dPrint")))
-        b_fri.pack(side="left")
+        swish_card = ttk.Frame(content, style="Card.TFrame")
+        swish_card.pack(fill="x", padx=16, pady=(0, 10))
+        swish_label = ttk.Label(swish_card, text="", style="CardHead.TLabel",
+                                wraplength=580, justify="center")
+        swish_label.pack(anchor="center", padx=12, pady=(14, 6))
+        qr_label = ttk.Label(swish_card, background=self.C["surface"])
+        qr_label.pack(padx=12, pady=10)
+        privacy = ttk.Label(swish_card, text="", style="CardMuted.TLabel",
+                            wraplength=580, justify="center")
+        privacy.pack(anchor="center", padx=12, pady=(0, 12))
+        thanks = ttk.Label(content, text="", style="CardTitle.TLabel",
+                           wraplength=600, justify="left")
+        thanks.pack(anchor="w", padx=20, pady=(0, 18))
 
-        swf = ttk.Frame(body, style="Card.TFrame")
-        swf.pack(fill="x", pady=(4, 8))
-        qr_lbl = ttk.Label(swf, background=self.C["surface"])
-        qr_lbl.pack(pady=14)
-        state = {"foto": None}
-
-        def rita_qr(*_):
-            """Samma som HTML-sidan (2026-10-15): endast QR-koden,
-            ingen nummertext, ingen payload, inga knappar."""
-            nr = "".join(ch for ch in
-                         self.settings.get("swish_number", "")
-                         if ch.isdigit())
-            if len(nr) < 10:
-                state["foto"] = None
-                qr_lbl.configure(image="", text="")
-                return
+        def redraw_qr() -> None:
             try:
-                png = qr_png_bytes(swish_payload(nr))
+                png = qr_png_bytes(swish_payload(self.DONATION_SWISH_NUMBER))
                 import base64
-                foto = tk.PhotoImage(data=base64.b64encode(png).decode())
-                state["foto"] = foto
-                qr_lbl.configure(image=foto, text="")
+                photo = tk.PhotoImage(data=base64.b64encode(png).decode("ascii"))
+                image_ref["photo"] = photo
+                qr_label.configure(image=photo, text="")
             except Exception as exc:
-                qr_lbl.configure(image="", text=f"QR-fel: {exc}")
+                image_ref["photo"] = None
+                qr_label.configure(image="", text=f"QR-fel: {exc}")
 
-        tack = ttk.Label(win, text="", style="TLabel")
-        tack.pack(anchor="w", padx=18, pady=(0, 14))
+        def translate(*_args) -> None:
+            text = self.STOD_TEXT[lang.get()]
+            win.title(text["title"])
+            title.configure(text=text["title"])
+            intro.configure(text=text["intro"])
+            lang_label.configure(text=text["language"])
+            paypal.configure(text=text["paypal"])
+            kofi.configure(text=text["kofi"])
+            swish_label.configure(text=text["swish"])
+            privacy.configure(text=text["privacy"])
+            thanks.configure(text=text["thanks"])
+            redraw_qr()
 
-        def oversatt(*_):
-            T = self.STOD_TEXT[lang.get()]
-            win.title(T["titel"])
-            rub.configure(text=T["titel"])
-            und.configure(text=T["undre"])
-            for nyckel, lbl, desc in tiers:
-                lbl.configure(text=T[nyckel])
-                desc.configure(text=T[nyckel + "d"])
-            b_pay.configure(text=T["paypal"])
-            b_kofi.configure(text=T["kofi"])
-            b_fri.configure(text=T["valfritt"])
-            tack.configure(text=T["tack"])
-            rita_qr()
-
-        lang.trace_add("write", oversatt)
-        oversatt()
+        lang.trace_add("write", translate)
+        translate()
 
     # -- autoinstall av Python-tillägg vid start (2026-10-06) ---------
     PIP_PAKET = ("PyMuPDF", "pypdf", "pdfminer.six", "Pillow",
@@ -7194,79 +15917,86 @@ class App:
     def _visa_progress(self, rubrik: str):
         tk, ttk = self.tk, self.ttk
         win = tk.Toplevel(self.root)
+        brand_window(win)
         win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
         win.title(rubrik)
         win.transient(self.root)
-        win.resizable(False, False)
+        win.resizable(True, True)
+        _fit_geometry(win, 560, 190, 380, 150)
+        win.columnconfigure(0, weight=1)
         try:
             win.configure(background=self.C["bg"])
         except Exception:
             pass
-        ttk.Label(win, text=rubrik, style="TLabel").pack(
-            anchor="w", padx=16, pady=(14, 6))
+        ttk.Label(win, text=rubrik, style="TLabel", wraplength=500,
+                  justify="left").pack(
+            anchor="w", fill="x", padx=16, pady=(14, 6))
         bar = ttk.Progressbar(win, mode="indeterminate", length=380)
-        bar.pack(padx=16)
+        bar.pack(fill="x", padx=16)
         bar.start(12)
         etikett = ttk.Label(win, text="Startar …", style="Faint.TLabel",
-                            wraplength=400)
+                            wraplength=500, justify="left")
         etikett.pack(anchor="w", padx=16, pady=(8, 14))
         return win, bar, etikett
 
-    def _autoinstallera_tillagg(self) -> None:
-        """Installera saknade pip-paket automatiskt vid start, med
-        progress bar. Uppdatering via knappen i tilläggsdialogen."""
-        try:
-            st = backend_status()
-            saknas = []
-            if not st["pypdf"]:
-                saknas.append("pypdf")
+    def _ensure_weekly_python_update_task(self) -> None:
+        """Säkerställ veckoschemat utan att kontrollera paket vid appstart."""
+        if not sys.platform.startswith("win"):
+            return
+        script = Path(__file__).resolve().parent / \
+            "arkivpiloten_schedule_python_updates.ps1"
+        if not script.is_file():
+            return
+
+        def ensure() -> None:
+            args = ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden",
+                    "-ExecutionPolicy", "Bypass", "-File", str(script)]
+            kwargs = {"capture_output": True, "text": True, "timeout": 45}
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             try:
-                from PIL import Image  # noqa: F401
-            except Exception:
-                saknas.append("Pillow")
-            if not st["pytesseract"]:
-                saknas.append("pytesseract")
-            if not tray_available():
-                saknas.append("pystray")
-            if not saknas:
-                self._tillaggserbjudande()
-                return
-            self._h("tillägg", f"Autoinstallerar saknade paket: {saknas}")
-            win, bar, etikett = self._visa_progress(
-                f"Installerar Python-tillägg ({', '.join(saknas)}) …")
-            threading.Thread(target=self._pip_jobba,
-                             args=(tuple(saknas), etikett, bar, win),
-                             daemon=True, name="pdfsorter-autopip").start()
-            self.root.after(4000, self._tillaggserbjudande)
-        except Exception as exc:
-            self._h("tillägg", f"Autoinstall kunde inte starta: {exc}", "warn")
-            self._tillaggserbjudande()
+                result = subprocess.run(args, **kwargs)
+                if result.returncode:
+                    detail = (result.stderr or result.stdout or "").strip()
+                    self._h("tillägg", "Kunde inte säkerställa veckouppgiften"
+                            + (f": {detail[-500:]}" if detail else ""), "warn")
+            except Exception as exc:
+                self._h("tillägg", f"Kunde inte kontrollera veckoschemat: {exc}",
+                        "warn")
 
-    # -- tilläggserbjudande vid start (ANVÄNDARORDER 2026-09-28) -------
-    def _tillaggserbjudande(self) -> None:
-        """Erbjud installation av saknade tillägg vid start.
+        threading.Thread(target=ensure, daemon=True,
+                         name="weekly-python-task").start()
 
-        Skannade PDF:er kräver Tesseract; utan det ser användaren bara
-        röda felrader. Dialogen erbjuder pip-installation av Python-
-        paketen och hämtlänk till Tesseract, med ny kontroll efteråt.
-        Aldrig blockerande: hela bygget ligger i try/except och kan
-        stängas av med 'Visa inte igen'.
+    # -- manuell tilläggskontroll ---------------------------------------
+    def _tillaggserbjudande(self, force: bool = False) -> None:
+        """Visa tilläggs- och OCR-verktyg efter ett uttryckligt klick.
+
+        Ingen paketkontroll eller pip-installation sker automatiskt vid
+        appstart; den automatiska uppdateringen körs via veckoschemat.
         """
         try:
             saknade = missing_extensions()
-            if not saknade or self.settings.get("extensions_offer_hidden"):
+            if ((not saknade and not force)
+                    or (self.settings.get("extensions_offer_hidden") and not force)):
                 return
             tk, ttk = self.tk, self.ttk
             win = tk.Toplevel(self.root)
-            win.title(f"{APP_NAME} - komplettera installationen")
+            brand_window(win)
+            win.title(f"{APP_NAME} - tillägg och OCR")
             win.transient(self.root)
-            win.resizable(False, False)
+            win.resizable(True, True)
+            _fit_geometry(win, 760, 560, 500, 420)
             try:
                 win.configure(background=self.C["bg"])
             except Exception:
                 pass
-            ttk.Label(win, text="Dessa tillägg saknas - appen fungerar "
-                      "bättre med dem:", style="TLabel").pack(
+            wrap = max(240, min(560, win.winfo_screenwidth() - 160))
+            rubrik = ("Saknade tillägg kan begränsa PDF-läsning och OCR:"
+                      if saknade else
+                      "Tillägg och OCR är installerade. Du kan kontrollera "
+                      "dem eller uppdatera paketen manuellt:")
+            ttk.Label(win, text=rubrik, style="TLabel", wraplength=wrap,
+                      justify="left").pack(
                 anchor="w", padx=16, pady=(14, 4))
             lista = tk.Listbox(win, height=min(6, len(saknade) + 1),
                                exportselection=False, activestyle="none",
@@ -7274,23 +16004,32 @@ class App:
                                foreground=self.C["text"],
                                highlightthickness=0)
             lista.pack(fill="x", padx=16)
-            for e in saknade:
-                lista.insert("end", f"{e['namn']}  -  {e['beskr']}")
-            ttk.Label(win, text="Tesseract: installera med standardsökväg "
-                      "och bocka i Swedish under språkvalet.",
-                      style="Faint.TLabel", wraplength=420).pack(
+            if saknade:
+                for e in saknade:
+                    lista.insert("end", f"{e['namn']}  -  {e['beskr']}")
+            else:
+                lista.insert("end", "Inga saknade tillägg upptäcktes.")
+            ttk.Label(win, text="Tesseract krävs för OCR av skannade PDF:er. "
+                      "Om det saknas kan du installera eller välja sökväg här.",
+                      style="Faint.TLabel", wraplength=wrap,
+                      justify="left").pack(
                 anchor="w", padx=16, pady=(6, 0))
-            status = tk.StringVar(value="")
+            status = tk.StringVar(value=(
+                "Ingen Python-uppdatering körs när appen startar. "
+                "Automatiska Python- och tilläggsuppdateringar körs "
+                "måndagar kl. 08:00. Du kan uppdatera tilläggen manuellt här."
+            ))
             ttk.Label(win, textvariable=status, style="Faint.TLabel",
-                      wraplength=440).pack(anchor="w", padx=16, pady=(4, 0))
+                      wraplength=wrap, justify="left").pack(
+                anchor="w", padx=16, pady=(4, 0))
             dolda = tk.BooleanVar(value=False)
 
             def _pip_installera():
                 paket = [e["nyckel"] for e in missing_extensions()
                          if e["slag"] == "pip"]
                 if not paket:
-                    status.set("Inga Python-paket saknas - hämta Tesseract "
-                               "och klicka sedan 'Kontrollera igen'.")
+                    status.set("Inga Python-tillägg saknas. Välj 'Uppdatera "
+                               "tillägg' om du vill installera senaste versionerna nu.")
                     return
                 status.set(f"Installerar {', '.join(paket)} …")
 
@@ -7337,8 +16076,19 @@ class App:
 
             btns = ttk.Frame(win)
             btns.pack(fill="x", padx=16, pady=12)
-            ttk.Button(btns, text="Installera Python-paket",
-                       command=_pip_installera).pack(side="left")
+            for col in range(3):
+                btns.columnconfigure(col, weight=1, uniform="addon-actions")
+            action_buttons = []
+
+            def _action(text, command):
+                button = ttk.Button(btns, text=text, command=command)
+                index = len(action_buttons)
+                button.grid(row=index // 3, column=index % 3, sticky="ew",
+                            padx=4, pady=3)
+                action_buttons.append(button)
+                return button
+
+            _action("Installera Python-paket", _pip_installera)
 
             def _auto_tess():
                 status.set("Installerar Tesseract + svenska … detta kan ta "
@@ -7360,11 +16110,9 @@ class App:
                     args=(self.PIP_PAKET, et2, bar2, win2, True),
                     daemon=True, name="pdfsorter-pipupgrade").start()
 
-            ttk.Button(btns, text="Uppdatera Python-paket",
-                       command=_uppdatera_paket).pack(side="left", padx=8)
+            _action("Uppdatera tillägg", _uppdatera_paket)
             if sys.platform.startswith("win"):
-                ttk.Button(btns, text="Installera Tesseract automatiskt",
-                           command=_auto_tess).pack(side="left", padx=8)
+                _action("Installera Tesseract", _auto_tess)
 
                 def _hamta_svenska():
                     status.set("Hämtar svenskt språkpaket …")
@@ -7380,9 +16128,7 @@ class App:
                                      name="pdfsorter-swe").start()
 
                 if any(e["slag"] == "sprak" for e in saknade):
-                    ttk.Button(btns, text="Hämta svenska",
-                               command=_hamta_svenska).pack(
-                        side="left", padx=8)
+                    _action("Hämta svenska", _hamta_svenska)
 
                 def _spara_tess(hit: str) -> None:
                     self.settings["tesseract_path"] = hit
@@ -7420,17 +16166,12 @@ class App:
                                      name="pdfsorter-tesssok").start()
 
                 if any(e["nyckel"] == "tesseract" for e in saknade):
-                    ttk.Button(btns, text="Sök datorn",
-                               command=_sok_datorn).pack(side="left", padx=8)
-                    ttk.Button(btns, text="Bläddra…",
-                               command=_bladdra).pack(side="left")
-            ttk.Button(btns, text="Hämta Tesseract…",
-                       command=lambda: open_externally(
-                           Path(TESSERACT_URL)) or None).pack(side="left", padx=8)
-            ttk.Button(btns, text="Kontrollera igen",
-                       command=_kolla_igen).pack(side="left")
-            ttk.Button(btns, text="Stäng", command=_stang).pack(
-                side="right", padx=(8, 0))
+                    _action("Sök efter Tesseract", _sok_datorn)
+                    _action("Bläddra…", _bladdra)
+            _action("Tesseract-webbplats",
+                    lambda: open_externally(Path(TESSERACT_URL)) or None)
+            _action("Kontrollera igen", _kolla_igen)
+            _action("Stäng", _stang)
             ttk.Checkbutton(win, variable=dolda,
                             text="Visa inte detta igen").pack(
                 anchor="w", padx=16, pady=(0, 12))
@@ -7439,6 +16180,42 @@ class App:
         except Exception as exc:
             self._h("tillägg", f"Tilläggsdialogen kunde inte visas: {exc}",
                     "warn")
+
+    def _copy_ai_report(self) -> None:
+        """Kopiera ALLA fel samlade i ett block - klart på noll sekunder.
+
+        Blocket klistras rakt in i en AI-chatt eller felanmälan: miljö,
+        unika fel med spårning, varningar, senaste händelserna och vilka
+        loggfiler som lästes. En kopia skrivs också till
+        ``logs/ai-rapport-senaste.txt``, så den finns kvar även om appen
+        inte går att öppna.
+        """
+        self._ui("Kopiera AI-rapport")
+        if diag is None:
+            self.messagebox.showwarning(
+                APP_NAME, "pdfsorter_diag.py saknas i appmappen - kopiera "
+                "den från releasen och försök igen.", parent=self.root)
+            return
+        try:
+            text = build_ai_report()
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            fil = diag.dump_report(session_dir(), extra=_diag_extra())
+        except Exception as exc:
+            self._fel(exc, "ai-rapport")
+            self.messagebox.showerror(
+                APP_NAME, f"Kunde inte bygga AI-rapporten:\n{exc}",
+                parent=self.root)
+            return
+        sammanfattning = diag.sammanfattning(session_dir())
+        self._h("ai-rapport", f"AI-rapport kopierad: {sammanfattning}"
+                + (f" - sparad i {fil}" if fil else ""))
+        self.messagebox.showinfo(
+            APP_NAME,
+            "AI-rapporten ligger i urklipp - klistra in den i chatten.\n\n"
+            f"{sammanfattning}"
+            + (f"\n\nSparad i:\n{fil}" if fil else ""),
+            parent=self.root)
 
     def _copy_support_log(self) -> None:
         """Kopiera ett komplett diagnostikpaket till urklipp (LÅNAT MÖNSTER
@@ -7489,6 +16266,136 @@ class App:
             f"Klistra in den i felanmälan - mottagaren ser direkt vad "
             f"som hände.\n\nLogfilen: {fil}", parent=self.root)
 
+    def _open_error_code_dialog(self) -> None:
+        """Markera felkoder som åtgärdade och rensa dem ur felloggen.
+
+        Listan visar varje felkods senaste status. Markera de fel du har
+        fixat - deras poster rensas då ur felkoder.log och fel-samlat.log
+        automatiskt och de försvinner ur AI-rapporten. Rensa-knappen finns
+        kvar för eventuella kvarlämnade poster. Sessionsloggarna
+        (app_*.log) behålls alltid som revisionsspår.
+        """
+        self._ui("Rensa åtgärdade fel från loggen")
+        try:
+            win = self.tk.Toplevel(self.root)
+            brand_window(win)
+            win.title("Rensa åtgärdade fel från loggen")
+            win.transient(self.root)
+            win.configure(background=self.C["bg"])
+            _fit_geometry(win, 860, 520, 560, 360)
+            win.columnconfigure(0, weight=1)
+            win.rowconfigure(1, weight=1)
+            info = self.ttk.Label(
+                win, style="Card.TLabel",
+                text="Markera de fel du har åtgärdat. Deras poster rensas "
+                     "då ur felloggen automatiskt och de försvinner ur "
+                     "AI-rapporten direkt. Fel som inte återkommit på länge "
+                     "åtgärdas automatiskt.",
+                wraplength=820, justify="left")
+            info.grid(row=0, column=0, columnspan=2, sticky="ew",
+                      padx=14, pady=(12, 8))
+            kolumner = ("kod", "status", "kategori", "antal", "meddelande")
+            tree = self.ttk.Treeview(win, columns=kolumner, show="headings",
+                                     selectmode="extended", height=12)
+            for kol, rubrik, bredd in (
+                    ("kod", "Kod", 90), ("status", "Status", 100),
+                    ("kategori", "Kategori", 110), ("antal", "Antal", 60),
+                    ("meddelande", "Meddelande", 460)):
+                tree.heading(kol, text=rubrik)
+                tree.column(kol, width=bredd, stretch=(kol == "meddelande"))
+            tree.grid(row=1, column=0, sticky="nsew", padx=(14, 0), pady=4)
+            scroll = self.ttk.Scrollbar(win, orient="vertical",
+                                        command=tree.yview)
+            scroll.grid(row=1, column=1, sticky="ns", padx=(0, 14), pady=4)
+            tree.configure(yscrollcommand=scroll.set)
+            status = self.ttk.Label(win, style="CardMuted.TLabel", text="")
+            status.grid(row=2, column=0, columnspan=2, sticky="w",
+                        padx=14, pady=(2, 0))
+            rad = self.ttk.Frame(win, style="Card.TFrame")
+            rad.grid(row=3, column=0, columnspan=2, sticky="ew",
+                     padx=14, pady=12)
+            rad.columnconfigure(0, weight=1)
+
+            def las_om() -> None:
+                for item in tree.get_children():
+                    tree.delete(item)
+                try:
+                    koder = list_error_codes()
+                except Exception:
+                    koder = []
+                for post in koder:
+                    tree.insert("", "end", iid=post["kod"], values=(
+                        post["kod"], post["status"], post.get("kategori", ""),
+                        post.get("antal", 1),
+                        str(post.get("meddelande", ""))[:160]))
+                oppna = sum(1 for p in koder if p["status"] == "ÖPPEN")
+                klara = len(koder) - oppna
+                status.configure(
+                    text=f"{oppna} öppna, {klara} åtgärdade felkoder.")
+
+            def markera_valda() -> None:
+                valda = [k for k in tree.selection()
+                         if tree.set(k, "status") == "ÖPPEN"]
+                if not valda:
+                    self.messagebox.showinfo(
+                        APP_NAME, "Markera en eller flera öppna felkoder "
+                        "i listan först.", parent=win)
+                    return
+                gjorda = sum(1 for k in valda
+                             if mark_error_code_resolved(k, "via loggrensning"))
+                self._h("logg", f"Markerade {gjorda} felkod(er) som åtgärdade")
+                self._log(f"Markerade {gjorda} felkod(er) som åtgärdade: "
+                          f"{', '.join(valda[:8])}", "ok")
+                las_om()
+
+            def rensa() -> None:
+                try:
+                    antal = sum(1 for p in list_error_codes()
+                                if p["status"] == "ÅTGÄRDAD")
+                except Exception:
+                    antal = 0
+                if not antal:
+                    self.messagebox.showinfo(
+                        APP_NAME, "Inga åtgärdade felkoder att rensa. "
+                        "Markera först de fel du har fixat.",
+                        parent=win)
+                    return
+                if not self.messagebox.askyesno(
+                        APP_NAME,
+                        f"Rensa {antal} åtgärdade felkod(er) ur felloggen?\n\n"
+                        "Deras poster tas bort ur felkoder.log och "
+                        "fel-samlat.log. Sessionsloggarna behålls.",
+                        parent=win):
+                    return
+                resultat = purge_resolved_error_codes()
+                self._h("logg",
+                        f"Rensade {resultat['block']} felpost(er) för "
+                        f"{len(resultat['koder'])} åtgärdade felkod(er)")
+                self._log(f"Rensade {resultat['block']} felpost(er) för "
+                          f"{len(resultat['koder'])} åtgärdade felkod(er) "
+                          f"({resultat['samlat']} poster i fel-samlat.log)",
+                          "ok")
+                las_om()
+                self.messagebox.showinfo(
+                    APP_NAME,
+                    f"Klart: {resultat['block']} felpost(er) för "
+                    f"{len(resultat['koder'])} åtgärdade felkod(er) togs bort "
+                    f"ur felloggen.", parent=win)
+
+            self.ttk.Button(rad, text="Markera valda som åtgärdade",
+                            command=markera_valda).grid(
+                                row=0, column=1, padx=(0, 8))
+            self.ttk.Button(rad, text="Rensa åtgärdade från loggen",
+                            command=rensa).grid(row=0, column=2, padx=(0, 8))
+            self.ttk.Button(rad, text="Stäng",
+                            command=win.destroy).grid(row=0, column=3)
+            win.bind("<Escape>", lambda _event: win.destroy())
+            las_om()
+            win.transient(self.root)
+            win.grab_set()
+        except Exception as exc:
+            self._fel(exc, "rensa åtgärdade fel")
+
     def _open_log_dir(self) -> None:
         self._ui("Öppna log-mappen")
         try:
@@ -7498,76 +16405,19 @@ class App:
         except Exception as exc:
             self._fel(exc, "öppna log-mappen")
 
-    def _show_fel_log(self) -> None:
-        """Visa den samlade felloggen logs/fel.log — ett ställe för alla FEL."""
-        self._ui("Visa samlad fellogg")
-        try:
-            import pdfsorter_system as _sys_mod
-            agg = getattr(_sys_mod, "aggregated_error_path", None)
-            path = agg() if callable(agg) else _sys_mod.config_dir() / "logs" / "fel.log"
-            # Bygg om från befintliga loggar om filen saknas eller är tom
-            try:
-                if (not path.exists() or path.stat().st_size == 0):
-                    rebuild = getattr(_sys_mod, "rebuild_aggregated_errors", None)
-                    if callable(rebuild):
-                        rebuild(clear=False)
-            except Exception:
-                pass
-            if path.exists() and path.stat().st_size > 0:
-                open_externally(path)
-                self._log(f"Samlad fellogg öppnad: {path} ({path.stat().st_size} byte)", "info")
-            else:
-                # Inga fel ännu — visa info och öppna log-mappen istället
-                d = _sys_mod.session_dir()
-                d.mkdir(parents=True, exist_ok=True)
-                open_externally(d)
-                self.messagebox.showinfo(APP_NAME,
-                    "Inga fel har samlats ännu — bra!\n\n"
-                    "Den samlade felloggen (logs/fel.log) skapas automatiskt\n"
-                    "när något går fel (FEL/VARN i logg, krasch, ohanterat fel).\n\n"
-                    f"Log-mappen öppnad: {d}\n"
-                    "Tips: klicka '\u00d6ppna log-mappen' för att se alla loggar,"
-                    " eller kör med --fel-logg för att bygga om samlingen.",
-                    parent=self.root)
-        except Exception as exc:
-            self._fel(exc, "visa samlad fellogg")
+    def _open_rules_import_dir(self) -> None:
+        self._open_rules_transfer_dir("imports")
 
-    def _copy_fel_log(self) -> None:
-        """Kopiera den samlade felloggen till urklipp — snabb felsökning."""
-        self._ui("Kopiera samlad fellogg")
-        try:
-            import pdfsorter_system as _sys_mod
-            agg = getattr(_sys_mod, "aggregated_error_path", None)
-            path = agg() if callable(agg) else _sys_mod.config_dir() / "logs" / "fel.log"
-            if not path.exists():
-                self.messagebox.showwarning(APP_NAME, f"Ingen samlad fellogg ännu:\n{path}", parent=self.root)
-                return
-            txt = path.read_text(encoding="utf-8", errors="replace")
-            if len(txt) > 400_000:
-                txt = "(början avkapad)\n" + txt[-400_000:]
-            self.root.clipboard_clear()
-            self.root.clipboard_append(txt)
-            self.messagebox.showinfo(APP_NAME, f"Samlad fellogg kopierad ({len(txt):,} tecken):\n{path}", parent=self.root)
-        except Exception as exc:
-            self._fel(exc, "kopiera fellogg")
+    def _open_rules_export_dir(self) -> None:
+        self._open_rules_transfer_dir("exports")
 
-    def _rebuild_fel_log(self) -> None:
-        """Samla alla fel från andra loggar på nytt — fyll logs/fel.log."""
-        self._ui("Bygg om samlad fellogg")
+    def _open_rules_transfer_dir(self, kind: str) -> None:
+        label = "importmappen" if kind == "imports" else "exportmappen"
+        self._ui(f"Öppna {label}")
         try:
-            import pdfsorter_system as _sys_mod
-            rebuild = getattr(_sys_mod, "rebuild_aggregated_errors", None)
-            if not callable(rebuild):
-                self.messagebox.showerror(APP_NAME, "Funktionen saknas i denna version.", parent=self.root)
-                return
-            p = rebuild(clear=True)
-            txt = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
-            n = len(txt.splitlines())
-            self._log(f"Samlad fellogg ombyggd: {p} ({n} rader)", "info")
-            self.messagebox.showinfo(APP_NAME, f"Samlad fellogg ombyggd:\n{p}\n{n} rader (alla FEL/VARN + errors/krasch).", parent=self.root)
+            open_externally(rules_transfer_dir(kind))
         except Exception as exc:
-            self._fel(exc, "bygg om fellogg")
-
+            self._fel(exc, f"öppna {label}")
 
     def _save_help(self) -> None:
         path = self.filedialog.asksaveasfilename(
@@ -7587,6 +16437,16 @@ class App:
     # ======================================================================
     # Fönster och systemfält
     # ======================================================================
+    def _review_is_open(self) -> bool:
+        """Är en granskningsdialog öppen just nu?"""
+        dlg = getattr(self, "_review_dialog", None)
+        if dlg is None:
+            return False
+        try:
+            return bool(dlg.win.winfo_exists())
+        except Exception:
+            return False
+
     def show_window(self, reason: str = "") -> None:
         """Visa fönstret igen från systemfältet."""
         try:
@@ -7602,7 +16462,7 @@ class App:
                 f"Fönstret visas ({reason or 'anledning ej angiven'})")
         try:
             self.root.deiconify()
-            self.root.state("normal")
+            _maximize_window(self.root)
             self.root.lift()
             self.root.attributes("-topmost", True)
             self.root.after(300, lambda: self.root.attributes("-topmost", False))
@@ -7610,13 +16470,54 @@ class App:
         except Exception as exc:
             self._fel(exc, "show_window")
         self.visible = True
+        self._hiding_for_minimize = False
         self._sync_tray()
+        # Låg dialogen bakom det gömda fönstret ska den fram igen - annars
+        # ser appen ut att ha tappat sin fråga.
+        if self._review_is_open():
+            try:
+                dlg = self._review_dialog
+                dlg.win.deiconify()
+                dlg.win.lift()
+                dlg.win.focus_force()
+            except Exception:
+                pass
         # Beta av kön som samlats medan fönstret var gömt
-        if self.queue and self.settings.get("ask_when_unsure", True):
+        if self.queue:
             self.root.after(250, self._process_queue)
+
+    def _restore_for_active_run(self) -> None:
+        """Håll huvudfönstret synligt medan en batchsortering pågår."""
+        if not getattr(self, "_busy", False):
+            return
+        try:
+            self.root.deiconify()
+            _maximize_window(self.root)
+            self.root.lift()
+            self.root.focus_force()
+            self.visible = True
+            self._sync_tray()
+        except Exception as exc:
+            self._fel(exc, "återställ fönster under sortering")
 
     def hide_window(self, reason: str = "") -> None:
         """Göm fönstret - appen fortsätter i systemfältet."""
+        if getattr(self, "_busy", False):
+            self._h("fönster", "Gömning/minimering avböjd medan "
+                    "sortering pågår - fönstret hålls synligt så att "
+                    "dubblettfrågor kan besvaras")
+            self._restore_for_active_run()
+            return
+        if self._review_is_open():
+            # En modal dialog väntar på svar. Withdrawar vi huvudfönstret
+            # blir dialogen kvar utan förälder och går inte att få fram.
+            self._h("fönster", "Fönstret kan inte gömmas medan "
+                    "matchningsdialogen är öppen - minimerar i stället")
+            try:
+                self.root.iconify()
+            except Exception:
+                pass
+            return
         if not self.tray:
             self._h("fönster", f"Fönstret minimeras till aktivitetsfältet "
                     f"({reason or 'anledning ej angiven'}) - systemfält saknas, "
@@ -7643,66 +16544,60 @@ class App:
         self.nb.select(self.tab_review)
 
     def _on_unmap(self, event=None) -> None:
-        """Minimering ska hamna i systemfältet i stället för aktivitetsfältet."""
-        if (event is not None and event.widget is not self.root):
+        """Minimering: aktivitetsfältet som standard, systemfältet om valt."""
+        if event is not None and event.widget is not self.root:
             return
-        if self.tray and self.settings.get("close_to_tray", True) \
-                and self.root.state() == "iconic":
-            self._h("fönster", "Användaren minimerade - flyttas till systemfältet")
+        try:
+            state = self.root.state()
+        except Exception:
+            return
+        if state == "iconic" and getattr(self, "_startup_taskbar_minimize", False):
+            self._startup_taskbar_minimize = False
+            self._h("fönster", "Startade minimerad i aktivitetsfältet "
+                    "eftersom systemfältet inte var säkert")
+            return
+        modal = self._review_is_open()
+        action = _minimize_action(state, self.settings, bool(self.tray),
+                                  modal, busy=bool(getattr(self, "_busy", False)))
+        if action == "restore":
+            self._h("fönster", "Minimering ignoreras medan sortering pågår "
+                    "så att dubblettfrågor inte hamnar bakom systemfältet")
+            self.root.after(10, self._restore_for_active_run)
+        elif action == "tray":
+            if getattr(self, "_hiding_for_minimize", False):
+                return
+            self._hiding_for_minimize = True
+            self._h("fönster", "Användaren minimerade - flyttas till "
+                    "systemfältet (minimize_to_tray är påslaget)")
             self.root.after(10, lambda: self.hide_window("minimering"))
-        elif self.root.state() == "iconic":
+        elif action == "taskbar":
             self._h("fönster", "Användaren minimerade - blir kvar i "
-                    "aktivitetsfältet (close_to_tray av eller inget systemfält)")
+                    "aktivitetsfältet" + (" (matchningsdialogen är öppen)"
+                                          if modal else ""))
 
     def _sync_tray(self) -> None:
         if self.tray:
             self.tray.refresh()
 
-    # -- 207 Regeltestare (även från tray-högerklick) --------------------
-    def _open_rule_tester(self) -> None:
-        """Öppna Regeltestare-dialogen — även från tray-menyn."""
-        # Om en tester redan är öppen, lyft den i stället för ny
-        dlg = getattr(self, "_rule_tester_dialog", None)
-        try:
-            if dlg is not None and getattr(dlg, "win", None) is not None and dlg.win.winfo_exists():
-                try:
-                    dlg.win.lift()
-                    dlg.win.focus_set()
-                except Exception:
-                    pass
-                return
-        except Exception:
-            pass
-        # Markera att öppningen kom ev. från tray (för logg)
-        self._rule_tester_from_tray = True
-        try:
-            self._rule_tester_dialog = RuleTesterDialog(self.root, self)
-            # Rensa markören när dialogen stängs
-            orig_close = self._rule_tester_dialog._close
-            def _wrapped():
-                try:
-                    orig_close()
-                finally:
-                    self._rule_tester_from_tray = False
-                    # Låt referensen ligga kvar men win är borta — nästa öppning skapar ny
-            self._rule_tester_dialog._close = _wrapped
-            try:
-                self._rule_tester_dialog.win.bind("<Destroy>", lambda e: setattr(self, "_rule_tester_from_tray", False) if e.widget is self._rule_tester_dialog.win else None)
-            except Exception:
-                pass
-        except Exception as exc:
-            try:
-                session_error("regeltestare", exc)
-            except Exception:
-                pass
-            self.messagebox.showerror(APP_NAME, f"Kunde inte öppna Regeltestaren:\n{exc}", parent=self.root)
-        finally:
-            # Nollställ efter kort tid om dialogen lever kvar (annars loggas fel källa)
-            self.root.after(2000, lambda: setattr(self, "_rule_tester_from_tray", False))
-
     def _notify(self, message: str) -> None:
         if self.tray and self.settings.get("notify", True):
             self.tray.notify(message)
+
+    def _close_open_review(self) -> None:
+        """Stäng en öppen granskningsdialog innan fönstret rivs.
+
+        Annars ligger kön kvar i wait_window och fortsätter skapa dialoger
+        i en Tk som rivits ("cannot invoke toplevel command: application
+        has been destroyed"), tre gånger i rad i loggen.
+        """
+        self._closing = True
+        dlg = getattr(self, "_review_dialog", None)
+        if dlg is not None:
+            try:
+                dlg._skip()
+            except Exception:
+                pass
+            self._review_dialog = None
 
     def quit_app(self) -> None:
         """Avsluta appen på riktigt."""
@@ -7715,12 +16610,16 @@ class App:
         if not self._quitting and self.tray and self.settings.get("close_to_tray", True):
             self.hide_window("krysset - close_to_tray är påslaget")
             return
+        self._close_open_review()
+        global _TAB_WHEEL_APP
+        _TAB_WHEEL_APP = None
         self._h("avslut", "Appen avslutas: inställningar samlas, bevakning "
                 "stoppas, regler och historik sparas")
         try:
             self._collect_settings()
             if self.watcher:
                 self.watcher.stop()
+            self._stop_archive_watch()
             self.rules.save()
             try:
                 flush_history()
@@ -7728,6 +16627,10 @@ class App:
                 session_error("avslut", exc)
         except Exception as exc:
             session_error("avslut", exc)
+        try:
+            self._cache_cleanup_on_exit()
+        except Exception as exc:
+            session_error("cache-avslut", exc)
         if self.tray:
             self.tray.stop()
             self.tray = None
@@ -7806,19 +16709,135 @@ def _self_check() -> int:
     huvud = Extraction(path=Path("x.pdf"), text=(
         "Pilkington Sverige AB\nStorgatan 1\n\nFaktura\nVi hänvisar till "
         "ert glas och er montering. Belopp att betala inom trettio dagar. Tack!"))
-    rad("avsändarhuvud -> auto", decide(regler, huvud, dict(DEFAULT_SETTINGS)).status == "auto")
+    rad("exakt stödord i avsändarhuvud -> auto", decide(regler, huvud, dict(DEFAULT_SETTINGS)).status == "auto")
     org = next(f"556033908{d}" for d in "0123456789"
                if _luhn_ok(f"556033908{d}"))
     regler2 = Rules(); regler2.add_keywords("Pilkington", [f"{org[:6]}-{org[6:]}"])
     dok = Extraction(path=Path("x.pdf"), text=(
         f"Annan Firma\nRad två\n\nFaktura\nOrg.nr {org[:6]}-{org[6:]}\n" + "Text " * 20))
-    rad("bevisat org.nr -> auto", decide(regler2, dok, dict(DEFAULT_SETTINGS)).status == "auto")
+    rad("exakt org.nr-stödord -> auto", decide(regler2, dok, dict(DEFAULT_SETTINGS)).status == "auto")
     if SYSTEM_MODULE:
         rad("ikon 16px renderas", make_icon_image(16) is not None)
         st = autostart_status()
         rad("autostart-status svarar", isinstance(st, dict) and "klass" in st)
     print("SJÄLVTEST:", "ALLT OK" if not fel else f"{fel} FEL")
     return 1 if fel else 0
+
+
+def _tray_runtime_status(app: Any) -> str:
+    """Körningstillstånd för systemfältet, för supportens AI-rapport."""
+    tray = getattr(app, "tray", None)
+    icon = getattr(tray, "icon", None) if tray is not None else None
+    if icon is None:
+        icon_state, visible = "ej skapad", "nej"
+    else:
+        icon_state = "skapad"
+        value = getattr(icon, "visible", None)
+        visible = ("ja" if value is True else "nej" if value is False
+                   else "okänd")
+    if tray is None:
+        loop = "saknas"
+    elif getattr(tray, "_detached", False):
+        loop = "separerad"
+    else:
+        thread = getattr(tray, "_thread", None)
+        loop = ("igång" if thread and thread.is_alive()
+                else "stoppad" if thread else "ingen tråd")
+    watcher = getattr(app, "watcher", None)
+    bevakning = "PÅ" if watcher and getattr(watcher, "running", False) else "AV"
+    queue = len(getattr(app, "queue", ()) or ())
+    settings = getattr(app, "settings", {}) or {}
+    backend_fn = globals().get("tray_backend_name")
+    try:
+        backend = backend_fn() if callable(backend_fn) else "modul saknas"
+    except Exception:
+        backend = "okänd"
+    backend = backend or "okänd"
+    return (f"Systemfält (körning): aktiverat={bool(settings.get('tray_enabled', True))}, "
+            f"ikon={icon_state}, synlig={visible}, loop={loop}, backend={backend}, "
+            f"bevakning={bevakning}, väntar={queue}")
+
+
+def _diag_extra() -> List[str]:
+    """Statusrader till AI-rapporten - lokala fakta, inga nätanrop.
+
+    Rapporten ska vara klar på noll sekunder. Därför läses bara det som
+    redan finns i minnet/filerna; uppdateringskontrollen visas som den är
+    konfigurerad, inte som ett nytt GitHub-anrop.
+    """
+    rader: List[str] = []
+    try:
+        rader.append(f"App: {APP_NAME} {APP_VERSION} · moduler "
+                     + ", ".join(f"{k}={v}" for k, v in
+                                 _module_versions().items()))
+        if VERSIONS_BLANDADE:
+            rader.append("VARNING: blandade modulversioner - kopiera ALLA "
+                         "fem .py-filerna")
+    except Exception:
+        pass
+    try:
+        s = load_settings()
+        rader.append(
+            "Inställningar: " + ", ".join(
+                f"{k}={s.get(k)}" for k in
+                ("strictness", "min_keywords", "action", "dry_run",
+                 "ask_when_unsure", "check_updates", "auto_update",
+                 "update_checks_per_day", "silent_restart",
+                 "last_update_check", "last_update_seen", "tray_enabled",
+                 "minimize_to_tray", "close_to_tray") if k in s))
+        rader.append(f"Mappar: in={s.get('input_dir', '')} "
+                     f"ut={s.get('output_dir', '')} "
+                     f"exkluderade={list(s.get('exclude_dirs', []))}")
+    except Exception as exc:
+        rader.append(f"Inställningar: KUNDE INTE LÄSAS ({exc})")
+    try:
+        rader.append("Läsmotorer: " + ", ".join(
+            f"{k}={'ja' if v else 'nej'}" for k, v in backend_status().items()))
+    except Exception:
+        pass
+    try:
+        rader.append(f"Autostart: {'på' if autostart_enabled() else 'av'}"
+                     f" · systemfält: {'ja' if tray_available() else 'nej'}")
+    except Exception:
+        pass
+    app = globals().get("_TAB_WHEEL_APP")
+    if app is not None:
+        try:
+            rader.append(_tray_runtime_status(app))
+        except Exception as exc:
+            rader.append(f"Systemfält (körning): status kunde inte läsas ({exc})")
+    try:
+        regler = Rules.load()
+        rader.append(f"Regler: {len(regler.categories)} kategorier, "
+                     f"{sum(len(c['keywords']) for c in regler.categories)} stödord")
+    except Exception as exc:
+        rader.append(f"Regler: KUNDE INTE LÄSAS ({exc})")
+    rader.append(f"Uppdateringskanal: enbart GitHub Releases "
+                 f"({_sys_mod.UPDATE_REPO})")
+    return rader
+
+
+def build_ai_report(djup: bool = False) -> str:
+    """Ett klistra-in-block med ALLA fel - klart på noll sekunder.
+
+    ``djup`` läser mer av loggarna (för en envis bugg), annars bara
+    svansen: 200 kB per fil, 8 filer. Tiden beror på hur mycket som ska
+    visas - inte på hur stora loggarna är.
+    """
+    if diag is None:
+        return ("AI-rapporten kräver pdfsorter_diag.py - filen saknas i "
+                "appmappen. Kopiera den från releasen och försök igen.")
+    try:
+        if djup:
+            return diag.build_ai_report(
+                session_dir(), extra=_diag_extra(), djup=True,
+                max_files=24, max_per_nivå=40, spårningsrader=16,
+                kontext=60)
+        return diag.build_ai_report(session_dir(), extra=_diag_extra())
+    except Exception as exc:
+        # Rapporten får aldrig bli ännu ett fel - men den ska säga det.
+        return (f"Kunde inte bygga AI-rapporten: {type(exc).__name__}: {exc}\n"
+                f"Loggar finns i: {session_dir()}")
 
 
 def build_diagnostics() -> str:
@@ -7836,8 +16855,13 @@ def build_diagnostics() -> str:
     rader.append("=" * 72)
     rader.append(f"Python:      {sys.version.split()[0]}  "
                  f"Plattform: {sys.platform}")
+    if diag is not None:
+        try:
+            rader.append(f"Felbild:     {diag.sammanfattning(session_dir())}")
+        except Exception:
+            pass
     rader.append(f"Moduler:     {_module_versions()}")
-    rader.append(f"Konfiguration: {config_dir()}")
+    rader.append(f"Konfiguration: {config_dir()} ({config_dir_mode()})")
     try:
         s = load_settings()
         rader.append("Inställningar:")
@@ -7865,7 +16889,9 @@ def build_diagnostics() -> str:
         pass
     try:
         rader.append(f"Autostart:   {'på' if autostart_enabled() else 'av'}, "
-                     f"klass: {classify_autostart()}")
+                     f"klass: {classify_autostart()}, "
+                     f"källa: {autostart_status().get('source') or '-'}, "
+                     f"session: {'ja' if autostart_session_available() else 'nej'}")
         for namn, varde in get_autostart_conflicts():
             rader.append(f"  KONFLIKT:  {namn} -> {varde[:100]}")
     except Exception:
@@ -7876,9 +16902,13 @@ def build_diagnostics() -> str:
             if fil and fil.exists():
                 rader.append("")
                 rader.append(f"--- {etikett}: {fil} (sista {antal} raderna) ---")
-                rader.extend(fil.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()[-antal:])
+                if diag is not None:
+                    text = diag.tail_text(fil, 400_000)
+                else:
+                    with open(fil, "r", encoding="utf-8",
+                              errors="replace") as fh:
+                        text = fh.read()[-400_000:]
+                rader.extend(text.splitlines()[-antal:])
         except OSError:
             pass
 
@@ -7901,8 +16931,8 @@ def run_cli(args: argparse.Namespace) -> int:
         settings["input_dir"] = args.input
     if args.output:
         settings["output_dir"] = args.output
-    if args.no_ask:
-        settings["ask_when_unsure"] = False
+    # Compatibility only: --no-ask can no longer bypass confirmation.
+    settings["ask_when_unsure"] = True
     if args.dry_run:
         settings["dry_run"] = True
     if args.copy:
@@ -7926,6 +16956,9 @@ def run_cli(args: argparse.Namespace) -> int:
         if not args.json:
             print(msg, flush=True)
 
+    if args.no_ask:
+        emit("--no-ask är föråldrad; oavsett flagga flyttas bara exakta, unika stödordsträffar.")
+
     engine = SortEngine(rules, settings,
                         log=lambda m, lvl="info": (
                             session_log("sortering", m, lvl),
@@ -7933,38 +16966,53 @@ def run_cli(args: argparse.Namespace) -> int:
 
     def handle(path: Path) -> None:
         decision = engine.analyze(path)
-        row = {"file": str(path), "status": decision.status, "reason": decision.reason}
-        if decision.status == "auto":
+        if decision.status == "auto" and decision.best:
             best = decision.best
-            zon = ", ".join(f"{w}:{best.zone_of(w)}" for w in best.matched[:4])
-            mp = getattr(best, "multipage", None)
-            session_log("sortering",
-                        f"{path.name} -> {best.name}  poäng {best.score:g}  "
-                        f"[{zon}]" + (f"  [flersidig: {', '.join(mp)}]" if mp else ""))
-            ok, msg = engine.apply(decision, best.name, best.matched, "auto")
-            row.update({"category": best.name, "score": best.score, "ok": ok, "target": msg})
-            emit(f"{'[TEST] ' if settings['dry_run'] else ''}{path.name}"
-                 f"  ->  {best.name}  ({best.score:g})"
-                 + ("  [OCR]" if decision.extraction.used_ocr else "")
-                 + ("" if ok else f"   FEL: {msg}"))
-        elif decision.status == "error":
+            ok, target = engine.apply(
+                decision, best.name, best.matched, "auto")
+            if ok:
+                row = {
+                    "file": str(path), "status": "auto", "reason": decision.reason,
+                    "category": best.name, "score": best.score,
+                    "ok": True, "target": target,
+                }
+                session_log("sortering",
+                            f"{path.name} -> {best.name}  exakt stödord "
+                            f"({', '.join(best.matched[:4])})")
+                emit(f"{'[TEST] ' if settings['dry_run'] else ''}{path.name}"
+                     f"  ->  {best.name}  (exakt stödord)  {target}")
+                results.append(row)
+                return
+            decision.status = "ask"
+            decision.reason = target
+
+        row = {"file": str(path), "status": decision.status,
+               "reason": decision.reason}
+        if decision.status == "error":
             row["ok"] = False
             session_log("sortering", f"{path.name}  FEL: {decision.reason}", "err")
-            emit(f"{path.name}  FEL: {decision.reason}")
+            emit(f"{path.name}  FEL: {decision.reason} — filen ligger kvar")
         elif decision.status == "ignored":
             row["ok"] = True
             session_log("sortering", f"{path.name}  ignorerad: {decision.reason}")
             emit(f"{path.name}  ⊘ {decision.reason} - lämnas orörd")
         else:
-            ok, msg = engine.send_to_unmatched(decision)
-            row.update({"category": None, "ok": ok, "target": msg})
-            session_log("sortering", f"{path.name}  OSÄKER: {decision.reason} -> "
-                        f"{'_Osorterat' if ok else 'lämnad'}", "warn")
-            emit(f"{path.name}  OSÄKER: {decision.reason}"
-                 f"  -> {'_Osorterat' if ok else 'lämnad i inmappen'}")
+            best = decision.best
+            row.update({
+                "category": best.name if best else None,
+                "needs_review": True,
+                "target": "left in input folder; no exact unique support-word match",
+            })
+            session_log("sortering",
+                        f"{path.name}  GRANSKNING: "
+                        f"{best.name if best else 'ingen kategori'} föreslås; "
+                        "filen lämnas kvar tills användaren bekräftar", "warn")
+            emit(f"{path.name}  GRANSKNING: "
+                 f"{best.name if best else 'ingen kategori'} föreslås; "
+                 "filen ligger kvar tills du bekräftar flytten")
             if args.verbose:
                 cands = suggest_keywords(decision.extraction.combined, path.name,
-                                         limit=int(settings.get("keywords_per_file", 10)),
+                                         limit=int(settings.get("keywords_per_file", 25)),
                                          existing=rules.all_keyword_texts())
                 for c in cands:
                     emit(f"      förslag: {c.display}   ({c.label}, {c.count} ggr, {c.score:.2f})")
@@ -8002,7 +17050,53 @@ def run_cli(args: argparse.Namespace) -> int:
     return 0
 
 
+_GUI_CONSOLE_HANDOFF_ENV = "ARKIVPILOTEN_GUI_HANDOFF"
+
+
+def _start_gui_without_console(argv: List[str]) -> bool:
+    """Starta GUI:t utan konsol även om pdfsorter.py körs med python.exe.
+
+    Windows dubbelklick på en .py-fil kan starta python.exe och lämna en
+    svart konsol bakom GUI:t. Vanlig GUI-start flyttas därför tidigt till
+    pythonw.exe (eller CREATE_NO_WINDOW som reserv). CLI-kommandon påverkas
+    inte, och markörvariabeln skyddar mot en eventuell startloop.
+    """
+    if (not sys.platform.startswith("win")
+            or os.environ.get(_GUI_CONSOLE_HANDOFF_ENV)
+            or any(arg not in ("--tray", "--resume-watch",
+                                "--restart-after-update") for arg in argv)):
+        return False
+    exe = Path(sys.executable or "python.exe")
+    if exe.name.lower() == "pythonw.exe":
+        return False
+    pythonw = exe.with_name("pythonw.exe")
+    use_pythonw = pythonw.is_file()
+    interpreter = str(pythonw if use_pythonw else exe)
+    command = [interpreter, str(Path(__file__).resolve()), *argv]
+    env = os.environ.copy()
+    env[_GUI_CONSOLE_HANDOFF_ENV] = "1"
+    kwargs: Dict[str, Any] = {
+        "cwd": str(Path(__file__).resolve().parent),
+        "env": env,
+    }
+    if not use_pythonw:
+        # Alla normala Windows-Python-installationer har pythonw.exe, men
+        # CREATE_NO_WINDOW håller även reservvägen konsolfri.
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.Popen(command, **kwargs)
+        return True
+    except Exception:
+        # Om handoffen misslyckas fortsätter vi i processen som anropades;
+        # bättre ett fungerande GUI än att appen inte startar alls.
+        return False
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    args_for_handoff = list(sys.argv[1:] if argv is None else argv)
+    if _start_gui_without_console(args_for_handoff):
+        return 0
+
     # Sätts före första fönstret så att Windows visar vår egen ikon i
     # aktivitetsfältet i stället för Pythons fjäder - även vid autostart
     # (pythonw ... --tray), som inte går via pdfsorter.pyw. Ofarligt no-op
@@ -8020,7 +17114,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"Arbetskatalog: {Path.cwd()}",
     ])
     install_excepthooks()
-    loggfil = session_path()
+    if diag is not None:
+        # Allt som går fel ska hamna på ett ställe - även fel som Tk fångar
+        # själv och som tidigare bara skrevs till en konsol som inte finns.
+        diag.configure(APP_NAME, APP_VERSION, session_dir(),
+                       logger=session_log, extra=_diag_extra)
     if compact_history_if_large():
         session_log("start", "Historikjournalen kompakterades vid start "
                     "(>200 rader) - snabbare start", "ok")
@@ -8041,7 +17139,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--rules", help="Sökväg till en egen rules.json")
     p.add_argument("--watch", action="store_true", help="Bevaka mappen kontinuerligt")
     p.add_argument("--no-ask", action="store_true",
-                   help="Fråga aldrig; osäkra filer lämnas eller går till _Osorterat")
+                   help="Föråldrad: bara exakta, unika stödordsträffar får flyttas automatiskt")
     p.add_argument("--dry-run", action="store_true", help="Testkör, ändra inget på disk")
     p.add_argument("--copy", action="store_true", help="Kopiera i stället för att flytta")
     p.add_argument("--exclude", action="append", default=None,
@@ -8055,8 +17153,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Visa vilka PDF-motorer och tillägg som hittats")
     p.add_argument("--diagnostik", action="store_true",
                    help="Skriv ut ett komplett diagnostikpaket för support")
+    p.add_argument("--mark-felkod-atgardad", metavar="KOD",
+                   help="Markera en felkod som åtgärdad (8 hextecken); historiken sparas")
+    p.add_argument("--rensa-atgardade-felkoder", action="store_true",
+                   help="Rensa åtgärdade felkoders poster ur felkoder.log och "
+                        "fel-samlat.log; sessionsloggarna behålls")
+    p.add_argument("--ai-rapport", action="store_true",
+                   help="Skriv ut ALLA fel samlade i ett block - klart att "
+                        "klistra in i en AI-chatt eller felanmälan")
+    p.add_argument("--djup", action="store_true",
+                   help="Läs mer av loggarna i --ai-rapport (för envisa fel)")
     p.add_argument("--tray", action="store_true",
-                   help="Starta minimerad i systemfältet (används vid autostart)")
+                   help="Starta alltid minimerad (systemfältet om möjligt, annars aktivitetsfältet)")
+    p.add_argument("--resume-watch", action="store_true",
+                   help="Starta bevakningen direkt efter omstart")
+    p.add_argument("--restart-after-update", action="store_true",
+                   help="Visa appfönstret efter automatisk uppdateringsomstart")
     p.add_argument("--install-autostart", action="store_true",
                    help="Slå på autostart med operativsystemet och avsluta")
     p.add_argument("--remove-autostart", action="store_true",
@@ -8084,6 +17196,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     args = p.parse_args(argv)
 
+    if args.mark_felkod_atgardad:
+        ok = mark_error_code_resolved(args.mark_felkod_atgardad)
+        print(("Felkoden markerades som åtgärdad och rensades ur felloggen."
+               if ok else "Ogiltig felkod eller kunde inte skriva logs/felkoder.log."))
+        return 0 if ok else 2
+
+    if getattr(args, "rensa_atgardade_felkoder", False):
+        resultat = purge_resolved_error_codes()
+        print(f"Rensade {resultat['block']} felpost(er) för "
+              f"{len(resultat['koder'])} åtgärdade felkod(er) ur felloggen "
+              f"({resultat['samlat']} poster i fel-samlat.log).")
+        return 0
+
+    if getattr(args, "ai_rapport", False):
+        rapport = build_ai_report(djup=bool(getattr(args, "djup", False)))
+        print(rapport)
+        if diag is not None:
+            # Lämna alltid en fil kvar - då kan den bifogas utan terminal.
+            diag.dump_report(session_dir(), extra=_diag_extra())
+        return 0
+
     if args.diagnostik:
         print(build_diagnostics())
         return 0
@@ -8098,8 +17231,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Systemfält: {'ja' if tray_available() else 'nej (pip install pystray)'}")
         _as = autostart_status()
         print(f"Autostart:  {'på' if _as['enabled'] else 'av'}"
-              f" (klass: {_as['klass']}, {_as['platform']})")
-        print(f"Konfiguration: {config_dir()}")
+              f" (klass: {_as['klass']}, källa: {_as.get('source') or '-'}, "
+              f"session: {'ja' if _as.get('session', True) else 'nej'}, "
+              f"{_as['platform']})")
+        print(f"Konfiguration: {config_dir()} ({config_dir_mode()})")
         print(f"Versioner:  {_module_versions()}")
         if VERSIONS_BLANDADE:
             print("VARNING: blandade modulversioner - kopiera ALLA fem "
@@ -8134,22 +17269,39 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not info.get("ok"):
             print(f"Kunde inte söka uppdatering: {info.get('error', '?')}")
             return 1
+        kalla = "GitHub Releases"
         print(f"Installerad version: {info['current']}  |  "
-              f"Senaste på GitHub: {info['remote']}")
+              f"Senaste på GitHub: {info['remote']}  ({kalla})")
+        if info.get("release_url"):
+            print(f"Release: {info['release_url']}")
+        if info.get("build_update"):
+            if info.get("local_commit") or info.get("release_commit"):
+                print("Release-commit: "
+                      f"{str(info.get('local_commit') or 'okänd')[:12]} -> "
+                      f"{str(info.get('release_commit') or 'okänd')[:12]}")
+            changed = info.get("changed_files") or []
+            if changed:
+                print("Filer som skiljer: " + ", ".join(changed))
+        print("Kontrollsumma: "
+              + ("ja (verifieras före installation)"
+                 if info.get("sha256_url") else "SAKNAS - frågar i GUI"))
         if not info.get("available"):
             print("Du har redan den senaste versionen.")
             return 0
         if not args.update:
-            print("En uppdatering finns! Kör med --update för att installera den.")
+            if info.get("build_update"):
+                print("Ett nytt bygge av samma versionsnummer finns "
+                      "(release-commit eller release-filer skiljer sig). "
+                      "Kör med --update för att installera det.")
+            else:
+                print("En nyare version finns! Kör med --update för att installera den.")
             return 0
         ok, msg = perform_update()
         print(msg)
         if not ok:
             return 1
-        ok2, msg2 = update_python_packages()
-        print(msg2)
         session_log("uppdatering", "Klar via --update (starta om appen)", "ok")
-        return 0 if ok2 else 1
+        return 0
 
     if args.export_archive:
         out = Path(load_settings().get("output_dir", "") or "")
@@ -8171,12 +17323,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0 if ok else 1
 
     if args.install_autostart or args.remove_autostart:
-        ok, msg = set_autostart(args.install_autostart)
-        session_log("autostart", ("Påslagen: " if args.install_autostart
-                                   else "Avstängd: ") + msg,
-                    "ok" if ok else "err")
-        print(("Autostart påslagen: " if args.install_autostart
-               else "Autostart avstängd: ") + msg)
+        vill = bool(args.install_autostart)
+        ok, msg = set_autostart(vill)
+        # Inställningen måste sparas också: annars tar GUI:ts självläkande
+        # synk (settings.autostart=False) bort posten vid nästa start -
+        # --install-autostart blev i praktiken en engångsstart.
+        if ok:
+            try:
+                s = load_settings()
+                s["autostart"] = vill
+                save_settings(s)
+                msg += " (inställningen sparad)"
+            except Exception as exc:
+                session_error("autostart", exc)
+                print(("Autostart påslagen: " if vill
+                       else "Autostart avstängd: ") + msg)
+                print("VARNING: inställningen kunde inte sparas, så appens "
+                      "synk kan ändra autostarten vid nästa start.\n"
+                      f"Fel: {type(exc).__name__}: {exc}")
+                return 1
+        session_log("autostart", ("Påslagen: " if vill else "Avstängd: ")
+                    + msg, "ok" if ok else "err")
+        print(("Autostart påslagen: " if vill else "Autostart avstängd: ")
+              + msg)
         return 0 if ok else 1
 
     if args.make_shortcut:
@@ -8233,32 +17402,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     # skriver över varandras regler utan att någon märker det.
     lås = InstanceLock()
     if not lås.acquire():
-        session_log("start", f"En instans kör redan (PID {lås.other_pid}) - "
-                    "ber den visa fönstret; den här processen avslutas")
-        request_show()
-        print(f"{APP_NAME} kör redan (PID {lås.other_pid}).\n"
-              f"Det befintliga fönstret öppnas i stället.")
+        if not lås.lock_error:
+            session_log("start", f"En instans kör redan "
+                        f"(PID {lås.other_pid or 'okänt'}) - "
+                        "begär att det befintliga fönstret visas")
+            if not request_show():
+                session_log("start", "Kunde inte skicka signalen för att visa "
+                            "det befintliga fönstret", "warn")
+            return 0
+        fel = ("Kunde inte säkra enkel instans; en ny kopia startades inte. "
+               f"{lås.lock_error}")
+        session_log("start", fel, "err")
         try:
-            import tkinter as _tk_l
-            from tkinter import messagebox as _mb_l
-            _r = _tk_l.Tk(); _r.withdraw()
-            brand_window(_r)
-            _mb_l.showinfo(
-                APP_NAME,
-                f"{APP_NAME} kör redan.\n\n"
-                f"Det fönstret öppnas nu. Leta annars efter ikonen i "
-                f"systemfältet.")
-            _r.destroy()
+            print(fel, file=sys.stderr)
         except Exception:
             pass
-        return 0
+        return 1
 
     hjälpare = install_helpers()   # skapa .pyw / .command vid första start
     if hjälpare:
         session_log("start", f"Starthjälpfiler skapade: {', '.join(hjälpare)}")
-    session_log("start", f"GUI startar (startar gömd i systemfältet: {args.tray})")
+    session_log("start", f"GUI startar (startar gömd i systemfältet: "
+                f"{args.tray}, återupptar bevakningen: {args.resume_watch})")
     try:
-        App(start_hidden=args.tray).run()
+        App(start_hidden=args.tray, instanslås=lås,
+            resume_watch=args.resume_watch,
+            restart_after_update=args.restart_after_update).run()
     finally:
         lås.release()
     session_log("avslut", "main() avslutas normalt")

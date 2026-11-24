@@ -46,11 +46,14 @@ from __future__ import annotations
 import concurrent.futures
 import io
 import json
+import logging
+import math
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 from collections import Counter
@@ -60,7 +63,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 #: Programmets version. Höjs vid varje leverans.
-VERSION = "1.1.0"
+VERSION = "1.4.14"
+EXTRACTION_CACHE_SCHEMA = 3
 
 __all__ = [
     # extraktion
@@ -77,7 +81,8 @@ __all__ = [
     # datum - för sortering i årsmappar
     "find_document_date",
     # delar som matchningsmotorn behöver
-    "normalize", "_luhn_ok", "_recipient_zone", "_head_of",
+    "normalize", "search_extracted_pages", "compare_extracted_pages",
+    "_luhn_ok", "_recipient_zone", "_head_of",
     "_DOC_TYPE_WORDS", "_ID_HINT", "_RECIPIENT_MARKERS", "_looks_like_code",
 ]
 
@@ -215,6 +220,46 @@ def status_text() -> str:
     return f"PDF-motor: {engine}  |  OCR: {ocr}"
 
 
+class _PdfDiagnosticCapture(logging.Handler):
+    """Collect and de-duplicate warnings from PDF engines during one read."""
+
+    _PREFIXES = ("pdfminer", "pypdf", "fitz", "pymupdf")
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self._thread_id = threading.get_ident()
+        self._counts: Counter = Counter()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if (record.thread != self._thread_id
+                or not record.name.startswith(self._PREFIXES)):
+            return
+        try:
+            message = record.getMessage().strip()[:800]
+            if not message:
+                return
+            engine = record.name.split(".", 1)[0]
+            level = "error" if record.levelno >= logging.ERROR else "warning"
+            self._counts[(engine, level, message)] += 1
+        except Exception:
+            return
+
+    def __enter__(self):
+        logging.getLogger().addHandler(self)
+        return self
+
+    def __exit__(self, _kind, _value, _traceback):
+        logging.getLogger().removeHandler(self)
+        self.close()
+
+    def rows(self) -> List[Dict[str, Any]]:
+        return [
+            {"engine": engine, "level": level, "message": message,
+             "count": count}
+            for (engine, level, message), count in self._counts.most_common()
+        ]
+
+
 @dataclass
 class Extraction:
     path: Path
@@ -228,11 +273,20 @@ class Extraction:
     #: Medelkonfidens (0-100) från senaste OCR-körningen; -1 = ingen OCR.
     #: Underlag för dialogens procentskala och för --status/--diag.
     ocr_conf: float = -1.0
+    #: OCR-resultat per renderad sida (sidnummer, konfidens, tecken och provtext).
+    #: Sidor utan text behålls så att tomma OCR-resultat blir synliga.
+    ocr_pages: List[Dict[str, Any]] = field(default_factory=list)
+    #: Kort sidstart per extraherad sida, endast för heuristik för sammanfogade
+    #: dokument. Själva fulltexten finns redan i `text` och dupliceras inte.
+    page_starts: List[str] = field(default_factory=list)
     #: Flersidig matchning: token -> antal sidor den förekommer på, bara
     #: tokens som upprepas på minst två sidor (brevhuvud/sidfot som åter-
     #:kommer = starkt avsändarbevis). Tom vid t.ex. pdfminer (inga sidor).
     token_pages: Dict[str, int] = field(default_factory=dict)
     error: str = ""
+    #: Transienta PDF-motorvarningar, loggas per fil av sorteringsmotorn.
+    #: Inte cachelagrade: äldre texter ska inte tvingas läsas/OCR:as igen.
+    pdf_diagnostics: List[Dict[str, Any]] = field(default_factory=list)
     #: Dokumentets datum, valt enligt reglerna i find_document_date().
     doc_date: Optional[date] = None
     #: Varför just det datumet valdes: "fakturadatum", "brevhuvud",
@@ -264,6 +318,11 @@ class Extraction:
         return "\n".join(p for p in (self.text, meta, self.filename_text) if p)
 
     @property
+    def document_breaks(self) -> List[int]:
+        """Troliga sidnummer där ett nytt dokument börjar, som 1-baserade tal."""
+        return _possible_document_breaks(self.page_starts)
+
+    @property
     def page_header(self) -> str:
         """Text i sidornas överkant - logotyp och firmanamn."""
         return self.metadata.get("_page_header", "")
@@ -278,6 +337,7 @@ class Extraction:
     def to_cache_dict(self) -> Dict[str, Any]:
         """Fullständigt serialiserat tillstånd för bestående textcache."""
         return {
+            "extract_schema": EXTRACTION_CACHE_SCHEMA,
             "text": self.text,
             "filename_text": self.filename_text,
             "metadata": {k: v for k, v in self.metadata.items()
@@ -287,6 +347,8 @@ class Extraction:
             "used_ocr": self.used_ocr,
             "ocr_logo": self.ocr_logo,
             "ocr_conf": self.ocr_conf,
+            "ocr_pages": self.ocr_pages,
+            "page_starts": self.page_starts,
             "doc_date": self.doc_date.isoformat() if self.doc_date else None,
             "date_source": self.date_source,
             "token_pages": {t: int(c) for t, c in (self.token_pages or {}).items()},
@@ -307,6 +369,15 @@ class Extraction:
         except (TypeError, ValueError):
             ext.ocr_conf = -1.0
         try:
+            ext.ocr_pages = [dict(row) for row in (d.get("ocr_pages") or [])
+                             if isinstance(row, dict)]
+        except (TypeError, ValueError):
+            ext.ocr_pages = []
+        try:
+            ext.page_starts = [str(x) for x in (d.get("page_starts") or [])]
+        except (TypeError, ValueError):
+            ext.page_starts = []
+        try:
             ext.doc_date = (date.fromisoformat(d["doc_date"])
                             if d.get("doc_date") else None)
         except (ValueError, TypeError):
@@ -323,6 +394,39 @@ class Extraction:
         return (f"<Extraction {self.path.name}: {len(self.text)} tkn, "
                 f"ocr={self.used_ocr}, conf={self.ocr_conf:.0f}, "
                 f"datum={self.doc_date}>")
+
+
+def _possible_document_breaks(page_starts: List[str]) -> List[int]:
+    """Konservativ signal för PDF:er som verkar innehålla flera fakturor.
+
+    Kräver både en dokumenttyp i sidans inledning och ett tydligt, märkt
+    dokumentnummer. Upprepade sidhuvuden med samma nummer ger därför inte
+    förslag om delning. Resultatet är 1-baserade sidnummer.
+    """
+    title = re.compile(
+        r"\b(?:faktura|invoice|kvitto|receipt|kreditfaktura|credit\s+note|"
+        r"orderbekräftelse|orderbekraftelse|purchase\s+order|offert)\b", re.I)
+    identifier = re.compile(
+        r"\b(?:faktura(?:nummer|nr)?|invoice(?:\s*(?:number|no\.?|#))?|"
+        r"kvitto(?:nummer|nr)?|order(?:nummer|nr)?|credit\s+note(?:\s*no\.?)?)"
+        r"[ \t]*[:#.]?[ \t]*([A-Z0-9][A-Z0-9./_-]{2,})", re.I)
+    previous_id = None
+    breaks = []
+    for index, raw in enumerate(page_starts or []):
+        start = "\n".join(line.strip() for line in str(raw).splitlines()
+                           if line.strip())[:1400]
+        lines = start.splitlines()[:10]
+        intro = "\n".join(lines)
+        if not title.search(intro):
+            continue
+        match = identifier.search(intro)
+        if not match:
+            continue
+        doc_id = re.sub(r"[^a-z0-9]", "", match.group(1).casefold())
+        if previous_id is not None and doc_id != previous_id:
+            breaks.append(index + 1)
+        previous_id = doc_id
+    return breaks
 
 
 GENERIC_META = {
@@ -476,7 +580,6 @@ def _x_pymupdf(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, in
                 and v and _useful_meta(str(v))}
         total = len(doc)
         n = min(total, max_pages) if max_pages > 0 else min(total, HARD_PAGE_CAP)
-        chunks = []
         sidtexter: List[str] = []          # en post per sida (flersidig)
         for i in range(n):
             page = doc[i]
@@ -488,10 +591,8 @@ def _x_pymupdf(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, in
                 sidtext = page.get_text("text", sort=True) or ""
             except TypeError:                     # äldre PyMuPDF
                 sidtext = page.get_text("text") or ""
-            chunks.append(sidtext)
             extras = _page_extras(page)
             if extras:
-                chunks.append(extras)
                 sidtext = sidtext + "\n" + extras
             sidtexter.append(sidtext)
             top, bottom = _page_bands(page)
@@ -500,7 +601,15 @@ def _x_pymupdf(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, in
             if bottom:
                 footer_txt.append(bottom)
 
-    text = _clean("\n".join(chunks))
+    # Keep page boundaries in the extracted text. Besides helping search
+    # results cite the right page, form-feeds behave like whitespace for the
+    # existing matcher while preserving per-page snippets.
+    text = _clean("\f".join(sidtexter))
+    meta["_page_starts"] = json.dumps([
+        "\n".join(line.strip() for line in page.splitlines()
+                    if line.strip())[:1200]
+        for page in sidtexter
+    ], ensure_ascii=False)
 
     # Sidhuvud/sidfot från ALLA sidor (ANVÄNDARORDER: matcha på alla blad):
     # avsändarens org.nr upprepas i sidfoten på varje sida, så deduplicerade
@@ -548,10 +657,15 @@ def _x_pypdf(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, int]
             chunks.append(reader.pages[i].extract_text() or "")
         except Exception:
             chunks.append("")
+    meta["_page_starts"] = json.dumps([
+        "\n".join(line.strip() for line in page.splitlines()
+                    if line.strip())[:1200]
+        for page in chunks
+    ], ensure_ascii=False)
     tp = token_page_counts(chunks)
     if tp:
         meta["_token_pages"] = json.dumps(tp, ensure_ascii=False)
-    return _clean("\n".join(chunks)), meta, n, total
+    return _clean("\f".join(chunks)), meta, n, total
 
 
 def _x_pdfminer(path: Path, max_pages: int) -> Tuple[str, Dict[str, str], int, int]:
@@ -591,12 +705,15 @@ def _render_pages(path: Path, max_pages: int, dpi: int = 200) -> List[Any]:
     images: List[Any] = []
     if has_pymupdf():
         pymupdf = _open_pymupdf()
-        zoom = dpi / 72.0
+        requested_zoom = dpi / 72.0
         with pymupdf.open(str(path)) as doc:
             if doc.needs_pass:
                 doc.authenticate("")
             for i in range(min(len(doc), max_pages)):
-                pix = doc[i].get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+                page = doc[i]
+                zoom = _bounded_render_zoom(page.rect, requested_zoom)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
+                                      alpha=False)
                 images.append(Image.open(io.BytesIO(pix.tobytes("png"))))
         return images
     exe = shutil.which("pdftoppm")
@@ -631,6 +748,30 @@ _OCR_TARGET_WIDTH = {"standard": 2000, "high": 2600}
 #: (t.ex. A0-ritningar i 300 dpi) skulle annars sluka minne och få
 #: tesseract att sega ner sig utan att läsbarheten blir bättre.
 _OCR_MAX_WIDTH = 5200
+#: Pixel-area cap for rendering pages before PIL/Tesseract. This keeps even
+#: unusually large schematics below Pillow's decompression-bomb threshold.
+_OCR_MAX_RENDER_PIXELS = 24_000_000
+
+
+def _bounded_render_zoom(rect: Any, requested_zoom: float) -> float:
+    """Bound a PDF page/clip rasterization by maximum side and pixel area."""
+    try:
+        width, height = abs(float(rect.width)), abs(float(rect.height))
+        zoom = max(0.01, float(requested_zoom))
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        try:
+            return max(0.01, float(requested_zoom))
+        except (TypeError, ValueError, OverflowError):
+            return 1.0
+    if (not math.isfinite(width) or not math.isfinite(height)
+            or width <= 0 or height <= 0):
+        return zoom
+    max_dimension_zoom = _OCR_MAX_WIDTH / max(width, height)
+    # Leave room for the renderer rounding each raster dimension up by one.
+    pixel_budget = max(1, _OCR_MAX_RENDER_PIXELS - 2 * _OCR_MAX_WIDTH - 1)
+    max_area_zoom = math.sqrt(pixel_budget / (width * height))
+    return min(zoom, max_dimension_zoom, max_area_zoom)
+
 
 #: Statistik från senaste OCR-körningen, för reading_health()/--status.
 _OCR_LAST = {"sekunder": 0.0, "konfidens": -1.0}
@@ -705,36 +846,38 @@ def _binarize(img):
 
 
 def _deskew_angle(img, max_angle: float = 5.0, steps: int = 11) -> float:
-    """Uppskatta sidans skevhet i grader.
+    """Uppskatta sidans skevhet och finjustera vinkeln i cirka 0,25° steg.
 
-    Enkel metod utan OpenCV: rotera en nedskalad kopia i några vinklar och
-    välj den vars horisontella projektionsprofil har högst varians (jämna
-    textrader ger höga, tydliga toppar). Returnerar 0.0 när inget kan mätas.
+    En nedskalad kopia roteras och den med tydligast horisontell
+    projektionsprofil väljs. Grovsökningen hittar intervallet; en andra,
+    smal sökning minskar kvarvarande skevhet utan OpenCV.
     """
     try:
         from PIL import Image
-        # Fort: mät på en liten kopia, inte på hela sidan.
         test = img
         if test.width > 700:
             test = test.resize((700, int(test.height * 700 / test.width)),
                                Image.BILINEAR)
         gray = test.convert("L")
         h = gray.size[1]
-        half = steps // 2
-        best_angle, best_var = 0.0, -1.0
-        for i in range(steps):
-            a = max_angle * (i - half) / half
-            rot = gray.rotate(a, resample=Image.BILINEAR, expand=False,
+
+        def score(angle: float) -> float:
+            rot = gray.rotate(angle, resample=Image.BILINEAR, expand=False,
                               fillcolor=255)
-            # Radprofilen i C-fart: en BOX-nedskalning till 1 pixel bredd är
-            # exakt radmedlen - variansen över dem är projektionsvariansen.
-            # (Den gamla pixelslingan i Python tog sekunder per sida.)
-            vals = [255 - b for b in rot.resize((1, h), Image.BOX).tobytes()]
+            vals = [255 - b for b in
+                    rot.resize((1, h), Image.BOX).tobytes()]
             mean = sum(vals) / len(vals)
-            var = sum((v - mean) ** 2 for v in vals) / len(vals)
-            if var > best_var:
-                best_var, best_angle = var, a
-        return best_angle
+            return sum((v - mean) ** 2 for v in vals) / len(vals)
+
+        steps = max(3, int(steps) | 1)
+        half = steps // 2
+        coarse_step = max_angle / half
+        coarse = [coarse_step * (i - half) for i in range(steps)]
+        best_angle = max(coarse, key=score)
+        fine_step = coarse_step / 4
+        fine = [best_angle + fine_step * (i - 4) for i in range(9)]
+        best_angle = max(fine, key=score)
+        return max(-max_angle, min(max_angle, best_angle))
     except Exception:
         return 0.0
 
@@ -746,7 +889,7 @@ def _preprocess(img, quality: str = "high", do_deskew: bool = True):
     en resolutionsnivå som ger läsbar text. Allt görs med PIL, så inget nytt
     paket krävs (OpenCV skulle ge ännu bättre resultat om det finns).
     """
-    from PIL import Image, ImageOps
+    from PIL import Image
     # Normalisera till gråskala
     if img.mode == "RGBA":
         img = img.convert("RGB")
@@ -814,38 +957,98 @@ def _tess_call(fn, img, langs: str, cfg: str, **extra):
 def _ocr_pass(img, langs: str, cfg: str, pytesseract) -> Tuple[float, str]:
     """OCR:a en bild och returnerar (medelkonfidens, text).
 
-    `image_to_data` ger konfidens per ord, vilket låter flera
-    konfigurationer jämföras objektivt - grunden för "Bättre OCR" i REQ-N5.
-    Missar datan fallbackas till ren text med konfidens 0.
+    `image_to_data` ger konfidens per ord och positionsgrupper för rader och
+    stycken. Behåll den strukturen i stället för att platta ut hela sidan till
+    en enda rad; radbrytningar hjälper både läsbarheten och zonmatchningen.
     """
     try:
         d = _tess_call(pytesseract.image_to_data, img, langs, cfg,
                        output_type=pytesseract.Output.DICT)
-        confs = [int(c) for c in d.get("conf", [])
-                 if str(c).lstrip("-").isdigit() and int(c) > 0]
-        text = " ".join(w for w in d.get("text", []) if w and w.strip())
+        words = d.get("text", []) or []
+        conf_values = d.get("conf", []) or []
+        confs = []
+        lines: Dict[Tuple[str, str, str], List[Tuple[int, str]]] = {}
+        line_order: List[Tuple[str, str, str]] = []
+
+        def value_at(key: str, index: int, fallback: str) -> str:
+            values = d.get(key, []) or []
+            try:
+                return str(values[index])
+            except (IndexError, TypeError):
+                return fallback
+
+        for i, raw in enumerate(words):
+            word = str(raw or "").strip()
+            if not word:
+                continue
+            try:
+                confidence = float(conf_values[i])
+                if confidence > 0:
+                    confs.append(confidence)
+            except (IndexError, TypeError, ValueError, OverflowError):
+                pass
+            block = value_at("block_num", i, "0")
+            paragraph = value_at("par_num", i, "0")
+            line = value_at("line_num", i, "0")
+            key = (block, paragraph, line)
+            if key not in lines:
+                lines[key] = []
+                line_order.append(key)
+            try:
+                word_order = int(value_at("word_num", i, str(i)))
+            except (TypeError, ValueError, OverflowError):
+                word_order = i
+            lines[key].append((word_order, word))
+
+        rendered: List[str] = []
+        previous_block = None
+        for key in line_order:
+            if previous_block is not None and key[0] != previous_block:
+                rendered.append("")
+            rendered.append(" ".join(
+                word for _, word in sorted(lines[key], key=lambda item: item[0])))
+            previous_block = key[0]
+        text = "\n".join(rendered).strip()
         score = sum(confs) / len(confs) if confs else 0.0
-        return score, text
+        if text:
+            return score, text
     except Exception:
-        try:
-            return 0.0, _tess_call(pytesseract.image_to_string, img, langs, cfg)
-        except Exception:
-            return 0.0, ""
+        pass
+    try:
+        return 0.0, _tess_call(pytesseract.image_to_string, img, langs, cfg)
+    except Exception:
+        return 0.0, ""
 
 
-def _run_ocr(path: Path, max_pages: int, language: str, quality: str = "high",
-             dpi: int = 300) -> str:
+def _run_ocr_detailed(path: Path, max_pages: int, language: str,
+                      quality: str = "high", dpi: int = 300
+                      ) -> Tuple[str, float, List[Dict[str, Any]]]:
     try:
         import pytesseract
     except Exception:
-        return "", -1.0   # OCR inte installerat - tyst reserv, ingen krasch
+        return "", -1.0, []   # OCR inte installerat - tyst reserv, ingen krasch
     exe = tesseract_binary()
     if exe:
         pytesseract.pytesseract.tesseract_cmd = exe
     langs = _resolve_langs(pytesseract, language)
     images = _render_pages(path, max_pages, dpi=dpi)
     if not images:
-        return "", -1.0
+        return "", -1.0, []
+
+    def _orient(img):
+        """Rätta 90-gradersrotation på OCR-kopian när Tesseract är säker."""
+        try:
+            data = _tess_call(pytesseract.image_to_osd, img, "osd", "--psm 0",
+                              output_type=pytesseract.Output.DICT)
+            angle = int(data.get("rotate", 0) or 0) % 360
+            confidence = float(data.get("orientation_conf", 0) or 0)
+            if angle in (90, 180, 270) and confidence >= 2.0:
+                # Tesseract rapporterar hur mycket bilden ska roteras medurs;
+                # PIL:s positiva vinkel går moturs.
+                return img.rotate((360 - angle) % 360, expand=True), angle
+        except Exception:
+            pass  # OSD-data kan saknas; använd originalets orientering.
+        return img, 0
 
     def ocr_one(img):
         """En sida, flera konfigurationer, bästa konfidens vinner (REQ-N5):
@@ -854,9 +1057,12 @@ def _run_ocr(path: Path, max_pages: int, language: str, quality: str = "high",
         för LSTM:n."""
         skapade = [img]
         try:
-            # deskew endast i "high" (snabbhet): standardläget hoppar över
-            # skevhetsanalysen, som är den dyraste förbehandlingsdelen.
-            pre = _preprocess(img, quality, do_deskew=(quality == "high"))
+            oriented, rotation = _orient(img)
+            if oriented is not img:
+                skapade.append(oriented)
+            # Rätvinklig orientering korrigeras före kontrast/deskew. Alla
+            # transformationer gäller bara renderad OCR-bild, aldrig PDF:en.
+            pre = _preprocess(oriented, quality, do_deskew=True)
             skapade.append(pre)
             passes = [(pre, "--oem 1 --psm 3")]
             if quality == "high":
@@ -867,6 +1073,9 @@ def _run_ocr(path: Path, max_pages: int, language: str, quality: str = "high",
                 # en enda textkolumn med varierande innehåll - fångar
                 # skanningar som psm 3/6 delar upp fel.
                 passes.append((pre, "--oem 1 --psm 4"))
+                # PSM 11 hittar fristående etiketter och text kring tabeller/
+                # diagram bättre än vanliga löptextlägen.
+                passes.append((pre, "--oem 1 --psm 11"))
                 # Extra avläsningspass på 1,5× uppskalad bild: liten och
                 # blek text som annars försvinner (bättre avläsning).
                 try:
@@ -885,9 +1094,9 @@ def _run_ocr(path: Path, max_pages: int, language: str, quality: str = "high",
                 komb = score + min(len(text), 2000) * 0.01
                 if komb > best_score:
                     best_score, best_text = komb, text
-            return best_text, best_score
+            return best_text, best_score, rotation
         except Exception:
-            return "", -1.0
+            return "", -1.0, 0
         finally:
             for im in skapade:
                 try:
@@ -903,26 +1112,40 @@ def _run_ocr(path: Path, max_pages: int, language: str, quality: str = "high",
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="pdfsorter-ocr") as pool:
         futs = [pool.submit(ocr_one, im) for im in images]
-        texts: List[str] = []
-        confs: List[float] = []
+        results: List[Tuple[str, float, int]] = []
         for f in futs:
             # 90 s per sida: en patologisk skanning får aldrig hänga appen.
             try:
-                txt, sc = f.result(timeout=90)
+                txt, sc, rotation = f.result(timeout=90)
             except Exception:
-                txt, sc = "", -1.0
+                txt, sc, rotation = "", -1.0, 0
                 f.cancel()
-            if txt:
-                texts.append(txt)
-                if sc > 0:
-                    confs.append(sc)
+            results.append((txt, sc, rotation))
+    texts = [row[0] for row in results]
+    confs = [row[1] for row in results if row[0] and row[1] > 0]
+    page_info = [
+        {"page": i + 1, "chars": len(txt),
+         "confidence": round(sc, 1) if sc > 0 else -1.0,
+         "preview": _clean(txt)[:240], "rotation": rotation}
+        for i, (txt, sc, rotation) in enumerate(results)
+    ]
     conf = sum(confs) / len(confs) if confs else -1.0
     _OCR_LAST["sekunder"] = round(time.time() - t0, 2)
     _OCR_LAST["konfidens"] = round(conf, 1)
     # \f mellan sidorna markerar sidgränsen: extract() räknar flersidiga
     # tokens på dem. _clean och senare normalisering påverkas inte -
     # tecknet överlever städningen och blir blanksteg vid normalisering.
-    return _clean("\n\f\n".join(texts)), conf
+    # Rensa sidorna var för sig; _clean runt hela dokumentet skulle trimma
+    # form feed på kanterna och dölja tomma första/sista OCR-sidor.
+    return "\n\f\n".join(_clean(page) for page in texts), conf, page_info
+
+
+def _run_ocr(path: Path, max_pages: int, language: str,
+             quality: str = "high", dpi: int = 300) -> Tuple[str, float]:
+    """Bakåtkompatibelt OCR-anrop utan per-sida diagnosdata."""
+    text, confidence, _pages = _run_ocr_detailed(
+        path, max_pages, language, quality=quality, dpi=dpi)
+    return text, confidence
 
 
 #: Andel av sidhöjden som räknas som "brevhuvud" - där avsändaren står.
@@ -970,7 +1193,9 @@ def header_images(path: Path) -> List[Any]:
                 pad = 4
                 clip = pymupdf.Rect(rect.x0 - pad, rect.y0 - pad,
                                     rect.x1 + pad, rect.y1 + pad) & page.rect
-                pix = page.get_pixmap(matrix=pymupdf.Matrix(4.0, 4.0), clip=clip)
+                zoom = _bounded_render_zoom(clip, 4.0)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
+                                      clip=clip, alpha=False)
                 crops.append(Image.open(io.BytesIO(pix.tobytes("png"))))
     except Exception:
         return []
@@ -1014,7 +1239,9 @@ def embedded_images(path: Path, max_images: int = 6,
                 pad = 4
                 clip = pymupdf.Rect(rect.x0 - pad, rect.y0 - pad,
                                     rect.x1 + pad, rect.y1 + pad) & page.rect
-                pix = page.get_pixmap(matrix=pymupdf.Matrix(3.0, 3.0), clip=clip)
+                zoom = _bounded_render_zoom(clip, 3.0)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
+                                      clip=clip, alpha=False)
                 crops.append(Image.open(io.BytesIO(pix.tobytes("png"))))
         return crops
     except Exception:
@@ -1113,26 +1340,48 @@ def extract(path: Path, max_pages: int = 0, ocr_enabled: bool = True,
                        (_x_pdfminer, has_pdfminer())):
             if not ok:
                 continue
+            capture = _PdfDiagnosticCapture()
             try:
-                text, meta, pages, total = fn(path, max_pages)
-                if len(text) > len(res.text):
-                    res.text, res.metadata, res.pages_read = text, meta, pages
-                    res.page_count = total or res.page_count
-                if len(res.text) >= MIN_TEXT_CHARS:
-                    res.error = ""
-                    break
+                with capture:
+                    text, meta, pages, total = fn(path, max_pages)
+                    if len(text) > len(res.text):
+                        res.text, res.metadata, res.pages_read = text, meta, pages
+                        res.page_count = total or res.page_count
+                        try:
+                            res.page_starts = json.loads(meta.pop("_page_starts", "[]"))
+                        except (TypeError, ValueError):
+                            res.page_starts = []
+                    if len(res.text) >= MIN_TEXT_CHARS:
+                        res.error = ""
+                        break
             except Exception as exc:
+                engine = fn.__name__.removeprefix("_x_")
+                res.pdf_diagnostics.append({
+                    "engine": engine, "level": "error",
+                    "message": f"{type(exc).__name__}: {exc}", "count": 1,
+                })
                 res.error = f"{type(exc).__name__}: {exc}"
+            finally:
+                res.pdf_diagnostics.extend(capture.rows())
 
         if len(res.text) < MIN_TEXT_CHARS and ocr_enabled and ocr_available():
             # Helt skannad sida - OCR:a allt
             try:
-                ocr_text, conf = _run_ocr(path, max(1, ocr_max_pages),
-                                          ocr_language,
-                                          quality=ocr_quality, dpi=ocr_dpi)
-                if len(ocr_text) > len(res.text):
+                ocr_text, conf, page_info = _run_ocr_detailed(
+                    path, max(1, ocr_max_pages), ocr_language,
+                    quality=ocr_quality, dpi=ocr_dpi)
+                res.ocr_pages = page_info
+                readable_ocr = ocr_text.replace("\f", " ").strip()
+                readable_text = res.text.replace("\f", " ").strip()
+                if len(readable_ocr) > len(readable_text):
                     res.text, res.used_ocr, res.error = ocr_text, True, ""
                     res.ocr_conf = conf
+                    if not res.page_starts:
+                        res.page_starts = [
+                            "\n".join(line.strip() for line in page.splitlines()
+                                        if line.strip())[:1200]
+                            for page in ocr_text.split("\f")
+                        ]
             except Exception as exc:
                 res.error = res.error or f"OCR misslyckades: {exc}"
         elif ocr_enabled and ocr_available():
@@ -1194,6 +1443,64 @@ def extract(path: Path, max_pages: int = 0, ocr_enabled: bool = True,
         res.error = res.error or f"{type(exc).__name__}: {exc}"
     return res
 
+
+
+def search_extracted_pages(path: Path, text: str, query: str,
+                           context: int = 90) -> List[Dict[str, Any]]:
+    """Return local, page-numbered literal-search hits from extracted PDF text."""
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return []
+    pages = (str(text or "").split("\f")
+             if "\f" in str(text or "") else [str(text or "")])
+    hits: List[Dict[str, Any]] = []
+    for page_number, page_text in enumerate(pages, 1):
+        folded = page_text.casefold()
+        start = 0
+        while len(hits) < 500:
+            index = folded.find(needle, start)
+            if index < 0:
+                break
+            left = max(0, index - max(0, int(context)))
+            right = min(len(page_text), index + len(needle) + max(0, int(context)))
+            snippet = " ".join(page_text[left:right].split())
+            if left:
+                snippet = "…" + snippet
+            if right < len(page_text):
+                snippet += "…"
+            hits.append({"path": str(path), "page": page_number,
+                         "snippet": snippet})
+            start = index + max(1, len(needle))
+        if len(hits) >= 500:
+            break
+    return hits
+
+
+def compare_extracted_pages(left_text: str, right_text: str,
+                            max_changes: int = 20) -> List[Dict[str, Any]]:
+    """Summarize changed/added/removed pages without altering either PDF."""
+    left_pages = (str(left_text or "").split("\f")
+                  if "\f" in str(left_text or "") else [str(left_text or "")])
+    right_pages = (str(right_text or "").split("\f")
+                   if "\f" in str(right_text or "") else [str(right_text or "")])
+    changes = []
+    for index in range(max(len(left_pages), len(right_pages))):
+        before = left_pages[index] if index < len(left_pages) else None
+        after = right_pages[index] if index < len(right_pages) else None
+        if before == after:
+            continue
+        if before is None:
+            kind = "added"
+        elif after is None:
+            kind = "removed"
+        else:
+            kind = "changed"
+        changes.append({"page": index + 1, "kind": kind,
+                        "before": " ".join((before or "").split())[:600],
+                        "after": " ".join((after or "").split())[:600]})
+        if len(changes) >= max(1, int(max_changes)):
+            break
+    return changes
 
 
 # Ord som finns i nästan alla affärsdokument och därför är värdelösa som
@@ -1285,6 +1592,16 @@ _WORD = re.compile(r"[^\W\d_][\w\-åäöÅÄÖéèüÜøæ]{2,}", re.UNICODE)
 _PROPER = re.compile(
     r"(?<=[a-zåäö,;:]\s)([A-ZÅÄÖ][a-zåäöéèü]{2,}(?:[ \t][A-ZÅÄÖ][a-zåäöéèü]{2,}){0,2})")
 _DATEISH = re.compile(r"^\d[\d\s./:-]*$")
+# Vanliga dokumentrubriker som kan vara användbara stödord. Begränsas till
+# rader nära dokumentets början så en hänvisning i brödtexten inte blir titel.
+_DOCUMENT_TITLE = re.compile(
+    r"^(?:faktura|invoice|kvitto|receipt|kreditfaktura|credit note|"
+    r"orderbekräftelse|orderbekraftelse|purchase order|offert|quotation|"
+    r"avtal|agreement|kontrakt|contract|påminnelse|reminder|"
+    r"kontoutdrag|bank statement|transaktionsrapport|årsredovisning|"
+    r"annual report|kreditnota|credit note|följesedel|delivery note|"
+    r"order)(?:\s*(?:nr\.?|nummer|no\.?|#)?\s*[a-zåäö0-9-]*)?$", re.I)
+_TITLE_LABEL = re.compile(r"^(?:titel|title|ämne|subject)\s*[:\-]\s*(.{3,100})$", re.I)
 
 #: Delar text i ord (bokstäver/siffror hör ihop) - för tokenräknaren i
 #: suggest_keywords (snabbhet, rond 4).
@@ -1292,6 +1609,7 @@ _TOKEN_RE = re.compile(r"[^\W_]+")
 
 # typ -> (vikt, etikett)
 KIND_INFO = {
+    "title":   (3.2, "dokumenttitel"),
     "orgnr":   (3.0, "organisationsnummer"),
     "vat":     (3.0, "VAT-nummer"),
     "giro":    (2.2, "bankgiro/plusgiro"),
@@ -1677,7 +1995,7 @@ def _recipient_zone(text: str) -> str:
     return ""
 
 
-def suggest_keywords(text: str, filename: str = "", limit: int = 10,
+def suggest_keywords(text: str, filename: str = "", limit: int = 25,
                      existing: Optional[Counter] = None) -> List[Candidate]:
     """Ta fram de N mest karakteristiska stödorden ur en fil.
 
@@ -1701,6 +2019,11 @@ def suggest_keywords(text: str, filename: str = "", limit: int = 10,
         raw = re.sub(r"\s+", " ", (raw or "").strip(" .,:;()[]{}\"'-"))
         if len(raw) < 3:
             return
+        # Etiketter för identifierare kan råka uppfattas som företagsnamn
+        # (t.ex. "VAT SE…" av versal-/namnheuristiken). Spara i så fall bara
+        # den strukturerade identifierarkandidaten som extraherats separat.
+        if kind in ("company", "sender") and _ID_HINT.match(normalize(raw)):
+            return
         key = normalize(raw)
         if not key or len(key) < 3:
             return
@@ -1721,6 +2044,19 @@ def suggest_keywords(text: str, filename: str = "", limit: int = 10,
             # behåll den starkaste typen
             if KIND_INFO.get(kind, (0,))[0] > KIND_INFO.get(prev.kind, (0,))[0]:
                 prev.kind, prev.display = kind, raw
+
+    # -- dokumenttitel --------------------------------------------------
+    # Rubrikerna hämtas ur sidtexten/OCR-texten, inte från ett antagande om
+    # filnamnet. Bara dokumentets inledning får bestämma titeln.
+    for line in text.splitlines()[:12]:
+        title = re.sub(r"\s+", " ", line.strip(" \t.:_-"))
+        labeled_title = _TITLE_LABEL.fullmatch(title)
+        if labeled_title:
+            add(labeled_title.group(1), "title")
+            break
+        if title and _DOCUMENT_TITLE.fullmatch(title):
+            add(title, "title")
+            break
 
     # -- starka identifierare ------------------------------------------
     for m in _ORGNR.finditer(hay):
@@ -1862,11 +2198,21 @@ def suggest_keywords(text: str, filename: str = "", limit: int = 10,
         cand.score = score
 
     # -- rensa bort delsträngar av starkare kandidater --------------------
-    ranked = sorted(found.values(), key=lambda c: (-c.score, c.text))
+    # Identitetsuppgifter och dokumenttitel är de mest användbara
+    # stödordsförslagen vid granskning. Rangordna dem före generiska ord,
+    # oavsett frekvenspoäng; inom gruppen behålls den vanliga relevansordningen.
+    priority = {"title": 0, "company": 1, "sender": 1,
+                "orgnr": 2, "vat": 3, "giro": 4}
+    ranked = sorted(found.values(),
+                    key=lambda c: (priority.get(c.kind, 5), -c.score, c.text))
     kept: List[Candidate] = []
     for cand in ranked:
-        if any(cand.text != k.text and cand.text in k.text and cand.score < k.score * 1.3
-               for k in kept):
+        # Behåll alltid strukturerade identiteter även om deras text råkar
+        # ingå i en längre fras/företagskandidat (t.ex. VAT efter "VAT ").
+        identity = cand.kind in {"orgnr", "vat", "giro"}
+        if not identity and any(
+                cand.text != k.text and cand.text in k.text
+                and cand.score < k.score * 1.3 for k in kept):
             continue
         kept.append(cand)
         if len(kept) >= limit:

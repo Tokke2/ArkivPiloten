@@ -4,11 +4,14 @@
 
 # ArkivPiloten 📄➡️🗂️
 
-**PDF Sorter 1.1.0 — your PDFs, sorted into the right folders. Automatically.**
-**PDF Sorter 1.1.0 — dina PDF:er, sorterade i rätt mappar. Automatiskt.**
+**PDF Sorter 1.4.14 — after 100 manual confirmations, two category-exclusive exact saved support-word matches can move a file automatically.**
+**PDF Sorter 1.4.14 — efter 100 manuella bekräftelser krävs två exakta sparade stödord som bara finns i en kategori för automatflytt.**
 
 Free · No ads · No tracking · Portable · Works offline
 Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
+
+**MIT licensed — private and commercial use are permitted.** See [LICENSE](LICENSE).
+**MIT-licens — privat och kommersiell användning är tillåten.** Se [LICENSE](LICENSE).
 
 [**🇬🇧 English**](#english) · [**🇸🇪 Svenska**](#svenska) · [**❤️ Donate / Donera**](#support)
 
@@ -22,41 +25,47 @@ Gratis · Ingen reklam · Ingen spårning · Portabel · Fungerar offline
 
 ## What is ArkivPiloten?
 
-ArkivPiloten watches one or more **inbox folders**, reads every new PDF, figures out which company or project it belongs to, and moves it to the right subfolder in your **outbox folder** — e.g. `Outbox/Pilkington/2025/`.
+ArkivPiloten watches one or more **inbox folders**, reads every new PDF, and suggests which company or project it belongs to. A category first needs 100 distinct files confirmed manually. After that, a file moves automatically only when at least two different saved support words or phrases match literally in the PDF text and each matching word belongs to that category alone. Every other file stays in the inbox for your review.
 
-It recognises senders by organisation number, VAT number, bankgiro, domain and company name, reads scanned documents with OCR, and **learns from your decisions**: when it is unsure it asks you once, and similar files are then sorted automatically in the future. Everything runs locally on your computer — no cloud, no account, no network calls for sorting.
+It recognises senders by organisation number, VAT number, bankgiro, domain and company name, reads scanned documents with OCR, and **learns only from support words you choose and save**. Learned scores, fuzzy/partial matches and OCR-noise tolerance can suggest a destination but cannot authorize a move; rescans can move a file only when the same exact-match rule is met. Matching is case-insensitive and ignores repeated whitespace; punctuation and the spelling inside the full word or phrase must match exactly. Everything runs locally — no cloud, no account, no network calls for sorting.
 
-> **Cautious by design.** A file is only moved automatically when the evidence is strong. If ArkivPiloten is unsure, it asks instead — answering one question is always cheaper than hunting down a misfiled document.
+> **Strict automatic rule.** A category must have 100 distinct manually confirmed files first. From then on, at least two different literal saved whole-word/phrase matches that are not shared with other categories must identify it before a file can move automatically. If either condition fails, categories conflict, or a match is learned-only, partial, fuzzy, or OCR-tolerant, the file stays for review. The same rule applies during watching and rescanning.
 
 ### How a decision is made
 
 | Result | Meaning | What happens |
 |---|---|---|
-| ✅ **Auto** | The evidence is strong enough | The file is moved right away |
-| ❓ **Ask** | Unclear or weak evidence | The file goes to the review queue; you tick the keywords that belong to the right category, and the app learns from it |
+| ✅ **Exact match** | The category has 100 prior manual confirmations, and at least two different saved whole words/phrases unique to it appear literally in the PDF text | The file can move automatically to that category |
+| 💡 **Suggestion** | Scores, learned matches, partial/flexible matches, or conflicting exact matches | The file stays in the inbox for your review; learned scores never trigger a move |
 | ⚠️ **Error** | The file could not be read | The error is logged and the file is left untouched |
 
 ## Features
 
-- 📥 **Watched folders + automatic sorting** into `<category>/<year>`, using the document's own date for the year folder
-- 🎯 **Zone-weighted matching** — letterhead, footer and sender zones weigh more than body text, plus multi-page matching; a proven organisation number always suffices on its own
-- 🧠 **Self-learning classifier** — suggests and breaks deadlocks between rule-approved candidates after roughly 5 decisions per category; it never moves a file on its own
-- 🔐 **Safer matching (1.2.0+)** — body-text-only mentions never auto-move a file on Normal and above: auto-sorting requires sender-zone, strong-ID or multi-page evidence, at least 12 characters of read text, and the exact analysed bytes are fingerprinted (SHA-256) and re-verified before any move
+- 🧭 **Clearer design** — a branded header, highlighted three-step Start screen, compact cards and clearly ordered tabs keep everyday actions separate from advanced tools
+- 📥 **Watched folders + review queue** — a category needs 100 distinct manual confirmations, then at least two exact saved support words exclusive to it; every other PDF stays in the review queue
+- 🎯 **Zone-weighted matching** — letterhead, footer and sender zones weigh more than body text, plus multi-page matching; an organisation-number term is never enough on its own, and must be accompanied by another exact category-exclusive word after 100 manual confirmations
+- 🧠 **User-controlled learning** — suggested support words are never preselected or saved automatically; you choose which words to save. Learned category scores never authorize a category move; the subfolder learner uses only your manual folder choices, after the thresholds above, and asks when unsure
+- 🔐 **Exact-match safety** — after 100 manual confirmations in a category, automatic moves still require at least two different literal whole-word/phrase matches exclusive to that category and non-recipient evidence; partial, fuzzy, OCR-denoised, filename-only, shared, or learned-only matches require review
 - 🔍 **OCR for scanned PDFs** (Tesseract), including logos in letterheads of otherwise text-based files
-- 💡 **10 keyword suggestions per uncertain file** — tick the right ones in the review dialog and the file (and future lookalikes) sort themselves
+- 💡 **Clearer review dialog (1.4.14)** — file details, keyword suggestions and destination are grouped into clean cards. The existing-folder field accepts free text and filters the dropdown as you type; choose a match with Enter. The primary “Save & move” action is easy to spot.
+- 💡 **Review controls** — see up to 25 support-word suggestions per PDF in a dedicated scrollable list; each shows its type and match count, while a bar indicates relative relevance. Suggestions are never selected automatically. Set a default subfolder per category, then choose a deeper per-file document-type subfolder manually when needed; only confirmed choices train the subfolder learner. It routes a type only after five examples for each of at least two types and a confident, distinctive match; otherwise it asks. In the category editor, choose a category from the dropdown at the top: its saved support words are listed on the left and only folders already created in that category appear on the right. Year-folder components are omitted and identical folder paths across years appear once. Drag a word left-to-right to assign it to a folder, or select support words and a folder and press Ctrl+M. Create folders directly in the category view or its mapping dialog. The default support word is saved per category, so multiple categories may share a word without sharing or overwriting each other’s default. The app also flags likely duplicate invoices when the supplier category, labelled invoice number and payable amount match; it sends the new file to review and never skips or deletes either copy automatically. The app also watches the configured Archive folder for misplaced PDFs while it is running: only a safe match can correct a location automatically, otherwise the file is queued for review. In the PDF preview you can optionally draw and save a rectangle template for the selected type; it matches the saved text in the same relative page area, and uncertain/missing template matches are reviewed. Templates can be toggled per category. Create a category subfolder from either mapping view; it is made immediately under that category’s date/year destination. Kategorier has clearly separated actions to clear keywords while keeping categories, or remove all categories and keywords. Removing all categories creates a rules backup and enables Undo; the empty-state panel offers create/import shortcuts.
+- ⌨️ **Review and accessibility options** — choose whether the review queue advances after each confirmed decision, defer a PDF without changing it, and turn on larger text. The review preview can rotate pages and either save the rotation into the original after confirmation and a `.bak` backup, or save a separate vector-preserving copy if the user chooses Save As. Optional deskew estimates the angle per page and creates a separate image-based PDF only after explaining the trade-offs; the original stays untouched for deskew. Keyboard shortcuts are listed under Help, and dedicated import/export folders can be opened from the File menu.
 - ↩️ **Never destructive** — files are never overwritten (name clashes become `invoice (2).pdf`), and every move can be undone
-- 🧰 **Tray icon, autostart, single instance**, dark / light / high-contrast themes, HiDPI-aware
-- 🪵 **Session logging** in `logs/` and a one-click diagnostics bundle (*Copy diagnostics*) for support
-- 🎒 **Everything stays in the app folder (1.3.0)** — settings, rules, history, logs, cache, icons, backups, updates and temp files all live in subfolders of the app folder (`json/`, `logs/`, `cache/`, `icons/`, `backups/`, `updates/`, `temp/`); nothing is written to `%APPDATA%` or your home directory (override only via `PDFSORTER_HOME`)
-- 🔄 **Auto-update from GitHub (1.3.0)** — checks for new versions, updates only the app's own files with backup + compile validation, then updates the Python packages; your data is never touched (Help tab → *Search for updates*, or `--update`)
+- 🎨 **New cross-platform identity** — a crisp folder-and-compass app icon, a multi-size Windows `.ico`, and a print-ready, font-outlined vector wordmark in `brand/arkivpiloten-logo.svg` (with a matching icon source SVG).
+- 🖥️ **Windows, macOS and Linux** — native install/start helpers, per-OS autostart and app icons; CI runs the full test suite on all three operating systems and Python 3.10/3.12.
+- 🧰 **Tray icon, autostart, single instance** — a manual launch opens the window; OS autostart starts in the tray. Windows autostart runs `pythonw.exe pdfsorter.py --tray` directly (not the `.pyw` file association), so the app branding replaces Python’s generic icon. Closing/minimizing sends the app to the tray while idle, but the window stays visible during sorting so duplicate prompts cannot get hidden.
+- 🪵 **Session logging** in `logs/`; yesterday’s session logs are archived, while stable error codes remain in `logs/felkoder.log` until resolved. Mark one resolved with `python pdfsorter.py --mark-felkod-atgardad CODE`; its history is preserved. Detailed errors are also collected in `logs/fel-samlat.log`
+- 🎒 **Portable by default** — settings, rules, history, logs, cache, icons, backups, updates and temp files live in subfolders of the app folder (`json/`, `logs/`, …). If the app folder is read-only (e.g. `/Applications` or `/opt`), data moves to the standard per-user folder instead; override with `PDFSORTER_HOME`
+- 🧹 **Smart cache cleanup** — runs every 24 hours; removes cache unused for 30 days and the oldest entries above 1,500 files / 512 MB. Corrupt entries are discarded when read. A manual “Clean cache now” action is available under Settings → Cache and storage. Only regenerable PDF text-cache files are touched.
+- 🧭 **AI report in one click (1.4.13)** — every error, warning and Tk callback exception collected into one compact block, ready to paste into an AI chat or a bug report. The same error from memory, the session log and `errors.log` is merged into one row with a count; only the tail of each log is read, so the report is ready in well under a second even with tens of megabytes of logs, and it says plainly if a log was only read in part. Tk callback exceptions are now captured even when the app runs without a console (`pythonw`). GUI: *Help → Copy AI report*, or `--ai-rapport` (add `--djup` to read the logs in full)
+- 🔄 **Auto-update from GitHub Releases (1.4.0)** — and **only** from Releases: no branch is ever used as a source. The release carries a commit ID and SHA-256 manifest for shipped files, so the app detects a rebuilt release even when its version number is unchanged; legacy releases are compared from a checksum-verified ZIP. Installation verifies `SHA256SUMS.txt`, updates only app files with backup, compile check and rollback, then updates Python packages; your data is never touched. If GitHub's API is unreachable nothing is offered. On by default (Help → *Search for updates*, right-click the tray icon → *Search for updates*, or `--update`)
 - 🚀 **Autostart on Windows/macOS/Linux (1.3.0)** — registry with Startup-folder fallback (Windows), LaunchAgent (macOS), XDG (Linux); self-healing sync at every start, verified after writing
 - ❤️ **Donation view in the app** (Help → Support the project) with SV/EN toggle and a verified Swish QR code
 
 ## Quick start (Windows)
 
-1. Double-click **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — it installs the latest stable Python if needed (per-user, no admin required), upgrades pip, installs **all** Python add-ons from `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) with retry and import verification, installs Tesseract OCR with Swedish + English via winget (best effort), runs the app's own `--status` check, and then starts the app.
-2. Done. The app starts without a console window, and everything is saved in the app folder.
+1. Double-click **`ArkivPiloten - Starta tyst.vbs`**. It runs the bootstrap without a terminal window. The batch bootstrap is also self-hiding if launched directly. It reuses installed Python without checking online; only if Python is missing does it offer to install the latest stable version. It never asks or updates Python when a usable interpreter is found. No separate Python-installer BAT is included in the release. Required add-ons are bootstrapped once, then a Windows scheduled task updates only Python packages weekly on Monday at 08:00. The setup questions use Windows dialogs; progress and diagnostics are written to logs. The launcher checks/installs Tesseract OCR (best effort), asks about autostart (default yes), then starts the GUI through `pythonw`.
+2. The app starts minimized every time, including after an update restart. PDF-reading and OCR diagnostics are kept out of a terminal; details remain in the app logs. The app uses the tray when safe, otherwise the taskbar.
 
 ### Manual install
 
@@ -65,7 +74,34 @@ pip install -r requirements.txt
 pythonw pdfsorter.pyw
 ```
 
-Or start the GUI directly with `python pdfsorter.py` (no arguments opens the graphical interface).
+Or start the GUI directly with `python pdfsorter.py` (no arguments opens the graphical interface). On Windows, if this starts with `python.exe`, the GUI automatically hands off to `pythonw.exe` (or uses `CREATE_NO_WINDOW` as a fallback), so no console window is left behind. CLI commands such as `--check` continue to use the console.
+
+### Upgrading from the old 1.0.0 / 1.1.0
+
+Those versions looked for updates in the `main` branch instead of GitHub Releases, so they can never see a release and will always claim to be up to date. Run the one-time upgrader once — it fetches the latest release, verifies the checksum and replaces only the program files (your rules, settings and history are untouched):
+
+```bat
+uppgradera-arkivpiloten.bat
+```
+
+```bash
+bash uppgradera-arkivpiloten.sh          # macOS / Linux
+python3 tools/install_latest.py --root . # or run the script directly
+```
+
+Download the launcher anywhere and double-click it — it finds the app folder on its own (Desktop, Documents, Downloads, OneDrive, `%LOCALAPPDATA%\Programs`), or drag the app folder onto it. It also detects changed release-file hashes when the version number is unchanged. After that the app updates itself from Releases, as described above. Add `--dry-run` to see what would happen first.
+
+## Quick start (macOS & Linux)
+
+```bash
+./install.sh              # venv + requirements.txt, autostart on by default
+./install.sh --no-autostart # explicitly turn autostart off
+./install.sh --uninstall  # remove autostart + shortcuts, keep your data
+```
+
+`install.sh` installs everything in a local `.venv`; if Python is missing it offers installation through the OS package manager and requests `sudo` only after you accept. It never updates an existing Python interpreter. It checks Tkinter and Tesseract with per-distro hints, creates a desktop/app-menu shortcut, and builds a real `~/Applications/ArkivPiloten.app` on macOS. Autostart uses a LaunchAgent on macOS and XDG `autostart/*.desktop` on Linux (KDE, GNOME, XFCE, …) — both are verified after writing and repaired on the next start if they break.
+
+> Tray on Linux needs a StatusNotifier host. GNOME requires the *AppIndicator* extension; without it the app still opens its window instead of hiding it.
 
 > **Good to know:** every Python dependency is optional — the app starts anyway and tells you in the status bar what is missing. For the best reading quality install the full stack, and note that OCR also requires the **Tesseract** system program:
 >
@@ -98,15 +134,21 @@ Run `python pdfsorter.py --help` for all options (`--copy`, `--exclude`, `--json
 
 ```text
 ArkivPiloten/
-├── ArkivPiloten - Installera senaste Python och starta.bat   the only launcher you need (Windows)
+├── LICENSE                 MIT license (private and commercial use)
+├── ArkivPiloten - Starta tyst.vbs   console-free Windows entry point
+├── ArkivPiloten - Installera senaste Python och starta.bat   hidden bootstrap (Windows)
+├── install.sh              installer for macOS & Linux (venv, shortcut, autostart)
+├── uppgradera-arkivpiloten.bat / .sh   one-time upgrade from 1.0.0/1.1.0
+├── tests/                  pytest suite (autostart per OS, updater, config dir)
+├── tools/build_release.py  builds ArkivPiloten.zip + SHA256SUMS.txt
+├── .github/workflows/      CI (tests/lint) + automatic release publishing
+├── pyproject.toml          pytest/ruff settings
 ├── pdfsorter.py            main program (GUI, engine, matching)
 ├── pdfsorter.pyw           console-free launcher
 ├── pdfsorter_data.py       rules, history, locking, atomic writes
 ├── pdfsorter_read.py       text extraction, OCR, keyword suggestions
 ├── pdfsorter_system.py     icon, autostart, tray, logs, crash reports
 ├── pdfsorter_theme.py      light/dark/high-contrast themes, HiDPI
-├── Stöd ArkivPiloten.html  donation page (SV/EN, Swish QR)
-├── swish_qr.png            Swish QR (0721817177), verified
 ├── ArkivPiloten.ico/.png   app icon (used everywhere)
 ├── desktop.ini             folder icon in Explorer
 └── PDFSORTER_SPEC.md       requirements specification (source of truth)
@@ -114,9 +156,22 @@ ArkivPiloten/
 
 The five Python files must stay in the same folder. If `pdfsorter_system.py` or `pdfsorter_theme.py` is missing the app still starts (without tray/autostart, or with Tkinter's default grey look) — `pdfsorter_data.py` and `pdfsorter_read.py` are required.
 
+## Releases & auto-update (maintainers)
+
+The app updates from the **latest GitHub Release**, never from a branch. Each release must therefore contain `ArkivPiloten.zip` and `SHA256SUMS.txt`:
+
+```bash
+python tools/build_release.py --bump patch   # bumps all five modules + README
+git commit -am "Release 1.4.1" && git push
+```
+
+`.github/workflows/release.yml` builds the package and publishes/refreshes the current release automatically for every branch push and every `v*` tag. Release assets stay on the app's version; the updater compares the release commit and per-file SHA-256 hashes, so it can detect same-version rebuilds too.
+
+**Branch policy:** no merge commits. Work on a branch and publish with a fast-forward push or a tag/release — never `gh pr merge`.
+
 ## Privacy & safety
 
-- 🔒 **Everything happens locally.** Sorting makes no network calls and there is no tracking. (Only the Windows installer — Python/pip downloads — and the donation buttons open external sites.)
+- 🔒 **Everything happens locally.** Sorting makes no network calls and there is no tracking. (Only a platform setup launcher, when Python or packages are missing, and the donation buttons open external sites.)
 - 🛡️ **Your files are safe:** never overwritten, moves can be undone, and unreadable files are left exactly where they were.
 - 💾 **Your data stays yours:** rules, settings and history are plain JSON in the app folder — open them, back them up, take them with you.
 
@@ -128,9 +183,13 @@ python pdfsorter.py --status
 python pdfsorter_data.py
 python pdfsorter_read.py --check
 python pdfsorter_system.py --check
+
+# utvecklartester (Linux/macOS, inga riktiga autostartsposter rörs)
+pip install -r requirements-dev.txt
+python -m pytest
 ```
 
-Found a bug? Run `python pdfsorter.py --diagnostik` (or *Copy diagnostics* in the app) and include the output when you report it — it contains versions, settings and engine status, no document content.
+Found a bug? Run `python pdfsorter.py --ai-rapport` (or *Copy AI report* in the app) and paste the block into the report — it lists every error with a stable fingerprint, a count, the code location and the traceback, merged from memory and the logs. For quick manual inspection, errors are also collected across sessions in `logs/fel-samlat.log`. `--diagnostik` adds versions, settings and engine status. Neither contains document content, and the AI report redacts your user name and home folder.
 
 ---
 
@@ -138,27 +197,9 @@ Found a bug? Run `python pdfsorter.py --diagnostik` (or *Copy diagnostics* in th
 
 ## ❤️ Support ArkivPiloten — Donate
 
-**Yes — donations are very welcome!** ArkivPiloten is free, with no ads and no paywall, and it will stay that way. Donations are completely voluntary and go straight to what makes a difference: better matching, faster OCR, self-healing logs and new features. You support a small Swedish indie developer — not a company. 💙
+**Donations are welcome but always optional.** ArkivPiloten stays free, with no ads or paywall. To donate, open **Help → Support the project 💖** inside the app. The built-in view shows only the fixed-recipient Swish QR and PayPal/Ko-fi buttons; no separate donation page is provided.
 
-| Tier | | What it does |
-|---|---|---|
-| ☕ **A coffee — 39 SEK** | | A small thanks that fuels evening coding |
-| 📚 **Book friend — 99 SEK** *(most picked)* | | Covers a month of maintenance and test files |
-| 🌟 **Hero — 299 SEK** | | Carries the project further; your idea jumps the queue |
-
-**Any amount is appreciated** — one-off or monthly, no commitment:
-
-- 💙 **PayPal:** [paypal.me/Rickard3dPrint](https://paypal.me/Rickard3dPrint)
-- ☕ **Ko-fi:** [ko-fi.com/tokke2](https://ko-fi.com/tokke2) *(monthly giving available, cancel anytime)*
-- 📱 **Swish (Sweden):** **0721817177** — scan the QR code below with the Swish app
-
-<div align="center">
-<img src="swish_qr.png" alt="Swish QR code for 0721817177" width="200">
-</div>
-
-You can also donate from inside the app via **Help → Support the project 💖**, or open the donation page [`Stöd ArkivPiloten.html`](St%C3%B6d%20ArkivPiloten.html) included in this folder (SV/EN toggle included). Payments go directly through PayPal, Ko-fi or Swish over HTTPS — neither the app nor the developer ever sees your card number, and your receipt comes straight from the payment provider.
-
-*Thank you for keeping ArkivPiloten free for everyone! ✨*
+*Thank you for helping keep ArkivPiloten free for everyone! ✨*
 
 ---
 
@@ -174,41 +215,63 @@ You can also donate from inside the app via **Help → Support the project 💖*
 
 ## Vad är ArkivPiloten?
 
-ArkivPiloten bevakar en eller flera **inmappar**, läser varje ny PDF, avgör vilket företag eller projekt den hör till och flyttar den till rätt undermapp i din **utmapp** — t.ex. `Utmapp/Pilkington/2025/`.
+ArkivPiloten bevakar en eller flera **inmappar**, läser varje ny PDF och föreslår vilket företag eller projekt den hör till. Innan en kategori får automatflytta måste 100 olika filer ha bekräftats manuellt. Därefter krävs fortfarande minst två olika sparade stödord eller fraser som matchar bokstavligt i PDF-texten och inte delas med andra kategorier. Alla andra filer ligger kvar för granskning.
 
-Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domän och firmanamn, läser skannade dokument med OCR och **lär sig av dina beslut**: är den osäker frågar den en gång, och liknande filer sorteras sedan automatiskt framöver. Allt sker lokalt på din dator — ingen molntjänst, inget konto, inga nätverksanrop för sorteringen.
+Den känner igen avsändare på organisationsnummer, VAT-nummer, bankgiro, domän och firmanamn, läser skannade PDF:er med OCR och **lär bara in stödord som du själv väljer och sparar**. Inlärda poäng, delträffar och OCR-tolerans kan föreslå en mapp men aldrig ge flytträtt; en omskanning kan flytta en fil bara när samma exakta stödordsregel är uppfylld. Matchningen är skiftlägesokänslig och slår ihop upprepade blanksteg; skiljetecken och stavningen inne i hela ordet/frasen måste annars vara identiska. Allt sker lokalt — ingen molntjänst, inget konto, inga nätverksanrop för sorteringen.
 
-> **Försiktig av design.** En fil flyttas bara automatiskt när bevisen är starka. Är ArkivPiloten osäker frågar den i stället — det är alltid billigare att svara på en fråga än att leta rätt på en felsorterad fil.
+> **Strikt regel för automatisk flytt.** Bara en bokstavlig sparad helords-/frasträff som pekar ut en enda kategori kan flyttas automatiskt. Om exakt träff saknas, kategorier krockar eller matchningen bara bygger på inlärning, delord, fuzzy-matchning eller OCR-tolerans ligger filen kvar för granskning. Samma regel gäller bevakning och omskanning.
 
 ### Så fattas beslutet
 
 | Resultat | Betydelse | Vad som händer |
 |---|---|---|
-| ✅ **Auto** | Bevisen räcker | Filen flyttas med en gång |
-| ❓ **Fråga** | Otydligt eller för svaga bevis | Filen läggs i granskningskön; du bockar i de stödord som hör till rätt kategori, och appen lär sig av det |
+| ✅ **Exakt träff** | Ett sparat helt ord/en fras finns bokstavligt i PDF-texten och pekar ut en kategori | Filen kan flyttas automatiskt till den kategorin |
+| 💡 **Förslag** | Poäng, inlärning, delträffar eller motstridiga exakta träffar | Filen ligger kvar i inmappen för granskning; inlärda poäng flyttar aldrig |
 | ⚠️ **Fel** | Filen kunde inte läsas | Felet loggas och filen lämnas orörd |
 
 ## Funktioner
 
-- 📥 **Bevakade mappar + automatisk sortering** i `<kategori>/<år>`, där dokumentets eget datum styr årsmappen
-- 🎯 **Zonviktad matchning** — brevhuvud, sidfot och avsändarzon väger tyngre än brödtext, plus flersidig matchning; ett bevisat organisationsnummer räcker alltid ensamt
-- 🧠 **Självlärande klassificerare** — föreslår och bryter dödlägen mellan regelgodkända kandidater efter ungefär 5 beslut per kategori; den flyttar aldrig en fil på egen hand
-- 🔐 **Säkrare matchning (1.2.0+)** — bara löptextträffar flyttar aldrig en fil automatiskt på Normal och uppåt: det krävs avsändarzon, starkt ID eller flersidigt bevis, minst 12 lästa tecken, och exakt analyserade byte fingeravtrycks (SHA-256) och kontrolleras igen före varje flytt
+- 🧭 **Tydligare design** — en gemensam varumärkesrad, markerade tre steg på startsidan, kompakta kort och tydlig flikordning skiljer vardagsåtgärder från avancerade verktyg
+- 📥 **Bevakade mappar + granskningskö** — bara en exakt, unik stödordsträff kan flyttas automatiskt; alla andra PDF:er ligger kvar i granskningskön
+- 🎯 **Zonviktad matchning** — brevhuvud, sidfot och avsändarzon väger tyngre än brödtext, plus flersidig matchning; ett org.nr-stödord får bara auto-flytta när exakt skrivsätt är sparat och pekar ut en kategori
+- 🧠 **Användarstyrd inlärning** — stödordsförslag förbockas eller sparas aldrig automatiskt; du väljer vilka ord som ska sparas. Den inlärda modellen rangordnar förslag men ger aldrig flytträtt
+- 🔐 **Lokal, återställningsbar inlärning** — modell och zonfunktioner sparas lokalt med atomisk skrivning och säkerhetskopia; historiken kan spelas upp igen efter återställning. Ingen molntjänst eller nätverksinlärning används
+- 🔐 **Säker exaktmatchning** — automatisk flytt kräver bokstavlig helords-/frasträff i PDF-texten, en entydig kategori och bevis utanför mottagarblocket; delträffar, OCR-brus, filnamn och inlärning kräver granskning
 - 🔍 **OCR för skannade PDF:er** (Tesseract), inklusive logotyper i brevhuvuden på i övrigt textbaserade filer
-- 💡 **10 stödordsförslag per osäker fil** — bocka i rätt ord i granskningsrutan så sorterar sig filen (och framtida liknande filer) själva
+- 💡 **Tydligare granskningsruta (1.4.14)** — filinfo, stödordsförslag och målmapp ligger i rena, separata kort. Fältet för befintlig mapp tar fritext och filtrerar listan medan du skriver; Enter väljer en träff. Huvudknappen **Spara & flytta** är lätt att hitta.
+- 💡 **Granskningskontroller** — välj själv stödord och kategori; stödordsförslag sparas inte automatiskt. Ställ in en standardundermapp per kategori och välj manuellt en djupare undermapp/dokumenttyp vid granskning. Endast bekräftade val tränar undermappsläraren; den behöver fem exempel för vardera av minst två typer och en tydlig träff, annars frågar den. I kategoriredigeraren väljer du kategori i rullgardinsmenyn högst upp: sparade stödord visas till vänster och endast redan skapade mappar i kategorin visas till höger. Årsmappens namn visas inte och samma mappsökväg under flera år visas bara en gång. Dra ett stödord från vänster till höger för att koppla det till en mapp, eller markera stödord och mapp och tryck Ctrl+M. Mappar kan skapas direkt både i kategorivyn och i kopplingsdialogen. Standardstödordet sparas per kategori, så flera kategorier kan ha samma stödord utan att skriva över varandras standardval. Appen varnar också för sannolika fakturadubbletter när leverantörskategori, märkt fakturanummer och betalningsbelopp stämmer; den skickar filen till granskning och hoppar aldrig över eller raderar någon kopia automatiskt. Appen bevakar också den valda Arkiv-mappen efter PDF:er som verkar ligga fel. Den rättar bara placeringen när matchningen är säker, annars läggs filen för granskning. I PDF-förhandsvisningen kan du valfritt rita en ruta runt text som ska känneteckna dokumenttypen. Mallen letar efter samma text i samma relativa område; den kan stängas av per kategori, och osäkra träffar granskas. En undermapp kan skapas direkt från kategorivyn eller kopplingsdialogen under kategorins datum-/årsmål.
+- ⌨️ **Granskning och tillgänglighet** — välj om kön ska gå vidare efter varje bekräftat beslut, skjut upp en PDF utan att ändra den och slå på större text. Förhandsvisningen kan rotera sidor och spara rotationen i originalet efter bekräftelse med en `.bak`-säkerhetskopia, eller spara en separat vektorbevarande kopia om användaren väljer Spara som. Rätning uppskattar lutningen sida för sida och skapar efter tydlig bekräftelse en separat bildbaserad PDF; originalet lämnas då orört. Tangentbordsgenvägar finns under Hjälp, och särskilda import-/exportmappar kan öppnas från Arkiv-menyn.
 - ↩️ **Aldrig destruktiv** — filer skrivs aldrig över (namnkrockar blir `faktura (2).pdf`), och varje flytt går att ångra
-- 🧰 **Tray-ikon, autostart, enkelinstans**, mörkt/ljust/högkontrast-tema, HiDPI-medveten
-- 🪵 **Sessionsloggning** i `logs/` och ett diagnostikpaket med ett klick (*Kopiera diagnostik*) för support
-- 🎒 **Allt stannar i appmappen (1.3.0)** — inställningar, regler, historik, loggar, cache, ikoner, säkerhetskopior, uppdateringar och tempfiler bor i appmappens undermappar (`json/`, `logs/`, `cache/`, `icons/`, `backups/`, `updates/`, `temp/`); inget skrivs till `%APPDATA%` eller hemkatalogen (styr om endast via `PDFSORTER_HOME`)
-- 🔄 **Autouppdatering från GitHub (1.3.0)** — söker nya versioner, uppdaterar bara appens egna filer med säkerhetskopia + kompileringstest, uppdaterar sedan Python-paketen; din data rörs aldrig (fliken Hjälp → *Sök efter uppdateringar*, eller `--update`)
+- 🎨 **Ny identitet för alla plattformar** — en tydlig mapp-och-kompassikon, Windows-`.ico` i flera storlekar och en tryckfärdig vektorlogotyp med bokstäverna omvandlade till banor i `brand/arkivpiloten-logo.svg` (med matchande SVG-ikon).
+- 🖥️ **Windows, macOS och Linux** — installations-/startflöden, autostart och appikoner för varje system; CI kör hela testsviten på alla tre operativsystemen med Python 3.10/3.12.
+- 🧰 **Tray-ikon, autostart, enkelinstans** — appen startar alltid minimerad, i systemfältet om det kan visas säkert och annars i aktivitetsfältet. En andra start visar den redan öppna instansen. Windows-autostart kör `pythonw.exe pdfsorter.py --tray` direkt (inte `.pyw` via filassociation), så appens egen ikon används i stället för Pythons standardikon. Under sortering hålls fönstret synligt så att dubblettfrågor inte hamnar bakom systemfältet.
+- 🪵 **Sessionsloggning** i `logs/`; gårdagens sessionsloggar arkiveras medan stabila felkoder ligger kvar i `logs/felkoder.log` tills de åtgärdats. Markera en felkod med `python pdfsorter.py --mark-felkod-atgardad KOD`; historiken bevaras. Detaljerade fel samlas också i `logs/fel-samlat.log`
+- 🎒 **Portabelt som standard** — inställningar, regler, historik, loggar, cache, ikoner, säkerhetskopior, uppdateringar och tempfiler bor i appmappens undermappar (`json/`, `logs/`, …). Är appmappen skrivskyddad (t.ex. `/Applications` eller `/opt`) flyttas datan till användarens ordinarie datamapp i stället; `PDFSORTER_HOME` styr om
+- 🧹 **Smart cacherensning** — körs var 24:e timme och tar bort cache som inte använts på 30 dagar samt äldsta poster över 1 500 filer / 512 MB. Skadade poster rensas när de läses. Manuell knapp finns under Inställningar → Cache och lagring. Bara återskapbar PDF-textcache påverkas.
+- 🧭 **AI-rapport på ett klick (1.4.13)** — alla fel, varningar och Tk-callbackundantag samlade i ett kompakt block, klart att klistra in i en AI-chatt eller felanmälan. Samma fel från minnet, sessionsloggen och `errors.log` slås ihop till en rad med antal; bara svansen av varje logg läses, så rapporten är klar på under en sekund även med tiotalet megabyte loggar — och den säger rakt ut om en logg bara lästes delvis. Tk-callbackundantag fångas nu även när appen körs utan konsol (`pythonw`). I appen: *Hjälp → Kopiera AI-rapport (alla fel)*, eller `--ai-rapport` (lägg till `--djup` för att läsa hela loggarna)
+- 🔄 **Autouppdatering från GitHub Releases (1.4.0)** — och **enbart** därifrån: ingen gren används någonsin som källa. Releasen innehåller commit-ID och SHA-256-manifest för programfilerna, så appen upptäcker även ombyggda releaser med samma versionsnummer; äldre releaser jämförs från en checksummeverifierad ZIP. Före installation verifieras `SHA256SUMS.txt`; bara appfiler uppdateras, med säkerhetskopia, kompileringstest och rollback. Användardata rörs inte. Appen söker **tyst två gånger per dygn** och startar om sig själv när en verifierad uppdatering installerats. På som standard (Hjälp → *Sök efter uppdateringar*, högerklicka på tray-ikonen → *Sök efter uppdateringar*, eller `--update`)
 - 🚀 **Autostart på Windows/macOS/Linux (1.3.0)** — register med Startup-mapp som reserv (Windows), LaunchAgent (macOS), XDG (Linux); självläkande synk vid varje start, verifierad efter skrivning
 - ❤️ **Donationsvy i appen** (Hjälp → Stöd projektet) med SV/EN-växel och verifierad Swish-QR
 
 ## Kom igång (Windows)
 
-1. Dubbelklicka på **`ArkivPiloten - Installera senaste Python och starta.bat`**
-   — den installerar senaste stabila Python vid behov (per användare, ingen admin krävs), uppgraderar pip, installerar **alla** Python-tillägg från `requirements.txt` (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray, pytesseract) med retry och importkontroll, installerar Tesseract OCR med svenska + engelska via winget (bästa försök), kör appens egen `--status`-kontroll och startar sedan appen.
-2. Klart. Appen startar utan konsolfönster, och allt sparas i appmappen.
+1. Dubbelklicka på **`ArkivPiloten - Starta tyst.vbs`**. Den kör grundinstallationen utan terminalfönster. BAT-filen döljer sig också om den startas direkt. Installerad Python återanvänds utan nätverkskontroll; bara om Python saknas erbjuds installation av senaste stabila version. Python-tolken uppdateras aldrig automatiskt. En fristående Python-installations-BAT ingår inte i releasen. Nödvändiga tillägg grundinstalleras en gång; därefter uppdaterar en schemalagd Windows-uppgift endast Python-paketen varje måndag kl. 08:00. Frågor visas som Windows-dialoger och diagnostik sparas i loggar. Startaren kontrollerar/installerar även Tesseract OCR och frågar om autostart (standard ja).
+2. Appen startar alltid minimerad, även efter omstart vid programuppdatering. PDF-/OCR-diagnostik visas inte i något terminalfönster; detaljer finns i appens loggar. Systemfältet används om det kan visas säkert, annars aktivitetsfältet.
+
+### Uppgradera från gamla 1.0.0 / 1.1.0
+
+De versionerna letade uppdateringar i `main`-grenen i stället för i GitHub Releases, och kan därför aldrig se en release — de påstår alltid att de är uppdaterade. Kör engångsuppgraderingen en gång: den hämtar senaste releasen, kontrollerar summan och byter bara programfilerna (dina regler, inställningar och din historik rörs aldrig):
+
+```bat
+uppgradera-arkivpiloten.bat
+```
+
+```bash
+bash uppgradera-arkivpiloten.sh          # macOS / Linux
+python3 tools/install_latest.py --root . # eller kör skriptet direkt
+```
+
+Ladda ner launchern var du vill och dubbelklicka — den hittar appmappen själv (Skrivbord, Dokument, Hämtade filer, OneDrive, `%LOCALAPPDATA%\Programs`), och du kan också dra appmappen till filen. Den känner även av ändrade filhashar när versionsnumret är oförändrat. Efter det sköter appen sina uppdateringar själv via Releases, precis som beskrivits ovan. Lägg till `--dry-run` om du först vill se vad som skulle hända.
 
 ### Manuell installation
 
@@ -218,6 +281,18 @@ pythonw pdfsorter.pyw
 ```
 
 Eller starta gränssnittet direkt med `python pdfsorter.py` (utan argument öppnas det grafiska gränssnittet).
+
+## Kom igång (macOS & Linux)
+
+```bash
+./install.sh              # venv + requirements.txt, autostart på som standard
+./install.sh --no-autostart # stäng av autostart uttryckligen
+./install.sh --uninstall  # ta bort autostart + genvägar, behåll din data
+```
+
+`install.sh` installerar allt i en lokal `.venv`. Om Python saknas erbjuder skriptet installation via operativsystemets pakethanterare och frågar efter `sudo` först efter ditt ja. En befintlig Python-tolk uppdateras aldrig. Skriptet kontrollerar Tkinter och Tesseract med tips per distribution, skapar genväg på skrivbordet/i appmenyn och bygger en riktig `~/Applications/ArkivPiloten.app` på macOS. Autostarten använder LaunchAgent på macOS och XDG `autostart/*.desktop` på Linux (KDE, GNOME, XFCE, …) — båda verifieras efter skrivning och lagas vid nästa start om de går sönder.
+
+> Systemfältet på Linux kräver en StatusNotifier-värd. På GNOME behövs tillägget *AppIndicator*; utan det öppnar appen fönstret i stället för att gömma sig.
 
 > **Bra att veta:** alla Python-beroenden är valfria — appen startar ändå och talar om i statusraden vad som saknas. För bästa läskvalitet installerar du hela stacken, och tänk på att OCR dessutom kräver systemprogrammet **Tesseract**:
 >
@@ -235,6 +310,8 @@ python pdfsorter.py --watch                                    :: bevaka inmappe
 python pdfsorter.py --install-autostart                        :: starta med Windows
 python pdfsorter.py --make-shortcut                            :: skapa genväg på skrivbordet
 python pdfsorter.py --diagnostik                               :: komplett diagnostikpaket för support
+python pdfsorter.py --ai-rapport                               :: alla fel i ett block, klart att klistra in i en AI-chatt
+python pdfsorter.py --ai-rapport --djup                        :: ...men läser hela loggarna i stället för svansen
 python pdfsorter.py --version                                  :: visa version
 python pdfsorter.py --check                                    :: inbyggt självtest (importer, matchning, ikon)
 python pdfsorter.py --export-archive MAPP                       :: exportera årsarkiv (öppna mappar + HTML-index, ej zip)
@@ -250,25 +327,43 @@ Kör `python pdfsorter.py --help` för alla växlar (`--copy`, `--exclude`, `--j
 
 ```text
 ArkivPiloten/
-├── ArkivPiloten - Installera senaste Python och starta.bat   enda startfilen du behöver (Windows)
+├── ArkivPiloten - Starta tyst.vbs   konsolfri startfil för Windows
+├── ArkivPiloten - Installera senaste Python och starta.bat   dold grundinstallation (Windows)
+├── install.sh              installation för macOS & Linux (venv, genväg, autostart)
+├── tests/                  pytest-svit (autostart per OS, uppdateraren, datamapp)
+├── tools/build_release.py  bygger ArkivPiloten.zip + SHA256SUMS.txt
+├── .github/workflows/      CI (tester/lint) + automatisk release-publicering
+├── pyproject.toml          inställningar för pytest/ruff
 ├── pdfsorter.py            huvudprogram (GUI, motor, matchning)
 ├── pdfsorter.pyw           konsolfri start
 ├── pdfsorter_data.py       regler, historik, lås, atomisk skrivning
 ├── pdfsorter_read.py       textextraktion, OCR, stödordsförslag
 ├── pdfsorter_system.py     ikon, autostart, tray, loggar, kraschrapporter
 ├── pdfsorter_theme.py      ljust/mörkt/högkontrast-tema, HiDPI
-├── Stöd ArkivPiloten.html  donationssida (SV/EN, Swish-QR)
-├── swish_qr.png            Swish-QR (0721817177), verifierad
-├── ArkivPiloten.ico/.png   appikonen (används överallt)
+├── ArkivPiloten.ico/.png   appikoner (Windows + övriga system)
+├── brand/*.svg            tryckfärdig logotyp och vektorikon
 ├── desktop.ini             mappikon i Utforskaren
 └── PDFSORTER_SPEC.md       kravspecifikation (source of truth)
 ```
 
 De fem Python-filerna måste ligga i samma mapp. Saknas `pdfsorter_system.py` eller `pdfsorter_theme.py` startar appen ändå (utan tray/autostart, respektive med Tkinters gråa standardutseende) — `pdfsorter_data.py` och `pdfsorter_read.py` är obligatoriska.
 
+## Releaser & autouppdatering (underhåll)
+
+Appen uppdaterar från **senaste GitHub-releasen**, aldrig från en gren. Varje release måste därför innehålla `ArkivPiloten.zip` och `SHA256SUMS.txt`:
+
+```bash
+python tools/build_release.py --bump patch   # höjer alla fem moduler + README
+git commit -am "Release 1.4.1" && git push
+```
+
+`.github/workflows/release.yml` bygger paketet och publicerar/uppdaterar den aktuella releasen automatiskt vid push till valfri gren och varje `v*`-tagg. Release-filerna behåller appens versionsnummer; uppdateraren jämför release-commit och SHA-256 för varje fil och hittar därför även ombyggnader med samma versionsnummer.
+
+**Grenpolicy:** inga merge-commits. Arbeta på en gren och publicera med fast-forward-push eller tagg/release — aldrig `gh pr merge`.
+
 ## Integritet & säkerhet
 
-- 🔒 **Allt sker lokalt.** Sorteringen gör inga nätverksanrop och det finns ingen spårning. (Bara Windows-installeraren — Python-/pip-hämtningar — och donationsknapparna öppnar externa sidor.)
+- 🔒 **Allt sker lokalt.** Sorteringen gör inga nätverksanrop och det finns ingen spårning. (Bara en plattforms start-/installationsfil, när Python eller tillägg saknas, och donationsknapparna öppnar externa sidor.)
 - 🛡️ **Dina filer är trygga:** de skrivs aldrig över, flyttar går att ångra, och oläsliga filer lämnas exakt där de låg.
 - 💾 **Din data förblir din:** regler, inställningar och historik är vanlig JSON i appmappen — öppna dem, säkerhetskopiera dem, ta dem med dig.
 
@@ -280,9 +375,13 @@ python pdfsorter.py --status
 python pdfsorter_data.py
 python pdfsorter_read.py --check
 python pdfsorter_system.py --check
+
+# utvecklartester (Linux/macOS, inga riktiga autostartsposter rörs)
+pip install -r requirements-dev.txt
+python -m pytest
 ```
 
-Hittat en bugg? Kör `python pdfsorter.py --diagnostik` (eller *Kopiera diagnostik* i appen) och bifoga utdata när du rapporterar — den innehåller versioner, inställningar och motorstatus, inget dokumentinnehåll.
+Hittat en bugg? Kör `python pdfsorter.py --ai-rapport` (eller *Kopiera AI-rapport* i appen) och klistra in blocket i felanmälan — det listar varje fel med ett stabilt fingeravtryck, antal, kodplats och spårning, sammanslaget från minnet och loggarna. För snabb manuell felsökning samlas fel från flera körningar även i `logs/fel-samlat.log`. `--diagnostik` lägger till versioner, inställningar och motorstatus. Inget av dem innehåller dokumentinnehåll, och AI-rapporten avidentifierar användarnamn och hemkatalog.
 
 ---
 
@@ -290,33 +389,15 @@ Hittat en bugg? Kör `python pdfsorter.py --diagnostik` (eller *Kopiera diagnost
 
 ## ❤️ Stöd ArkivPiloten — Donera
 
-**Ja — donationer tas tacksamt emot!** ArkivPiloten är gratis, utan reklam och utan betalvägg, och så förblir det. Donationer är helt frivilliga och går direkt till det som märks: bättre matchning, snabbare OCR, självläkande loggar och nya funktioner. Du stödjer en liten svensk indie-utvecklare — inte ett bolag. 💙
+**Donationer är välkomna men alltid frivilliga.** ArkivPiloten förblir gratis, utan reklam och betalvägg. För att bidra, öppna **Hjälp → Stöd projektet 💖** inifrån appen. Den inbyggda vyn visar endast Swish-QR-koden för den fasta mottagaren samt PayPal-/Ko-fi-knappar. Det finns ingen separat donationssida.
 
-| Nivå | | Vad den gör |
-|---|---|---|
-| ☕ **En kaffe — 39 kr** | | Ett litet tack som ger energi till kvällskodning |
-| 📚 **Bokvän — 99 kr** *(mest vald)* | | Täcker en månads underhåll och testfiler |
-| 🌟 **Hjälte — 299 kr** | | Bär projektet en extra bit; din idé hamnar högt i kön |
-
-**Valfritt belopp går lika bra** — engångs eller månadsvis, ingen bindning:
-
-- 💙 **PayPal:** [paypal.me/Rickard3dPrint](https://paypal.me/Rickard3dPrint)
-- ☕ **Ko-fi:** [ko-fi.com/tokke2](https://ko-fi.com/tokke2) *(månadsgivande möjligt, avsluta när du vill)*
-- 📱 **Swish:** **0721817177** — skanna QR-koden nedan med Swish-appen
-
-<div align="center">
-<img src="swish_qr.png" alt="Swish-QR-kod för 0721817177" width="200">
-</div>
-
-Du kan också donera inifrån appen via **Hjälp → Stöd projektet 💖**, eller öppna donationssidan [`Stöd ArkivPiloten.html`](St%C3%B6d%20ArkivPiloten.html) som ligger i den här mappen (SV/EN-växel finns). Betalningarna går direkt via PayPal, Ko-fi eller Swish över HTTPS — varken appen eller utvecklaren ser någonsin ditt kortnummer, och kvittot kommer direkt från betaltjänsten.
-
-*Tack för att du håller ArkivPiloten gratis för alla! ✨*
+*Tack för att du hjälper till att hålla ArkivPiloten gratis för alla! ✨*
 
 ---
 
 <div align="center">
 
-**ArkivPiloten 1.1.0** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
+**ArkivPiloten 1.4.14** · © 2026 Rickard Längkvist · The app is — and will remain — free. · Appen är — och förblir — gratis.
 
 [🇬🇧 Back to English ↑](#english) · [🇸🇪 Tillbaka till Svenska ↑](#svenska) · [❤️ Donate / Donera ↑](#support)
 

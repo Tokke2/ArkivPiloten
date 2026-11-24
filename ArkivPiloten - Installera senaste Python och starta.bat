@@ -1,17 +1,19 @@
 @echo off
+if /i not "%~1"=="--hidden" (
+    wscript.exe //B //NoLogo "%~dp0ArkivPiloten - Starta tyst.vbs" "%~f0"
+    exit /b
+)
+shift
 setlocal EnableExtensions EnableDelayedExpansion
 rem ======================================================================
 rem ArkivPiloten - ENDA startfilen (utokad installationsrunda 2026-10-16).
-rem 1) Ser till att SENASTE stabila Python alltid finns installerad
-rem    (per user, kraver inget admin; uppgraderar vid behov).
-rem 2) Uppgraderar pip och installerar ALLA Python-tillagg fran
-rem    requirements.txt (PyMuPDF, pypdf, pdfminer.six, Pillow, pystray,
-rem    pytesseract) - med retry och importkontroll efterat.
-rem 3) Ser till att Tesseract OCR (systemprogram) finns med spraken
-rem    svenska + engelska for skannade PDF:er (winget, basta forsok).
-rem 4) Kor appens egen statuskontroll sa att anvandaren ser vad som hittats.
-rem 5) Startar appen utan konsol-fonster.
+rem 1) Hittar befintlig Python; fragar bara om installation om den saknas.
+rem 2) Python-versionen andras inte automatiskt.
+rem    Python-tillagg uppdateras veckovis, mandagar kl. 08:00.
+rem 3) Kontrollerar Tesseract OCR (winget, basta forsok).
+rem 4) Fragar om autostart (standard ja, kan stangas av).
 rem Fungerar fran valfri mapp/USB - allt utgar fran denna fils plats.
+rem 5) Startar appen utan konsol-fonster.
 rem Misslyckas ett tillagg startar appen anda och visar i Hjalp-menyn
 rem (Komplettera installationen) vad som saknas.
 rem ======================================================================
@@ -27,54 +29,58 @@ set "LOG=%~dp0logs\install.log"
 echo ================================================== >> "%LOG%"
 echo ArkivPiloten installation %DATE% %TIME% >> "%LOG%"
 
-echo [1/5] Ser till att senaste stabila Python finns ...
-set "PSSCRIPT=%TEMP%\arkivpiloten_python.ps1"
-(
-echo $ErrorActionPreference='Stop'
-echo function vnum($s){try{$p=$s.Split('.');[int64]([int]$p[0]*10000+[int]$p[1]*100+[int]$p[2])}catch{0}}
-echo $latest=$null
-echo try{$w=(Invoke-WebRequest -UseBasicParsing 'https://www.python.org/downloads/').Content;if($w -match 'Download Python (3\.\d+\.\d+)'){$latest=$Matches[1]}}catch{}
-echo $exe=$null
-echo try{$c=py -3 -c 'import sys;print(sys.executable)' 2^>$null;if($c){$exe=$c.Trim()}}catch{}
-echo if(-not $exe){try{$c=python -c 'import sys;print(sys.executable)' 2^>$null;if($c){$e=$c.Trim();if(Test-Path $e){$exe=$e}}}catch{}}
-echo if(-not $exe){foreach($b in @("$env:LOCALAPPDATA\Programs\Python",$env:ProgramFiles)){if(Test-Path $b){foreach($d in (Get-ChildItem $b -Directory -Filter 'Python3*' -ErrorAction SilentlyContinue^|Sort-Object Name -Descending)){if(Test-Path ($d.FullName+'\python.exe')){$exe=$d.FullName+'\python.exe';break}};if($exe){break}}}}
-echo $cur=$null
-echo if($exe){try{$cur=& $exe -c 'import sys;print(".".join(map(str,sys.version_info[:3])))' 2^>$null}catch{}}
-echo if($latest -and (-not $exe -or (vnum $cur) -lt (vnum $latest))){Write-Host ('Installerar senaste Python '+$latest+' (tyst, per user) ...');$url='https://www.python.org/ftp/python/'+$latest+'/python-'+$latest+'-amd64.exe';$t=$env:TEMP+'\python-setup.exe';try{Invoke-WebRequest -UseBasicParsing $url -OutFile $t;Start-Process -FilePath $t -ArgumentList '/quiet','InstallAllUsers=0','PrependPath=1','Include_pip=1','Include_launcher=1' -Wait;Remove-Item $t -Force}catch{Write-Host ('Installationsfel: '+$_.Exception.Message)}}
-echo if($latest){$b=$env:LOCALAPPDATA+'\Programs\Python';if(Test-Path $b){foreach($d in (Get-ChildItem $b -Directory -Filter 'Python3*' -ErrorAction SilentlyContinue^|Sort-Object Name -Descending)){if(Test-Path ($d.FullName+'\python.exe')){$n=$d.FullName+'\python.exe';if(-not $exe -or (vnum $latest) -ge (vnum $cur)){$exe=$n};break}}}}
-echo if($exe){Write-Output $exe}else{exit 1}
-) > "%PSSCRIPT%"
-
+echo [1/6] Kontrollerar att Python finns ...
+set "PSSCRIPT=%~dp0arkivpiloten_python.ps1"
 set "PYEXE="
-for /f "delims=" %%i in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%PSSCRIPT%"') do set "PYEXE=%%i"
-if "%PYEXE%"=="" (
-    echo       Provar winget for Python ...
-    winget install --id Python.Python.3.13 -e --silent --accept-package-agreements --accept-source-agreements
-    for /f "delims=" %%i in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%PSSCRIPT%"') do set "PYEXE=%%i"
+if not exist "%PSSCRIPT%" (
+    echo       Python-kontrollskript saknas: %PSSCRIPT% >> "%LOG%"
+    exit /b 1
 )
-del "%PSSCRIPT%" >nul 2>&1
+for /f "delims=" %%i in ('powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%PSSCRIPT%"') do set "PYEXE=%%i"
 if "%PYEXE%"=="" (
-    echo.
-    echo Kunde inte hitta eller installera Python.
-    echo Kontrollera natverket eller installera manuellt:
-    echo   https://www.python.org/downloads/
-    pause
+    powershell.exe -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; if ([System.Windows.Forms.MessageBox]::Show('Python saknas. Vill du installera senaste Python nu?', 'ArkivPiloten', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question) -eq [System.Windows.Forms.DialogResult]::Yes) { exit 0 } else { exit 1 }"
+    if errorlevel 1 exit /b 2
+    echo       Hamtar senaste stabila Python fran python.org ...
+    for /f "delims=" %%i in ('powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%PSSCRIPT%" -InstallIfMissing') do set "PYEXE=%%i"
+)
+if "%PYEXE%"=="" (
+    echo       Python kunde inte installeras. Se felmeddelandet ovan.
     exit /b 1
 )
 echo       Python: %PYEXE%
 echo Python: %PYEXE% >> "%LOG%"
 
-echo [2/5] Installerar ALLA Python-tillagg (kan ta en stund) ...
-"%PYEXE%" -m pip install --upgrade --disable-pip-version-check pip
-"%PYEXE%" -m pip install --upgrade --prefer-binary --disable-pip-version-check -r "%~dp0requirements.txt"
-if errorlevel 1 (
-    echo       Forsok 1 misslyckades - provar igen ...
-    "%PYEXE%" -m pip install --upgrade --prefer-binary --disable-pip-version-check -r "%~dp0requirements.txt"
+set "PKGSTATE=%~dp0cache\python-packages-state.txt"
+if not exist "%PKGSTATE%" (
+    echo [2/6] Kontrollerar Python-tillagg forsta gangen ...
+    "%PYEXE%" -c "import importlib.util as u,sys;mods=['fitz','pypdf','pdfminer','PIL','pystray','pytesseract'];sys.exit(any(u.find_spec(m) is None for m in mods))" >nul 2>&1
+    if errorlevel 1 (
+        echo       Nagra tillagg saknas - installerar dem en gang ...
+        powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%PSSCRIPT%" -BootstrapPackages -PythonExe "%PYEXE%" -RequirementsPath "%~dp0requirements.txt" -LogPath "%LOG%"
+        if errorlevel 1 echo VARNING: tillaggsinstallationen misslyckades; se logs\install.log och veckokontrollen forsoker igen. >> "%LOG%"
+    ) else (
+        echo       Tillaeggen finns redan; versionsuppdatering sker mandag kl. 08:00.
+    )
+    rem Markera engangskontrollen sa tillagg inte kontrolleras vid varje appstart.
+    > "%PKGSTATE%" echo bootstrap-attempted
+    "%PYEXE%" "%~dp0pdfsorter.py" --status >> "%LOG%" 2>&1
+) else (
+    echo [2/6] Python-tillagg uppdateras schemalagt mandagar kl. 08:00.
 )
-echo       Kontrollerar att paketen gar att importera:
-"%PYEXE%" -c "import importlib.util as u; mods=[('PyMuPDF','fitz'),('pypdf','pypdf'),('pdfminer.six','pdfminer'),('Pillow','PIL'),('pystray','pystray'),('pytesseract','pytesseract')]; [print('         OK     ' + n) if u.find_spec(m) else print('         SAKNAS ' + n + '  (appen visar hur du kompletterar)') for n,m in mods]"
 
-echo [3/5] Kontrollerar Tesseract OCR (for skannade PDF:er) ...
+echo [3/6] Schemalagger tillaggskontroll till mandagar kl. 08:00 ...
+set "SCHEDULESCRIPT=%~dp0arkivpiloten_schedule_python_updates.ps1"
+if exist "%SCHEDULESCRIPT%" (
+    powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%SCHEDULESCRIPT%"
+    if errorlevel 1 (
+        echo       VARNING: kunde inte skapa veckoschemat; se logs\python-packages-update.log.
+        echo Kunde inte skapa veckoschemat %DATE% %TIME% >> "%LOG%"
+    )
+) else (
+    echo       VARNING: schemalaggningsskriptet saknas.
+)
+
+echo [4/6] Kontrollerar Tesseract OCR (for skannade PDF:er) ...
 set "TESS="
 where tesseract >nul 2>&1 && for /f "delims=" %%i in ('where tesseract') do if not defined TESS set "TESS=%%i"
 if not defined TESS if exist "%ProgramFiles%\Tesseract-OCR\tesseract.exe" set "TESS=%ProgramFiles%\Tesseract-OCR\tesseract.exe"
@@ -90,7 +96,7 @@ if defined TESS (
     "%TESS%" --list-langs 2>nul | findstr /X /C:"swe" >nul
     if errorlevel 1 (
         echo       Svenska saknas - hamtar swe.traineddata ...
-        powershell -NoProfile -Command "try{Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/swe.traineddata' -OutFile '%ProgramFiles%\Tesseract-OCR\tessdata\swe.traineddata'}catch{exit 1}"
+        powershell.exe -NoProfile -WindowStyle Hidden -Command "try{Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/swe.traineddata' -OutFile '%ProgramFiles%\Tesseract-OCR\tessdata\swe.traineddata'}catch{exit 1}"
         if errorlevel 1 echo       Kunde inte skriva till Tesseract-mappen - svenskan kan kompletteras i appen: Hjalp, Komplettera installationen.
     ) else (
         echo       Sprak: svenska + engelska OK
@@ -102,12 +108,17 @@ if defined TESS (
     echo       eller via appen: Hjalp, Komplettera installationen.
 )
 
-echo [4/5] Kor ArkivPilotens statuskontroll ...
-"%PYEXE%" "%~dp0pdfsorter.py" --status
-
 set "PYW=%PYEXE:python.exe=pythonw.exe%"
 if not exist "%PYW%" set "PYW=%PYEXE%"
-echo [5/5] Startar ArkivPiloten ...
+echo [5/6] Autostart (standard ja) ...
+powershell.exe -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; if ([System.Windows.Forms.MessageBox]::Show('Starta ArkivPiloten automatiskt vid inloggning?', 'ArkivPiloten', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question) -eq [System.Windows.Forms.DialogResult]::Yes) { exit 0 } else { exit 1 }"
+if errorlevel 1 (
+    echo       Autostart stangs av enligt ditt val.
+    "%PYEXE%" "%~dp0pdfsorter.py" --remove-autostart >> "%LOG%" 2>&1
+) else (
+    "%PYEXE%" "%~dp0pdfsorter.py" --install-autostart >> "%LOG%" 2>&1
+)
+echo [6/6] Startar ArkivPiloten ...
 echo Startar: %PYW% pdfsorter.pyw >> "%LOG%"
 start "" "%PYW%" "%~dp0pdfsorter.pyw"
 exit /b 0

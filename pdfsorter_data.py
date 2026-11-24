@@ -51,7 +51,7 @@ except ImportError:                                  # pragma: no cover
 SCHEMA_VERSION = 1
 
 #: Programmets version. Höjs vid varje leverans.
-VERSION = "1.1.0"
+VERSION = "1.4.14"
 
 
 # ==========================================================================
@@ -134,7 +134,8 @@ except Exception:                                   # pragma: no cover
 
 #: Cache: config_dir() anropas i princip vid varje filoperation; att
 #: göra om beräkningen + mkdir varje gång är onödigt (snabbhet).
-_CONFIG_DIR_CACHE: Dict[str, Path] = {}
+#: Nyckel = (PDFSORTER_HOME, appmapp), värde = (sökväg, läge).
+_CONFIG_DIR_CACHE: Dict[Tuple[str, str], Tuple[Path, str]] = {}
 
 
 def _app_dir() -> Path:
@@ -165,30 +166,45 @@ def _os_config_dir() -> Path:
 
 
 def config_dir() -> Path:
-    """VAR allt rörande appen sparas - 100 % PORTABELT
-    (ANVÄNDARORDER 2026-10-05: "ska funka överallt, även på usb").
+    """VAR allt rörande appen sparas.
 
-    Ordning: 1) PDFSORTER_HOME om användaren uttryckligen satt den.
-    2) ALLTID APPMAPPEN (användarorder 2026-10-16: "allt som skapas ska
-    hamna i undermappar av appmappen, inget sparas utanför"). Regler,
-    inställningar, historik, loggar m.m. följer med pdfsorter.py vart
-    den än ligger (USB, nätverksdisk, valfri mapp). Ingen tyst fallback
-    till %APPDATA%/hemkatalogen längre - är appmappen skrivskyddad är
-    det bättre att lagringen synligt misslyckas än att data hamnar på
-    ett ställe användaren aldrig hittar. Gamla OS-platsen läses bara
-    en gång som migrationskälla (se migrate_to_portable).
+    Ordning:
+      1) PDFSORTER_HOME om användaren uttryckligen satt den.
+      2) Appmappen när den är skrivbar - portabelt, följer med på USB
+         och nätverksdisk (användarorder 2026-10-05/2026-10-16).
+      3) Användarens data-mapp när appmappen är skrivskyddad
+         (/Applications, /opt, paketerad .app eller en låst USB-sticka).
+
+    Punkt 3 tillkom 2026-10-20 för multi-OS: en app som installeras
+    systembrett måste kunna spara regler, loggar och inställningar utan
+    att kräva skrivrättighet i programmappen. Så länge appmappen går att
+    skriva i ändras ingenting - portabelt beteende är fortfarande
+    standard. Gamla OS-platsen läses dessutom som migrationskälla
+    (se migrate_to_portable).
     """
     env = os.environ.get("PDFSORTER_HOME", "")
-    p = _CONFIG_DIR_CACHE.get(env)
-    if p is not None:
-        return p
+    app = _app_dir()
+    nyckel = (env, str(app))
+    hit = _CONFIG_DIR_CACHE.get(nyckel)
+    if hit is not None:
+        return hit[0]
     if env:
-        p = Path(env).expanduser()
+        p, läge = Path(env).expanduser(), "override"
+    elif _skrivbar(app):
+        p, läge = app, "portable"
     else:
-        p = _app_dir()
+        p, läge = _os_config_dir(), "user"
     p.mkdir(parents=True, exist_ok=True)
-    _CONFIG_DIR_CACHE[env] = p
+    _CONFIG_DIR_CACHE[nyckel] = (p, läge)
     return p
+
+
+def config_dir_mode() -> str:
+    """'override' | 'portable' | 'user' - visas i status/diagnostik."""
+    config_dir()
+    env = os.environ.get("PDFSORTER_HOME", "")
+    hit = _CONFIG_DIR_CACHE.get((env, str(_app_dir())))
+    return hit[1] if hit else "portable"
 
 
 _PORTABEL_MIGRERAD = False
@@ -200,7 +216,8 @@ _JSON_FLYTTAD = False
 
 DATA_FILER = ("settings.json", "rules.json", "history.json",
               "history.journal", "ignored_files.json",
-              "learned_model.json", "arkivpiloten.lock", "visa-fonstret")
+              "learned_model.json", "invoice_index.json",
+              "arkivpiloten.lock", "visa-fonstret")
 
 
 def json_dir() -> Path:
@@ -241,7 +258,7 @@ def migrate_to_portable() -> List[str]:
     if ny == gammal or not gammal.is_dir():
         return []
     kopierade = []
-    for namn in DATA_FILER[:6]:
+    for namn in DATA_FILER[:7]:
         src_f = gammal / namn
         # gamla OS-layouten hade json i roten; nya layouten i json/
         dst_f = json_dir() / namn
@@ -281,64 +298,55 @@ def lock_path() -> Path:
 # skriver tillbaka hela filen när något ändras - den som sparar sist vinner,
 # och den andres kategorier försvinner utan felmeddelande.
 #
-# Låset är en fil med PID och starttid. Att bara kolla om filen finns räcker
-# inte: efter en krasch ligger den kvar och skulle låsa ute användaren för
-# alltid. Därför kontrolleras att processen faktiskt lever.
+# OS-låset är den auktoritativa kontrollen. PID-filen används bara för
+# diagnostik och för att känna igen en process från äldre versioner, som
+# ännu bara använde PID-fil och därför inte kände till OS-mutexen.
 
 def _process_lever(pid: int) -> bool:
-    """Kör processen med det här PID:et fortfarande?
-
-    Ett återanvänt PID kan ge falskt positivt, men konsekvensen är bara att
-    appen ber användaren stänga det andra fönstret - inte dataförlust.
-    """
+    """Kontrollera legacy-ägarens PID vid övergång från äldre versioner."""
     if pid <= 0:
         return False
     if sys.platform.startswith("win"):
         try:
             import ctypes
-            PROCESS_QUERY_LIMITED = 0x1000
-            h = ctypes.windll.kernel32.OpenProcess(
-                PROCESS_QUERY_LIMITED, False, pid)
-            if not h:
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
                 return False
-            kod = ctypes.c_ulong()
-            ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(kod))
-            ctypes.windll.kernel32.CloseHandle(h)
-            return kod.value == 259          # STILL_ACTIVE
+            code = ctypes.c_ulong()
+            ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return code.value == 259
         except Exception:
             return False
     try:
-        os.kill(pid, 0)                      # signal 0 = finns processen?
+        os.kill(pid, 0)
         return True
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True                          # finns, men ägs av någon annan
+        return True
     except OSError:
         return False
 
 
 class InstanceLock:
-    """Ser till att bara en ArkivPiloten kör mot samma konfiguration.
+    """OS-lås som garanterar en enda GUI-instans per datamapp.
 
-    Används som kontexthanterare eller manuellt:
-
-        lås = InstanceLock()
-        if not lås.acquire():
-            print(f"Kör redan (PID {lås.other_pid})")
-        ...
-        lås.release()
-
-    Låsfilen tas bort vid avslut. Ligger den kvar efter en krasch upptäcks
-    det genom att processen inte längre finns, och låset övertas.
+    En PID-fil räcker inte: två nästan samtidiga starter kan båda läsa en
+    tom fil och båda tro att de vann. Windows använder därför en namngiven
+    mutex; macOS/Linux använder ett icke-blockerande flock-lås. OS:et släpper
+    låset automatiskt även om processen kraschar. PID-filen behålls bara som
+    diagnostisk information och tas inte bort vid avslut.
     """
 
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else lock_path()
         self.acquired = False
-        #: PID för den instans som redan håller låset, när acquire() nekar
         self.other_pid: int = 0
         self.other_started: str = ""
+        self.lock_error = ""
+        self._fh = None
+        self._win_mutex = None
 
     def _read(self) -> Dict[str, Any]:
         try:
@@ -349,49 +357,157 @@ class InstanceLock:
                 UnicodeDecodeError):
             return {}
 
+    @staticmethod
+    def _read_handle(fh) -> Dict[str, Any]:
+        try:
+            fh.seek(0)
+            data = json.loads(fh.read().decode("utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+
+    def _remember_owner(self, data: Dict[str, Any]) -> None:
+        try:
+            self.other_pid = int(data.get("pid", 0) or 0)
+        except (TypeError, ValueError):
+            self.other_pid = 0
+        self.other_started = str(data.get("started", ""))
+
+    def _write_owner(self) -> None:
+        """Write diagnostics through the locked file, without replacing its inode."""
+        if self._fh is None:
+            return
+        data = json.dumps({
+            "lock_protocol": 2,
+            "pid": os.getpid(),
+            "started": now_iso(),
+            "host": _värdnamn(),
+        }, ensure_ascii=False, indent=2).encode("utf-8")
+        try:
+            self._fh.seek(0)
+            self._fh.truncate()
+            self._fh.write(data)
+            self._fh.flush()
+            os.fsync(self._fh.fileno())
+        except OSError as exc:
+            # OS-låset är redan vårt; metadata är bara diagnostik.
+            self.lock_error = f"Låset säkrat men PID-informationen kunde inte sparas: {exc}"
+
+    def _acquire_windows_mutex(self) -> bool:
+        import ctypes
+        import hashlib
+        from ctypes import wintypes
+
+        path_key = os.path.normcase(str(self.path.resolve())).casefold()
+        digest = hashlib.sha256(path_key.encode("utf-8", errors="replace"))\
+            .hexdigest()[:24]
+        name = "Local\\ArkivPiloten-" + digest
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel32.CreateMutexW
+        create.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
+        create.restype = wintypes.HANDLE
+        ctypes.set_last_error(0)
+        handle = create(None, True, name)
+        error = ctypes.get_last_error()
+        if not handle:
+            raise ctypes.WinError(error)
+        if error == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            kernel32.CloseHandle(handle)
+            self._remember_owner(self._read_handle(self._fh))
+            return False
+        self._win_mutex = (kernel32, handle, wintypes.HANDLE)
+        return True
+
     def acquire(self) -> bool:
-        """Ta låset. False om en annan levande instans redan har det."""
+        """Returnera False om en annan process äger OS-låset eller låsning misslyckas."""
         if self.acquired:
             return True
-        gammal = self._read()
-        pid = int(gammal.get("pid", 0) or 0)
-        if pid and pid != os.getpid() and _process_lever(pid):
-            self.other_pid = pid
-            self.other_started = str(gammal.get("started", ""))
+        self.lock_error = ""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            self._fh = os.fdopen(fd, "r+b")
+            legacy = self._read_handle(self._fh)
+            try:
+                legacy_pid = int(legacy.get("pid", 0) or 0)
+            except (TypeError, ValueError):
+                legacy_pid = 0
+            if (not legacy.get("lock_protocol") and legacy_pid
+                    and legacy_pid != os.getpid()
+                    and _process_lever(legacy_pid)):
+                self._remember_owner(legacy)
+                self._fh.close()
+                self._fh = None
+                return False
+        except OSError as exc:
+            self.lock_error = str(exc)
+            self._fh = None
             return False
 
-        # Ingen levande ägare - skriv vårt eget lås. Två processer kan
-        # nå hit samtidigt (autostart + dubbelklick samma sekund); den som
-        # skriver sist vinner filen. Därför bekräftas efteråt att det är
-        # VÅRT pid som står i låset - annars vann den andra och vi ger oss.
         try:
-            _write_json(self.path, {
-                "pid": os.getpid(),
-                "started": now_iso(),
-                "host": _värdnamn(),
-            })
-        except OSError:
-            # Går låset inte att skriva ska appen ändå starta - ett lås som
-            # inte kan skapas är ett mindre problem än en app som vägrar gå.
-            self.acquired = True
-            return True
-        vann = self._read()
-        vinnar_pid = int(vann.get("pid", 0) or 0)
-        if vinnar_pid and vinnar_pid != os.getpid():
-            self.other_pid = vinnar_pid
-            self.other_started = str(vann.get("started", ""))
+            if sys.platform.startswith("win"):
+                won = self._acquire_windows_mutex()
+            else:
+                import fcntl
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                won = True
+        except (ImportError, OSError) as exc:
+            self._remember_owner(self._read_handle(self._fh))
+            if isinstance(exc, OSError):
+                import errno
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    self.lock_error = str(exc)
+            else:
+                self.lock_error = str(exc)
+            self._fh.close()
+            self._fh = None
+            return False
+        except Exception as exc:
+            self.lock_error = str(exc)
+            try:
+                self._fh.close()
+            except Exception:
+                pass
+            self._fh = None
+            return False
+
+        if not won:
+            self._fh.close()
+            self._fh = None
             return False
         self.acquired = True
+        self._write_owner()
         return True
 
     def release(self) -> None:
-        """Släpp låset, men bara om det fortfarande är vårt."""
+        """Släpp OS-låset. Metadatafilen lämnas kvar för nästa start."""
         if not self.acquired:
             return
         self.acquired = False
-        if self._read().get("pid") == os.getpid():
+        if self._win_mutex is not None:
+            kernel32, handle, handle_type = self._win_mutex
+            self._win_mutex = None
             try:
-                self.path.unlink()
+                kernel32.ReleaseMutex.argtypes = (handle_type,)
+                kernel32.ReleaseMutex(handle)
+            except Exception:
+                pass
+            try:
+                kernel32.CloseHandle.argtypes = (handle_type,)
+                kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+        fh, self._fh = self._fh, None
+        if fh is not None:
+            if not sys.platform.startswith("win"):
+                try:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except (ImportError, OSError):
+                    pass
+            try:
+                fh.close()
             except OSError:
                 pass
 
@@ -531,12 +647,25 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "subfolders_enabled_v2": False,   # engångsmigrering: se load_settings
     "extensions_offer_hidden": False, # "visa inte igen" i tilläggsdialogen
     "tesseract_path": "",        # manuell sökväg till tesseract.exe
-    "learned_matching": True,    # N14: lärande klassificerare (kan stängas av)
-    "swish_number": "0721817177",  # Swish-nummer för donations-QR (N15)
-    "check_updates": True,       # 2026-10-16: sök Git-uppdatering vid start + 2x/dygn tyst (2026-10-19)
-    "auto_update": False,        # 2026-10-16: installera utan att fråga först
-    "last_update_check": "",     # 2026-10-19: ISO-tid för senaste tysta autosök (2 ggr/dygn)
-    "silent_restart": True,      # 2026-10-19: tyst omstart efter lyckad auto-uppdatering
+    "learned_matching": True,    # bakåtkompatibilitet; fast alltid aktivt
+    "learned_confirmed_only_v1": False,  # modell ombyggd från bekräftade val
+    "check_updates": True,       # 2026-10-16: sök Git-uppdatering vid start
+    # 2026-10-20: autouppdatering på som standard. Nya versioner hämtas
+    # från GitHub Releases, verifieras mot release-postens SHA256SUMS.txt
+    # och installeras med backup + rollback. Saknas kontrollsumman frågar
+    # appen i stället för att installera tyst.
+    "auto_update": True,
+    # 2026-10-26: versionsvakten söker tyst två gånger per dygn i stället
+    # för vid varje start (en app som startas ofta frågade GitHub lika ofta).
+    "update_checks_per_day": 2,
+    "last_update_check": "",      # ISO-tid för senaste sökningen
+    "last_update_check_ok": True,  # falskt -> kortare omförsök (nätet svek)
+    "last_update_seen": "",       # senaste versionen GitHub svarade
+    "silent_restart": True,       # starta om tyst när en version installerats
+    "pending_review_paths": [],   # återställ granskningskö efter updater-omstart
+    "cache_cleanup_enabled": True, # smart diskcache-rensning dagligen + vid avslut
+    "low_memory_mode": False,      # begränsa parallell PDF-läsning till 2 filer
+    "last_cache_cleanup": "",     # ISO-tid för senaste smarta rensningen
     "ui_language": "sv",           # 1.1.0: gränssnittsspråk sv | en
     "tag_pdf_metadata": True,      # 1.1.0: skriv kategori som PDF-metadata
     "orgnr_lookup": False,         # 1.1.0: slå upp okända avsändare via nätet
@@ -567,15 +696,23 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "max_pages_text": 0,      # 0 = alla sidor
     "watch_interval": 5.0,
     "stable_seconds": 3.0,
-    "keywords_per_file": 15,     # 2026-10-15: fler matchningsord att välja på
+    "keywords_per_file": 25,     # visa fler valbara ord ur varje PDF
+    "keyword_suggestions_migrated_v1": False,  # intern engångsmigrering till 25
     "dry_run": False,
     # -- nytt --
     "theme": "ljus",             # ljus | mork - växlas live i Inställningar
-    "autostart": False,          # starta med operativsystemet
-    "start_minimized": False,    # göm fönstret direkt, ligg i systemfältet
+    "autostart": True,           # starta med operativsystemet
+    "start_minimized": True,     # fast beteende: starta alltid minimerad
+    "autostart_minimized_migrated_v1": False,  # intern engångsmigrering
+    "manual_start_visible_migrated_v1": False,  # intern engångsmigrering
+    "start_minimized_default_migrated_v2": False,  # standard: minimerad start
     "tray_enabled": True,        # visa ikon i systemfältet
-    "close_to_tray": True,       # krysset minimerar i stället för att avsluta
-    "autowatch_on_start": False, # slå på bevakning direkt vid start
+    "close_to_tray": True,       # krysset gömmer appen i systemfältet
+    "minimize_to_tray": True,    # minimering gömmer också appen i systemfältet
+    "tray_minimize_migrated_v1": False,  # intern engångsmigrering av äldre val
+    "autowatch_on_start": False, # slå på bevakning av inmappar direkt vid start
+    "archive_watch_enabled": True,  # hitta självmant PDF:er i fel arkivmapp
+    "archive_watch_interval": 30.0, # full kontroll av arkivträdet var 30:e sekund
     "notify": True,              # popup-notis när filer sorterats
     "rescan_after_learn": True,  # skanna om allt när ett nytt stödord lärts in
     # -- datum och undermappar --
@@ -585,11 +722,82 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "date_prefer_label": True,   # låt "Fakturadatum:" styra
     # -- rapport --
     "report_days": 10,           # hur många dagar matchningsrapporten täcker
+    # -- fellogg --
+    # 2026-11-23: felkoder som inte återkommit på så här många dagar
+    # åtgärdas och rensas automatiskt. 0 = av (helt manuellt).
+    "error_autofix_days": 7,
     # -- framskjutet --
-    "preview_in_dialog": False,  # PDF-förhandsvisning i granskningsrutan
-                                 # (REQ-N7, FRAMSKJUTEN tills beställaren säger till)
+    "preview_in_dialog": True,   # sidförhandsvisning med rotationsverktyg i granskningen
+    "review_auto_advance": True,  # fortsätt till nästa granskning efter bekräftat val
+    "review_preview_migrated_v1": False,
+    "ui_text_size": "normal",   # normal | large
     "contrast": "normal",        # normal | high (högkontrast, tema rond 3)
+    "kw_column_order": [],       # tom = standardordning på stödordstabellen
+    "kw_hide_linked": False,     # dölj redan mappkopplade stödord i listan
 }
+
+
+def migrate_review_preview_setting(settings: Dict[str, Any]) -> bool:
+    """Enable the newly interactive PDF review preview once for old installs."""
+    if settings.get("review_preview_migrated_v1", False):
+        return False
+    settings["preview_in_dialog"] = True
+    settings["review_preview_migrated_v1"] = True
+    return True
+
+
+def _migrate_tray_behavior(settings: Dict[str, Any]) -> bool:
+    """Engångsvis: stäng och minimera till systemfältet enligt användarönskemål."""
+    if settings.get("tray_minimize_migrated_v1", False):
+        return False
+    settings["tray_enabled"] = True
+    settings["close_to_tray"] = True
+    settings["minimize_to_tray"] = True
+    settings["tray_minimize_migrated_v1"] = True
+    return True
+
+
+def _migrate_autostart_minimized(settings: Dict[str, Any]) -> bool:
+    """Engångsvis: autostart på och OS-start till systemfältet."""
+    if settings.get("autostart_minimized_migrated_v1", False):
+        return False
+    settings["tray_enabled"] = True
+    settings["autostart"] = True
+    settings["start_minimized"] = True
+    settings["autostart_minimized_migrated_v1"] = True
+    return True
+
+
+def _migrate_manual_start_visible(settings: Dict[str, Any]) -> bool:
+    """Äldre övergång: manuella starter visades, OS-autostart var dold."""
+    if settings.get("manual_start_visible_migrated_v1", False):
+        return False
+    settings["start_minimized"] = False
+    settings["manual_start_visible_migrated_v1"] = True
+    return True
+
+
+def _migrate_start_minimized_default(settings: Dict[str, Any]) -> bool:
+    """Slå på minimerad start som nytt standardval, en gång per installation."""
+    if settings.get("start_minimized_default_migrated_v2", False):
+        return False
+    settings["start_minimized"] = True
+    settings["start_minimized_default_migrated_v2"] = True
+    return True
+
+
+def _migrate_keyword_suggestions(settings: Dict[str, Any]) -> bool:
+    """Öka äldre standardvärdet från 15 till 25 förslag, utan att sänka egna högre val."""
+    if settings.get("keyword_suggestions_migrated_v1", False):
+        return False
+    try:
+        current = int(settings.get("keywords_per_file", 15) or 0)
+    except (TypeError, ValueError):
+        current = 15
+    if current <= 15:
+        settings["keywords_per_file"] = 25
+    settings["keyword_suggestions_migrated_v1"] = True
+    return True
 
 
 def load_settings() -> Dict[str, Any]:
@@ -600,6 +808,41 @@ def load_settings() -> Dict[str, Any]:
         for k, v in data.items():
             if k in s:
                 s[k] = v
+    # Självlärning är fast på; äldre exporter med false ignoreras.
+    s["learned_matching"] = True
+    if isinstance(data, dict) and data.get("learned_matching") is not True:
+        try:
+            save_settings(s)
+        except Exception:
+            pass
+    if _migrate_tray_behavior(s):
+        try:
+            save_settings(s)
+        except Exception:
+            pass
+    if _migrate_autostart_minimized(s):
+        try:
+            save_settings(s)
+        except Exception:
+            pass
+    if _migrate_manual_start_visible(s):
+        try:
+            save_settings(s)
+        except Exception:
+            pass
+    if _migrate_start_minimized_default(s):
+        try:
+            save_settings(s)
+        except Exception:
+            pass
+    # Startminimering är inte längre en valbar inställning. Ignorera äldre
+    # sparade false-värden och skriv tillbaka det fasta beteendet.
+    if s.get("start_minimized") is not True:
+        s["start_minimized"] = True
+        try:
+            save_settings(s)
+        except Exception:
+            pass
     # Engångsmigrering (ANVÄNDARORDER 2026-09-28: "ska även skanna
     # undermapparna i vald mapp"): gamla installationer har recursive=false
     # sparad som standardvärde. Slå på undermappar en gång, och logga-
@@ -611,6 +854,11 @@ def load_settings() -> Dict[str, Any]:
         if int(s.get("keywords_per_file", 10) or 0) <= 10:
             s["keywords_per_file"] = 15
         s["read_upgrade_2026_10"] = True
+        try:
+            save_settings(s)
+        except Exception:
+            pass
+    if _migrate_keyword_suggestions(s):
         try:
             save_settings(s)
         except Exception:
@@ -640,6 +888,8 @@ def load_settings() -> Dict[str, Any]:
 def save_settings(settings: Dict[str, Any]) -> None:
     clean = dict(DEFAULT_SETTINGS)
     clean.update({k: v for k, v in settings.items() if k in DEFAULT_SETTINGS})
+    clean["learned_matching"] = True
+    clean["start_minimized"] = True
     clean["schema_version"] = SCHEMA_VERSION
     with _io_lock():
         _write_json(settings_path(), clean)
@@ -668,21 +918,50 @@ class Rules:
                 if not text or text in seen:
                     continue
                 seen.add(text)
-                keywords.append({
+                post = {
                     "text": text,
                     "weight": float(kw.get("weight", 1.0) or 1.0),
                     "whole_word": bool(kw.get("whole_word", True)),
                     "hits": int(kw.get("hits", 0) or 0),
                     "added": kw.get("added", now_iso()),
                     "source": kw.get("source", "user"),
-                })
+                }
+                # Negativ inlärning: ett stödord som lett fel sparas med
+                # antal avvisanden och när det senast hände. Fälten skrivs
+                # bara när de används, så gamla rules.json är oförändrade.
+                if int(kw.get("rejected", 0) or 0):
+                    post["rejected"] = int(kw.get("rejected", 0) or 0)
+                    post["rejected_at"] = str(kw.get("rejected_at", "") or "")
+                keywords.append(post)
+            raw_templates = cat.get("subfolder_templates", [])
+            templates = ([dict(template) for template in raw_templates
+                          if isinstance(template, dict)]
+                         if isinstance(raw_templates, list) else [])
+            keyword_texts = {kw["text"] for kw in keywords}
+            default_keyword = normalize(cat.get("default_keyword", ""))
+            if default_keyword not in keyword_texts:
+                default_keyword = ""
+            raw_subfolder_map = cat.get("subfolder_keyword_map", {})
+            subfolder_keyword_map = {}
+            if isinstance(raw_subfolder_map, dict):
+                for word, folder in raw_subfolder_map.items():
+                    word = normalize(word)
+                    folder = str(folder or "").strip()
+                    if word in keyword_texts and folder:
+                        subfolder_keyword_map[word] = folder
             name = str(cat["name"]).strip()
             self.categories.append({
                 "name": name,
                 "folder": safe_folder_name(cat.get("folder") or name),
                 "keywords": keywords,
+                "default_keyword": default_keyword,
+                "subfolder_keyword_map": subfolder_keyword_map,
                 "enabled": bool(cat.get("enabled", True)),
                 "subfolder": str(cat.get("subfolder", "") or ""),
+                "subfolder_path": str(cat.get("subfolder_path", "") or ""),
+                "subfolder_templates": templates,
+                "subfolder_templates_enabled": bool(
+                    cat.get("subfolder_templates_enabled", True)),
                 # 0 = använd strikthetsnivåns värde. Sätts den till t.ex. 3
                 # krävs tre olika stödord just för den här kategorin.
                 "min_keywords": max(0, int(cat.get("min_keywords", 0) or 0)),
@@ -706,6 +985,16 @@ class Rules:
 
     def save(self) -> None:
         self._rebuild_index()   # täcker även externa .categories-tilldelningar
+        for cat in self.categories:
+            words = {kw["text"] for kw in cat.get("keywords", [])}
+            default = normalize(cat.get("default_keyword", ""))
+            cat["default_keyword"] = default if default in words else ""
+            mapping = cat.get("subfolder_keyword_map", {})
+            cat["subfolder_keyword_map"] = {
+                normalize(word): str(folder).strip()
+                for word, folder in mapping.items()
+                if normalize(word) in words and str(folder or "").strip()
+            } if isinstance(mapping, dict) else {}
         with _io_lock():
             _write_json(self.path, {
                 "schema_version": SCHEMA_VERSION,
@@ -752,8 +1041,13 @@ class Rules:
             "name": name.strip(),
             "folder": safe_folder_name(folder or name),
             "keywords": [],
+            "default_keyword": "",
+            "subfolder_keyword_map": {},
             "enabled": True,
             "subfolder": "",
+            "subfolder_path": "",
+            "subfolder_templates": [],
+            "subfolder_templates_enabled": True,
             "min_keywords": 0,
             "created": now_iso(),
             "files_sorted": 0,
@@ -782,6 +1076,89 @@ class Rules:
             })
         self._rebuild_index()
         return cat
+
+    def merge_transfer_categories(
+            self, cats: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Slå ihop importerade kategorier med de befintliga.
+
+        Lokalt inlärda data vinner vid krock: befintliga stödord behålls
+        orörda (vikt, träffar), medan nya ord får med sig vikt,
+        helordsflagg och källa från filen men nollställda träffar - de har
+        aldrig matchat på den här datorn. Tomma lokala fält (standardord,
+        undermappar, mallar) fylls på från filen. Lokala mappnamn byts
+        aldrig ut av en import. Returnerar räknare för sammanfattningen.
+        """
+        counts = {"new_categories": 0, "new_keywords": 0,
+                  "updated_categories": 0}
+        for incoming in cats or []:
+            if not isinstance(incoming, dict):
+                continue
+            name = str(incoming.get("name", "")).strip()
+            if not name:
+                continue
+            target = self.get(name)
+            if target is None:
+                target = self.ensure_category(name, incoming.get("folder"))
+                counts["new_categories"] += 1
+            else:
+                counts["updated_categories"] += 1
+            existing = {kw["text"] for kw in target["keywords"]}
+            for kw in incoming.get("keywords", []):
+                if not isinstance(kw, dict):
+                    continue
+                text = normalize(kw.get("text", ""))
+                if not text or text in existing:
+                    continue
+                existing.add(text)
+                target["keywords"].append({
+                    "text": text,
+                    "weight": float(kw.get("weight", 1.0) or 1.0),
+                    "whole_word": bool(kw.get("whole_word", True)),
+                    "hits": 0,
+                    "added": now_iso(),
+                    "source": str(kw.get("source", "import") or "import"),
+                })
+                counts["new_keywords"] += 1
+            words = {kw["text"] for kw in target["keywords"]}
+            if not target.get("default_keyword"):
+                default = normalize(incoming.get("default_keyword", ""))
+                if default in words:
+                    target["default_keyword"] = default
+            mapping = target.get("subfolder_keyword_map")
+            if not isinstance(mapping, dict):
+                mapping = {}
+                target["subfolder_keyword_map"] = mapping
+            raw_map = incoming.get("subfolder_keyword_map", {})
+            if isinstance(raw_map, dict):
+                for word, folder in raw_map.items():
+                    word = normalize(word)
+                    folder = str(folder or "").strip()
+                    if word in words and folder and word not in mapping:
+                        mapping[word] = folder
+            for key in ("subfolder", "subfolder_path"):
+                if not str(target.get(key, "") or "").strip():
+                    value = str(incoming.get(key, "") or "").strip()
+                    if value:
+                        target[key] = value
+            templates = target.get("subfolder_templates")
+            if not isinstance(templates, list):
+                templates = []
+                target["subfolder_templates"] = templates
+            raw_templates = incoming.get("subfolder_templates", [])
+            if isinstance(raw_templates, list):
+                for template in raw_templates:
+                    if (isinstance(template, dict)
+                            and template not in templates):
+                        templates.append(dict(template))
+            if not target.get("min_keywords"):
+                try:
+                    minimum = int(incoming.get("min_keywords", 0) or 0)
+                except (TypeError, ValueError):
+                    minimum = 0
+                if minimum > 0:
+                    target["min_keywords"] = minimum
+        self._rebuild_index()
+        return counts
 
     def remove_keyword(self, name: str, word: str) -> bool:
         cat = self.get(name)
@@ -829,6 +1206,23 @@ class Rules:
         for kw in cat["keywords"]:
             if kw["text"] in hits:
                 kw["hits"] = int(kw.get("hits", 0)) + 1
+
+    def register_reject(self, name: str, matched: List[str]) -> None:
+        """Ett stödord ledde fel: filen hamnade hos `name` men rättades.
+
+        Räknaren gör att ordet väger mindre nästa gång (se _reject_factor
+        i pdfsorter.py). Ett ord som aldrig mer används rätt tystnar helt,
+        men en enstaka felsortering sänker det bara mjukt.
+        """
+        cat = self.get(name)
+        if not cat:
+            return
+        stamp = now_iso()
+        hits = {normalize(w) for w in matched}
+        for kw in cat["keywords"]:
+            if kw["text"] in hits:
+                kw["rejected"] = int(kw.get("rejected", 0)) + 1
+                kw["rejected_at"] = stamp
 
 
 MAX_HISTORY = 2000
@@ -1465,6 +1859,40 @@ def unique_target(target: Path) -> Path:
     return parent / f"{stem} ({int(time.time())}){suffix}"
 
 
+def is_file_locked(path: Path) -> bool:
+    """Testa om en fil har ett exklusivt handtag på Windows.
+
+    På POSIX-system är öppna filer normalt flyttbara och lås är rådgivande,
+    så där avgör det faktiska filsystemsanropet. Windows ger däremot
+    sharing/lock-violation när ett annat program håller filen låst.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        handle = create_file(str(Path(path)), 0x80000000, 0, None, 3, 0x80, None)
+        invalid = ctypes.c_void_p(-1).value
+        if handle == invalid:
+            return ctypes.get_last_error() in (32, 33)  # sharing/lock violation
+        close_handle(handle)
+    except Exception:
+        return False
+    return False
+
+
 def place_file(src: Path, out_root: Path, folder: str, action: str = "move",
                on_conflict: str = "rename", dry_run: bool = False,
                subfolder: str = "") -> Tuple[bool, str, Optional[Path]]:
@@ -1482,6 +1910,11 @@ def place_file(src: Path, out_root: Path, folder: str, action: str = "move",
     target = dest_dir / src.name
 
     if target.exists():
+        try:
+            if target.resolve() == src.resolve():
+                return True, "Filen ligger redan i den valda mappen", target
+        except OSError:
+            pass
         if on_conflict == "skip":
             return False, "Finns redan i målmappen - hoppade över", None
         if on_conflict == "rename":
@@ -1640,50 +2073,42 @@ def _check() -> int:
             print(f"  FEL torrkorning: {msg}")
             fel += 1
 
-        # -- enkelinstanslås --
+        # -- OS-baserat enkelinstanslås --
         lås1 = InstanceLock(rot / "test.lock")
         if not lås1.acquire():
-            print("  FEL forsta acquire nekades")
+            print("  FEL första acquire nekades")
             fel += 1
         if not lås1.acquire():
-            print("  FEL samma process ska fa laset igen")
+            print("  FEL ägaren kunde inte återbekräfta sitt lås")
             fel += 1
+        lås2 = InstanceLock(rot / "test.lock")
+        if lås2.acquire():
+            print("  FEL två instanser fick samma OS-lås")
+            lås2.release()
+            fel += 1
+        if lås2.other_pid != os.getpid():
+            print(f"  FEL other_pid {lås2.other_pid}")
+            fel += 1
+        lås1.release()
 
-        # en levande process ska blockera
-        import subprocess
-        p_annan = subprocess.Popen([sys.executable, "-c",
-                                    "import time; time.sleep(20)"])
-        try:
-            _write_json(rot / "test.lock", {"pid": p_annan.pid,
-                                            "started": "", "host": ""})
-            lås2 = InstanceLock(rot / "test.lock")
-            if lås2.acquire():
-                print("  FEL laset togs trots levande agare")
-                fel += 1
-            if lås2.other_pid != p_annan.pid:
-                print(f"  FEL other_pid {lås2.other_pid}")
-                fel += 1
-        finally:
-            p_annan.terminate()
-            p_annan.wait()
-
-        # död process = övergivet lås, ska kunna övertas
-        _write_json(rot / "test.lock", {"pid": p_annan.pid,
+        # OS-låset släpptes; kvarvarande PID-information är bara diagnostik.
+        # Den ska aldrig blockera en ny start, inte ens om den ser levande ut.
+        _write_json(rot / "test.lock", {"pid": os.getpid(),
                                         "started": "", "host": ""})
         lås3 = InstanceLock(rot / "test.lock")
         if not lås3.acquire():
-            print("  FEL overgivet las overtogs inte")
+            print("  FEL frigjort OS-lås kunde inte återtas")
             fel += 1
         lås3.release()
-        if (rot / "test.lock").exists():
-            print("  FEL lasfilen togs inte bort vid release")
+        if not (rot / "test.lock").exists():
+            print("  FEL diagnostisk låsfil ska finnas kvar")
             fel += 1
 
-        # trasig låsfil ska inte hindra start
+        # Trasig PID-information får inte hindra OS-låsets övertagande.
         (rot / "test.lock").write_text("{ trasig", encoding="utf-8")
         lås4 = InstanceLock(rot / "test.lock")
         if not lås4.acquire():
-            print("  FEL trasig lasfil blockerade start")
+            print("  FEL trasig låsfil blockerade start")
             fel += 1
         lås4.release()
 

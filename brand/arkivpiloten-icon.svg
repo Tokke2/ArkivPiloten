@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+<title id="title">ArkivPiloten appikon</title><desc id="desc">En marinblå arkivmapp med kompass, bärnstensfärgad nål och turkos väg.</desc>
+<defs><g id="arkivpiloten-mark" stroke-linecap="round" stroke-linejoin="round">
+  <!-- rear file tabs -->
+  <path fill="#078287" d="M103 133V89c0-16 13-29 29-29h90l33 34h123c17 0 30 13 30 30v51H103z"/>
+  <path fill="#0A3158" d="M82 165v-47c0-15 12-27 27-27h117l31 31h137c17 0 30 13 30 30v35H82z"/>
+  <!-- front archive folder -->
+  <path fill="#0A3158" d="M58 183c0-20 15-36 35-36h113c16 0 28 5 39 17l18 18h165c22 0 37 17 33 39l-31 176c-4 20-18 32-39 32H123c-21 0-34-12-38-32L58 183z"/>
+  <!-- compass ring and cardinal pointers -->
+  <circle cx="256" cy="264" r="91" fill="none" stroke="#FFFFFF" stroke-width="15"/>
+  <path fill="#FFFFFF" d="M256 151l-13 48h26zM369 264l-48-13v26zM256 377l13-48h-26zM143 264l48 13v-26z"/>
+  <!-- route leaving the archive -->
+  <path d="M207 324c28-9 76-8 96 16 21 25 13 54-17 78-21 17-14 31 27 47" fill="none" stroke="#078287" stroke-width="32"/>
+  <!-- compass needle -->
+  <path fill="#F3A323" d="M256 264l75-90-43 107z"/>
+  <path fill="#FFFFFF" d="M256 264l-73 75 96-58z"/>
+  <circle cx="256" cy="264" r="16" fill="#0A3158" stroke="#FFFFFF" stroke-width="8"/>
+</g></defs>
+<rect width="512" height="512" rx="92" fill="#F5F8FC"/>
+<use xlink:href="#arkivpiloten-mark"/>
+</svg>

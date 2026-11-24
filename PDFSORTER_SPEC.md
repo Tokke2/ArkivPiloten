@@ -27,15 +27,20 @@
 >
 > **Leverans 1.3.0 (2026-10-16) — allt i appmappen, autostart alla OS,
 > paket-/Python-uppdateringar, Git-autouppdatering.**
-> (a) Allt i undermappar: config_dir() faller aldrig tillbaka till
-> OS-plats (bara PDFSORTER_HOME eller appmappen; gamla OS-platsen är
-> enbart migrationskälla). history.journal -> json/, genererad ikon ->
+> (a) Allt i undermappar: config_dir() = PDFSORTER_HOME, annars appmappen
+> när den är skrivbar, annars användarens data-mapp (read-only
+> /Applications, /opt eller låst USB) - och gamla OS-platsen är enbart
+> migrationskälla. history.journal -> json/, genererad ikon ->
 > icons/, Tesseract-installeraren -> temp/, bat-filens TEMP/TMP/
 > PIP_CACHE_DIR/install.log -> temp/, cache/pip resp. logs/ i appmappen.
 > (b) Autostart: Linux arkivpiloten.desktop (gamla pdfsorter.desktop
 > städas), macOS-plist loggar till logs/autostart.log, Windows får
 > Startup-mapp som reserv om registret nekar; autostart_status() för
 > --status/diagnostik; självläkande synk vid start som förut.
+> 2026-10-20: install.sh (macOS/Linux, venv + genväg + valfri autostart),
+> verkliga .app-paket på macOS, shell-/plist-escaping verifierad med
+> automatiska tester (tests/), och startskedet ärvs från OS-posten i
+> stället för att raderas när settings säger av.
 > (c) Paket/Python: --install-packages (+ update_python_packages())
 > installerar hela requirements.txt med importkontroll; bat-filen
 > har winget-reserv för Python. Senaste Python via python.org som förut.
@@ -46,6 +51,431 @@
 > loggar updates/last_update.json. CLI --check-update/--update,
 > GUI-knapp i Hjälp-fliken + automatisk sökning vid start
 > (check_updates/auto_update i inställningarna).
+>
+> **Ej publicerad än — inställningsfliken går att rulla (2026-10-21).**
+> Rapporterat: "ser inte att jag kan ställa in autostart av appen".
+> Kryssrutan fanns - "Starta automatiskt med datorn" i kortet "Start och
+> systemfält" - men det kortet är det SJÄTTE på fliken Inställningar, och
+> fliken var en vanlig Frame utan rullning. Allt under fönsterkanten gick
+> alltså inte att nå, varken autostarten eller uppdateringsvalen.
+> (a) `_scrollable_tab()` lägger flikens innehåll i en canvas med
+> rullningslist som bara visas när innehållet är högre än fönstret.
+> (b) Mushjulet rullar fliken via en enda bindning på rotfönstret;
+> `_widget_scrolls_itself()` ser till att en lista, ett textfält eller en
+> rullgardin aldrig flyttar hela fliken i stället. Bindningen läggs till
+> en gång (`_bind_tab_wheel`) - annars rullar det dubbelt - och kopplas
+> tillbaka av `_reinstall_tab_wheel()` efter en dialog, eftersom
+> granskningsdialogens `unbind_all` tar bort även flikens bindning.
+> (c) 15 tester i tests/test_scrollable_settings.py, bl.a. AST-kontroll
+> av att korten byggs i den rullbara ramen och att autostart-kortet
+> ligger där. Ingen Tk behövs, så de går i CI på alla tre OS.
+> Versionen är INTE höjd och ingen release är publicerad - det görs först
+> på begäran.
+>
+> **Ej publicerad än — menyrad utöver flikarna (2026-10-22).**
+> Önskemål: "gör en menyrad också, inte enbart flikar". Flikarna kräver att
+> man letar; menyraden ger samma funktioner på ett ställe och visar
+> genvägarna direkt i etiketten.
+> (a) Fyra menyer: **Arkiv** (lägg till/ta bort inmapp, Sortera nu, Bevaka
+> mapparna som kryssruta, Öppna utmappen, Öppna loggmappen, Avsluta),
+> **Inställningar** (autostart, ikon i systemfältet, minimera till
+> systemfältet, krysset, Ljust/Mörkt tema, Alla inställningar…),
+> **Visa** (genväg till varje flik, Skapa genväg, Spara appikonen) och
+> **Hjälp** (Användarhjälp, Kopiera AI-rapport, diagnostik, Sök
+> uppdateringar, Om).
+> (b) Innehållet är data: `meny_spec()` returnerar posterna, så testet kan
+> granska dem utan Tk och upptäcka en post som pekar på en metod som inte
+> finns. `_meny_atgard()` gör om en post till en klickfunktion; saknas
+> metoden loggas det i stället för att krascha.
+> (c) Genvägar: Ctrl på Windows/Linux, Command på macOS. `accelerator` i en
+> Tk-meny är bara en etikett - därför binder `_bind_meny_snabb()` varje
+> tangent på rotfönstret (inte `bind_all`, så en dialog behåller sina
+> tangenter). Utan Shift binds gemener, med Shift versaler, eftersom Tk
+> annars inte matchar tangenten på alla plattformar.
+> (d) En bock i menyn sparas direkt (`_meny_kryss`): `tray_enabled`,
+> `minimize_to_tray` och `close_to_tray`, och systemfältsikonen slås
+> på/av utan omstart. Bevakningens kryssruta följer den verkliga
+> bevakningen via `_sync_meny()`.
+> (e) En trasig menyrad får aldrig hindra appen från att starta
+> (undantaget loggas med `session_error("meny", …)`).
+> (f) 28 tester i tests/test_menubar.py, inklusive ett test som bygger hela
+> menyraden med Tk-attrapper och klickar igenom varje post. Ingen Tk
+> behövs, så de går i CI på alla tre OS. Versionen är INTE höjd och ingen
+> release är publicerad.
+>
+> **Ej publicerad än — tyst versionsvakt och tyst omstart (2026-10-26).**
+> Önskemål: "autosök efter ny version (tyst) 2 ggr per dygn" och "tyst
+> omstart vid uppdatering av version".
+> (a) Sökningen är inte längre knuten till starten: en vakt väcks varje
+> minut och söker när det är dags. Tiden sparas i `last_update_check`
+> (ISO) tillsammans med `last_update_check_ok`, så antalet gäller över
+> omstarter — en app som startas tio gånger om dagen frågar GitHub två
+> gånger. Inställningen `update_checks_per_day` (standard 2) ger
+> intervallet 86400/N sekunder; minst en gång per dygn, högst var 15:e
+> minut. Misslyckas sökningen (nätet svek) görs ett nytt försök efter
+> 30 minuter i stället för att vänta ett halvt dygn.
+> (b) Allt är tyst: ingen dialog, ingen statusruta — bara rader i
+> sessionsloggen, och raden i inställningskortet "Uppdateringar" som
+> visar "Tyst sökning 2 ggr/dygn · senast i går 21:14 · nästa om 3 t".
+> (c) `uppdateringsplan()` avgör utan Tk vad ett svar från GitHub leder
+> till (fel / aktuell / osäker / erbjudande / fråga / installera) och om
+> omstarten ska ske tyst. En automatisk sökning öppnar aldrig en dialog:
+> är autouppdateringen avstängd blir en ny version en notis i
+> systemfältet + en loggrad i stället, och en misslyckad tyst
+> installation hamnar i loggen. Dialogen finns bara när användaren själv
+> trycker på Sök.
+> (d) Tyst omstart: `_restart_app()` startar den nya processen och
+> stänger den gamla. Instanslåset släpps FÖRE start — annars nekar den
+> nya instansen och ber den döende processen visa fönstret. Låg fönstret
+> i systemfältet startas det med `--tray` (inget fönster som hoppar
+> upp), och `--resume-watch` slår på bevakningen igen, så en pågående
+> bevakning inte tystnar i natten. Misslyckas starten återtas låset och
+> fönstret är kvar — appen fortsätter i den gamla versionen.
+> (e) Omstarten väntar om appen är upptagen: sortering pågår,
+> granskningsrutan är öppen eller filer väntar i granskningskön. Den
+> försöker igen varje minut och faller tillbaka på nästa vanliga start.
+> Inställningen `silent_restart` (på som standard) styr om omstarten sker
+> utan fråga.
+> (f) 34 tester i tests/test_update_schedule.py: schemat, sparningen över
+> omstart, beslutsmatrisen, omstarts-kommandot per OS, hela flödet med
+> attrapper (tyst installation utan en enda dialog), att en upptagen app
+> väntar, och att låset släpps före start. Versionen är INTE höjd och
+> ingen release är publicerad.
+>
+> **Ej publicerad än — tangentbordsnavigering i hela appen (2026-10-26).**
+> Önskemål: mindre beroende av musen och snabbare förflyttning mellan flikar
+> och kontrollområden.
+> (a) `Ctrl+Tab` / `Ctrl+Shift+Tab` byter flik framåt/bakåt och slår runt
+> vid första/sista fliken. `Ctrl+1…7` väljer fliken efter dess nuvarande
+> ordning (Start, Granska, Kategorier, Inställningar, Historik, Hjälp,
+> Avancerat); ogiltiga index gör inget.
+> (b) `F6` och `Shift+F6` cyklar mellan flikväljaren, första synliga och
+> aktiverade fokusmålet i den valda fliken, och statusraden. Statusraden
+> är därmed också tangentbordsfokuserbar.
+> (c) `Escape` stänger fokuserad dialog, men stänger aldrig huvudfönstret.
+> Dialogens egen Escape-funktion får företräde (t.ex. återställning av
+> sökfält eller Hoppa över i granskningen).
+> (d) 9 tester i `tests/test_keyboard_navigation.py` täcker bindningar,
+> flikväxling, Escape-säkerhet, fokuscykeln och att dolda/inaktiva kontroller
+> hoppas över. Ingen Tk-session behövs. Versionen är INTE höjd och ingen
+> release är publicerad.
+>
+> **Ej publicerad än — konsolfri start av GUI (2026-10-27).**
+> Önskemål: inget konsolfönster när appens GUI startar, även om Windows
+> startar `pdfsorter.py` med `python.exe` i stället för via `.pyw`.
+> (a) En vanlig GUI-start (utan CLI-argument, eller enbart `--tray` /
+> `--resume-watch`) lämnar tidigt över till `pythonw.exe`; om den saknas
+> startas samma interpreter med `CREATE_NO_WINDOW`. Handoff-markören
+> förhindrar startloop. CLI-kommandon som `--check` påverkas inte.
+> (b) Ett misslyckat processanrop faller tillbaka till nuvarande process,
+> så ett startfel aldrig hindrar GUI:t från att öppnas.
+> (c) 6 tester i `tests/test_console_free_gui.py` täcker pythonw,
+> reservstart, CLI-undantag, loopskydd, felreserv och att överlämningen
+> sker innan GUI-initialisering. Versionen är INTE höjd och ingen release
+> är publicerad.
+>
+> **Ej publicerad än — smart cacherensning dagligen (2026-10-27).**
+> Önskemål: kunna rensa cache med smartfilter och låta det rensa automatiskt
+> en gång per dygn.
+> (a) Inställningar → **Cache och lagring** har ett påslag för automatisk
+> rensning (på som standard), status över senaste körningen och knappen
+> **Rensa cache nu**. Manuellt kör samma filter även om schemat är av.
+> (b) `DiskTextCache.cleanup()` tar bara filer med cache-nyckelns SHA-1-namn;
+> andra filer och undermappar lämnas orörda. Oanvända poster äldre än 30
+> dagar tas bort. Därefter trimmas äldsta använda poster vid 1 500 filer
+> eller 512 MiB. En lyckad cacheträff uppdaterar aktivitets-mtime; skadad
+> JSON tas bort när den upptäcks. Cachen innehåller bara återskapbar PDF-text.
+> (c) `last_cache_cleanup` sparas och vaktas med 24-timmarsintervall. Vakten
+> går vid start och därefter varje timme, så appen som står öppen rensar
+> ändå dagligen. Själva städningen körs i bakgrundstråd och låses mot läsning/
+> skrivning i cacheklassen.
+> (d) 11 tester i `tests/test_cache_cleanup.py` täcker ålder, LRU-tak,
+> storlekstak, skydd av andra cachefiler, aktivitetsuppdatering, korrupt post,
+> 24-timmarsgränsen, schematick och GUI-/inställningskoppling. Versionen är INTE höjd
+> och ingen release är publicerad.
+>
+> **Ej publicerad än — stäng och minimera till systemfältet (2026-10-28).**
+> Önskemål: både krysset och minimera-knappen ska gömma appen vid klockan.
+> (a) `close_to_tray`, `minimize_to_tray` och `tray_enabled` är på som
+> standard. Befintliga inställningar migreras en gång till detta beteende
+> (`tray_minimize_migrated_v1`); användaren kan därefter ändra valen separat.
+> (b) Utan tillgänglig systemfältsikon minimeras fönstret till aktivitetsfältet
+> i stället, och stängning följer sin befintliga säkra reservväg. Med en öppen
+> granskningsdialog stannar huvudfönstret i aktivitetsfältet tills dialogen
+> är stängd, så att den inte blir frikopplad från sitt huvudfönster.
+> (c) 12 tester i `tests/test_window_behavior.py` täcker standardvärden,
+> migrering, val efter migrering, tray-krav och dialogskydd. Versionen är
+> INTE höjd och ingen release är publicerad.
+>
+> **Ej publicerad än — starta med operativsystemet, minimerad (2026-10-28).**
+> Önskemål: starta automatiskt vid inloggning och göm fönstret i systemfältet.
+> (a) `autostart` och `start_minimized` är på som standard. En ny
+> engångsmigrering (`autostart_minimized_migrated_v1`) aktiverar båda på
+> befintliga installationer och synkar autostarten till operativsystemet.
+> Autostart kan senare stängas av under Inställningar. OS-startposten använder
+> `--tray`; `start_minimized` styr dessutom en vanlig manuell start.
+> (b) `tray_enabled` slås på i migreringen. Om systemfältet inte finns eller
+> ikonen inte kan startas visas huvudfönstret i stället; ingen app blir
+> osynlig. Windows- och macOS/Linux-installationsflöden aktiverar autostart
+> som standard, med ett uttryckligt avval på Windows och `--no-autostart`.
+> (c) `App.__init__` synkar OS-posten vid start och uppdaterar kryssrutan
+> efter resultatet. 12 tester i `tests/test_window_behavior.py` täcker
+> standard, migrering, att användarval efter migrering bevaras och
+> persistent settings. Versionen är INTE höjd och ingen release är publicerad.
+>
+> **Korrigering (2026-10-28) — manuell start synlig och sortering får inte gömmas.**
+> Loggen visade att en vanlig start (utan `--tray`) ändå gömdes av den
+> sparade `start_minimized=true`-inställningen. Samtidigt kunde minimering
+> under en batchsortering gömma `ConflictDialog`; bakgrundstråden väntade då
+> 120 sekunder per dubblett och appen såg ut att ha låst sig.
+> (a) Nya och befintliga inställningar får `start_minimized=false` en gång;
+> vanlig manuell start visar fönstret. OS-autostartens `--tray` fortsätter
+> starta gömt enligt tidigare önskemål. Användaren kan ändra manuell start
+> under Inställningar.
+> (b) Minimering och gömning avvisas medan batchsortering körs; fönstret
+> återställs så att dubblettdialoger går att se och svara på. Idle-minimering
+> och stäng-till-systemfältet behålls.
+> (c) Tester täcker migreringen, batchminimering och dialogskydd.
+> Versionsnumret höjs inte och releasen uppdateras med samma versionsnummer.
+>
+> **Korrigering (2026-10-30) — mushjul och uppdatering från systemfältet.**
+> (a) När kategorirullgardinen är öppen gör mushjulet ingenting; när den är
+> stängd rullar hjulet granskningsdialogen som vanligt. Skrivning i fältet
+> **Befintlig** fortsätter filtrera kategorier och rulla till första träffen.
+> (b) Högerklick på systemfältsikonen → **Sök efter uppdateringar…** visar
+> huvudfönstret och startar samma manuella, verifierade GitHub Releases-flöde
+> som knappen i appen. Resultatdialoger är kopplade till huvudfönstret.
+> Tester täcker hjulets öppna/stängda läge och tray-menyn. Versionsnumret
+> behålls.
+>
+> **Leverans 1.4.14 (2026-10-30) — granskningsdialog och sökbar målmapp.**
+> Filgranskningen har tydligare hierarki: filstatus och förslag ligger överst,
+> stödord och målmapp visas som separata kort, och huvudåtgärden är visuellt
+> prioriterad. Fältet **Befintlig mapp** tar fritext och filtrerar rullgardinen
+> medan användaren skriver; accentokänslig prefix-, ordstarts- och delsträngssök
+> samt tangentbordsval bevaras. Versionsnumret höjs med en patch till 1.4.14,
+> så tidigare installationer kan hämta den som en vanlig versionsuppdatering.
+> Därefter hittar appen även ombyggnader med samma versionsnummer genom att
+> jämföra release-commit och SHA-256 för paketerade filer.
+>
+> **Leverans 1.4.13 (2026-10-21) — AI-rapport: alla fel på 0 sekunder.**
+> Loggningen räckte inte för felsökning: undantag i en Tk-callback skrevs
+> bara till `stderr`, som inte finns när appen startar med `pythonw`, och
+> felen låg utspridda i sessionsloggar, `errors.log` och `krasch.log` -
+> diagnostikpaketet läste dessutom hela filerna.
+> (a) Ny modul `pdfsorter_diag.py`: felringbuffert i minnet (250 poster),
+> `report_callback_exception`-krok för Tk (knappar, `after`, bindningar),
+> vidarebefordran från appens `sys.excepthook`/`threading.excepthook` och
+> `crash_report`, så ALLT hamnar på ett ställe.
+> (b) `build_ai_report()`: ett kompakt block med miljö, unika fel med
+> fingeravtryck (`TclError` från minne/logg/errors.log blir EN rad med
+> antal), varningar, senaste händelserna och vilka filer som lästes.
+> Fingeravtrycket normaliserar bort siffror, hex, tidsstämplar, sökvägar,
+> modulprefix och radnummer, så samma fel får samma nyckel mellan
+> versioner och mellan loggkällor.
+> (c) Noll sekunder: filer ≤ 8 MB läses hela, större läses bara i svansen
+> (200 kB). `--djup` läser hela filer upp till 64 MB. Rapporten säger
+> alltid om en fil bara lästes delvis ("kör --djup"), så "inga fel" aldrig
+> kan feltolkas. Mätt: 23 MB loggar → rapport på 0,08 s (0,45 s med
+> Pythonstart), `--djup` 24,5 MB på 0,31 s.
+> (d) Ytor: `--ai-rapport` (+ `--djup`) i CLI, *Kopiera AI-rapport (alla
+> fel)* i Hjälp-fliken (kopierar till urklipp och skriver
+> `logs/ai-rapport-senaste.txt` atomiskt), sammanfattning i
+> `--diagnostik`, och `_svans` i supportpaketet läser bara svansen.
+> (e) Avidentifiering: hemkatalog, användarnamn och `%USERPROFILE%` byts
+> mot `~`/`<användare>` - rapporten kan klistras in var som helst.
+> 24 nya tester i tests/test_diagnostics.py (168 totalt), inklusive
+> Tk-kroken, hopslagning över tre källor, trunkeringsärlighet, tidsgräns
+> på 5 MB-logg och att `UPDATE_FILES` och uppgraderingsverktyget alltid
+> listar samma filer (nu inkl. `pdfsorter_diag.py`).
+>
+> **Leverans 1.4.12 (2026-10-21) — minimering med öppen dialog.**
+> Rapporterat: minimerade man medan matchningsdialogen var öppen gick
+> fönstret inte att få fram igen, och loggen fylldes av
+> `TclError: cannot invoke "toplevel" command: application has been
+> destroyed`.
+> (a) `_minimize_action` tar nu `modal_open`: är granskningsdialogen
+> öppen går minimeringen ALLTID till aktivitetsfältet, även med
+> `minimize_to_tray` påslaget. Att withdrawa huvudfönstret lämnade en
+> Toplevel med `grab_set` utan förälder.
+> (b) `hide_window` vägrar withdrawa medan dialogen är öppen (minimerar
+> i stället), och `show_window` tar fram dialogen igen när fönstret
+> återställs.
+> (c) Kön (`_process_queue`) kontrollerar `winfo_exists()` FÖRE VARJE
+> dialog, inte bara en gång före loopen, och fångar `TclError` från
+> dialogbygget. `_closing` stoppar kön helt; `_close_open_review()`
+> stänger dialogen innan `root.destroy()` - tidigare skapade kön tre nya
+> Toplevel-fönster i en död tolk.
+> (d) Loggarkiveringen rör aldrig dagens loggning: pågående sessionsfil
+> (`_SESSION_PATH`), filnamnets datum och filens mtime kontrolleras mot
+> dagens datum innan `days`-gränsen. En pågående session med gammal
+> mtime kunde annars gzippas medan appen fortfarande skrev i filen.
+> 11 nya tester i tests/test_dialog_safety.py (124 totalt) - Tk-fria
+> stand-ins, så de går i CI på alla tre OS.
+>
+> **Leverans 1.4.11 (2026-10-21) — uppdatering enbart från Releases.**
+> Reserven mot main-grenen är borttagen. Skälet: en gren rör sig och kan
+> inte verifieras mot en publicerad kontrollsumma, och den band appen
+> till main. Nu finns bara `/releases/latest`:
+> (a) `check_for_update` läser enbart GitHub Releases; svarar API:t inte
+> returneras `ok=False` med felet, inget erbjuds och nästa försök görs
+> vid nästa start. Den returnerar aldrig `source: branch`.
+> (b) `UPDATE_BRANCH`, `UPDATE_RAW_BASE` och `UPDATE_ZIP_URL` är borttagna
+> ur `__all__` och koden; `perform_update` kräver att releasen har ett
+> paket och en kontrollsumma, annars avbryts allt utan att något hämtas.
+> (c) GUI/CLI säger "GitHub Releases" rakt av (ingen main-gren kvar som
+> alternativ). (d) Test: `test_no_branch_fallback` fångar varje URL och
+> kräver att **endast** `UPDATE_RELEASES_LATEST` anropas, samt att inget
+> går till codeload eller raw.githubusercontent. Releaser utan bifogat
+> paket kan fortfarande använda GitHubs **tagg-arkiv** med summan ur
+> release-texten - det är en fryst tagg, inte en gren.
+>
+> **Leverans 1.4.10 (2026-10-21) — .sh kör även med LANG=C.**
+> Skriptet använde variabelnamnet `HÄR`. Bash tillåter Å/Ä/Ö i
+> variabelnamn bara i en UTF-8-locale; med LC_ALL=C tolkas `HÄR=...` som
+> ett kommando och skriptet dör på `set -u` ("H: unbound variable") innan
+> något hämtas. Namnet är nu `APP_DIR`, och ett test kör `bash -n` med
+> LC_ALL=C samt kontrollerar att alla variabelnamn är ASCII och att
+> .bat-filen har enbart CRLF. Verifierat skarpt med LC_ALL=C: skriptet i
+> Hämtade filer hittade appen på Skrivbordet och uppgraderade 1.1.0 till
+> 1.4.10.
+>
+> **Leverans 1.4.9 (2026-10-21) — launchern hittar appen själv.**
+> 1.4.8 krävde att uppgradera-arkivpiloten.bat låg i appmappen, men den
+> hämtas ju till Hämtade filer - då hade den gett upp med "hittar ingen
+> appmapp". Nu: (a) ges en sökväg som inte är en appmapp letar
+> install_latest.py vidare i stället för att avbryta - Skrivbord,
+> Dokument, Hämtade filer, ~/Applications, /opt,
+> %LOCALAPPDATA%\Programs, OneDrive (inkl. Dokument) och två nivåer ned.
+> (b) .bat-filen tar en appmapp som dragits till filen som första argument
+> och tar bort ett avslutande `\` ur sökvägen, annars blir `\"` ett
+> citattecken i argv och sökvägen fel. (.sh gör samma sak om första
+> argumentet är en mapp.) (c) Feltexten säger nu hur man anger mappen.
+> 20 tester, och de rör aldrig nätet: autouse-fixturen pekar om
+> reservvägen (tagg-arkivet) till en fil som inte finns, så ett trasigt
+> paket alltid är ett fel. Skarpt verifierat: en 1.1.0-mapp i
+> Hämtade filer hittades på Skrivbordet och uppgraderades till 1.4.9.
+>
+> **Leverans 1.4.8 (2026-10-21) — vägen från 1.0.0/1.1.0 till
+> autouppdatering.** 1.0.0 och 1.1.0 letade uppdateringar i main-grenen
+> (`contents/pdfsorter.py?ref=main`) i stället för i Releases. main står
+> kvar på 1.1.0, så de installationerna ser aldrig någon release och
+> svarar alltid "du har senaste versionen". Det går inte att laga från
+> servern utan att röra main - i stället finns nu en engångsuppgradering:
+> (a) tools/install_latest.py hämtar `/releases/latest/download/`-
+> filerna, kräver SHA256SUMS.txt, kompilerar alla .py FÖRE något skrivs,
+> tar backup till backups/upgrade_<tid>/ och byter filerna atomiskt.
+> Bara de kända programfilerna skrivs (vitlista, zip-slip-skydd), så
+> json/, logs/, backups/ och egna filer är orörda. Går release-filerna
+> inte att hämta används tagg-arkivet med summan ur release-texten -
+> men en fil med FEL summa avbryter allt, utan reserv.
+> (b) uppgradera-arkivpiloten.bat och .sh är dubbelklickbara: de hittar
+> Python (py/python/venv), hämtar skriptet och kör det mot sin egen
+> mapp. Båda följer med i zip:en och laddas dessutom upp som
+> release-filer, så adressen
+> `.../releases/latest/download/uppgradera-arkivpiloten.bat` alltid
+> pekar på senaste versionen.
+> (c) 19 tester (tests/test_upgrade_tool.py) kör hela flödet mot en
+> lokal release på file://: summa, zip-slip, okända filer, användardata,
+> backup, torrkörning och trasig kod. Verifierat skarpt: en 1.1.0-mapp
+> uppgraderades till 1.4.7 via tagg-arkivet och rapporterar därefter
+> "Senaste på GitHub: 1.4.7 (GitHub Releases)".
+>
+> **Leverans 1.4.7 (2026-10-20) — verifierad matching och sökning.**
+> (a) Ände-till-ände-tester: tests/test_matching_pdf.py bygger riktiga
+> PDF:er, kör läsaren och decide() - samma kedja som appen. PyMuPDF
+> tillagd i requirements-dev så att testerna även går i CI.
+> tests/test_dialog_flow.py kör granskningsdialogens riktiga metoder mot
+> en Tk-fri stand-in: skriv p -> i -> l -> PIL, Enter väljer, Escape
+> återställer, okänt namn blir ny mapp. Inget Tkinter krävs.
+> (b) Fynd från testerna, rättade: mottagarblocket vinner nu över
+> sidhuvudet - en kund som står i sidhuvudets band ("Kund: X" högt upp
+> på fakturan) räknades förut som avsändarbevis med vikten 1,20 i
+> stället för 0,30. Undantag: står samma text också överst som
+> avsändare gäller avsändaren.
+> (c) "·" och "•" accepteras som avskiljare i organisationsnummer och
+> giro (typsnitt och OCR ger dem ibland i stället för bindestreck).
+> Domäner är däremot inte flexibla: "Pilkington se bilaga" får inte
+> matcha "pilkington.se".
+> (d) Enter stänger en öppen träfflista innan listan återställs, så att
+> de filtrerade raderna inte ligger kvar efter valet.
+>
+> **Leverans 1.4.6 (2026-10-20) — minimering och krysset är skilda saker.**
+> Minimera-knappen göms inte längre automatiskt i systemfältet: fönstret
+> stannar i aktivitetsfältet som vanliga program, och krysset fortsätter
+> att gå till systemfältet enligt close_to_tray. Vill man att även
+> minimering ska gå till systemfältet finns inställningen
+> minimize_to_tray (av som standard) med egen kryssruta under Start och
+> systemfält. _on_unmap kontrollerar att fönstret verkligen är minimerat
+> (state iconic) så att byte av virtuellt skrivbord eller en withdraw
+> inte misstolkas, och en vakt flagga hindrar dubbla hide-anrop.
+> Inställningspanelen fick dessutom en ledig rad: temaväljaren låg
+> tidigare ovanpå två kryssrutor i samma grid-rad.
+>
+> **Leverans 1.4.5 (2026-10-20) — bara riktiga bevis räknas, alla
+> skrivsätt av samma nummer matchar, och fel lärs bort.**
+> (a) Starka bevis: bara riktiga identifierare räknas. Årtal ("2025"),
+> datum ("2024-01", "24.10.2025"), belopp ("1.234") och versionsnummer
+> ("v1.4.4") klassades förut som projektkod eller domän och kunde
+> därmed kringgå poängtröskel, krav på antal stödord och textlängd i
+> _auto_blocker. Koder måste nu innehålla minst en bokstav och en
+> siffra, domäner kräver en riktig toppdomän av bokstäver, och ett
+> tiosiffrigt nummer med fel kontrollsiffra är inte längre ett starkt
+> bevis.
+> (b) Identifierare matchar oavsett skrivsätt: "556033-9086",
+> "556033 9086", "5560339086" och "556033–9086" träffar samma regel,
+> liksom VAT-nummer med eller utan mellanslag och SE-prefix. Mönstret
+> byggs ur numrets delar med valfria skiljetecken; vanliga ord matchas
+> exakt som förut.
+> (c) Negativ inlärning: när en automatisk gissning rättas i
+> granskningsdialogen registreras avvisandet på de stödord som ledde
+> fel. Ordet väger 20 % mindre per avvisande (golv noll, halveringstid
+> ett år), den lärda modellen får negativa bevis för den felaktiga
+> kategorin, och historiken sparar corrected_from. Modellens säkerhet
+> får dessutom en liten rankningsbonus (0,2) när den har minst fem
+> filer per kategori - men aldrig över ett bevisat avsändar-ID och
+> aldrig över beviskraven.
+> (d) Tester: tests/test_matching.py (17 st) för starka bevis,
+> identifierarformat, avvisanderäkning och negativ inlärning.
+>
+> **Leverans 1.4.4 (2026-10-20) — rullgardinen skriver-söker som en
+> riktig dropdown.** Kategori/mapp: "p" visar mapparna som BÖRJAR på p
+> (inte alla som innehåller p), "pil" smalnar av till PIL. Sökordet
+> byggs upp tecken för tecken även när rullgardinen redan är öppen
+> (p+i+l), i stället för att varje tangent söktes för sig - samma
+> teckenbuffert gäller alla comboboxar och listor i appen. Tecknen
+> hamnar rätt även när fältet är förvalt: första tangenten ersätter
+> namnet i stället för att hamna efter det. En hjälprad under fältet
+> visar antal träffar och vad Enter gör. Mushjulet byter fortfarande
+> aldrig kategori.
+>
+> **Leverans 1.4.3 (2026-10-20) — multi-OS-installation + verifierad
+> autouppdatering från Releases.**
+> (a) install.sh för macOS/Linux (venv, genväg, valfri autostart,
+> --uninstall), riktig .app i ~/Applications på macOS, .bat-filen frågar
+> om autostart.
+> (b) Autostart: Windows-register med Startup-mapp som reserv, macOS
+> LaunchAgent via plistlib + launchctl, Linux XDG; klassning
+> (correct/startup_folder/stale_console/stale_path/duplicate), verifiering
+> efter skrivning, rollback av backup och effective_autostart() som ÄRVER
+> en fungerande OS-post i stället för att radera den vid start.
+> (c) Uppdatering: GitHub Releases är primär kanal (api releases/latest),
+> paketet ArkivPiloten.zip verifieras mot SHA256SUMS.txt innan uppackning,
+> zip-slip via Path.relative_to, compile()+versionskontroll, backup och
+> fullständig rollback om något går fel, updates/last_update.json.
+> auto_update är på som standard men installerar ENDAST när
+> kontrollsumma finns. Saknar releasen bifogade filer används GitHubs
+> tagg-arkiv som paket, med SHA-256 ur release-texten.
+> .github/workflows/release.yml publicerar/uppdaterar aktuell release vid
+> varje push till valfri gren och varje v*-tagg; innehållsuppdateringar kan
+> behålla versionsnumret.
+> (d) Tester: tests/ (pytest) för autostart per OS, datamapp, startfil,
+> genvägar, CLI-autostart, uppdateraren och kategorisökningen; CI på
+> Linux/macOS/Windows.
+> (e) Granskningsdialogen: Kategori/mapp är en sökbar rullgardin
+> (filtrerar medan man skriver, början-på-namnet först, accentokänsligt,
+> Enter väljer entydig träff) och mushjulet över fältet byter aldrig
+> kategori - det rullar fönstret.
 >
 > **Leverans 1.3.1 (2026-10-16) — kvalitetsrunda.** pyflakes-granskning
 > hittade samma buggklass som json_dir-fyndet: `search_tesseract`
@@ -104,12 +534,21 @@ Allt sker lokalt på datorn — inga nätverksanrop, ingen molntjänst.
 
 ## 2. Kärnidé
 
-> Appen är **försiktig av design.** En fil flyttas automatiskt bara när
-> bevisen är starka. Är appen osäker frågar den i stället — det är alltid
-> billigare att svara på en fråga än att leta rätt på en felsorterad fil.
+> **Endast exakt användarsparat stödord får flytta automatiskt.** Ett
+> stödord eller en fras måste finnas bokstavligt som helt ord i PDF-texten,
+> och exakt en aktiv kategori får ha en sådan träff. Skiftläge och upprepade
+> blanksteg normaliseras; stavning och skiljetecken i stödordet/frasen
+> måste annars vara lika.
+> Poäng, inlärda modeller, flexibla ID, delord och OCR-denoising ger bara
+> förslag. Vid konflikt eller osäkerhet ligger filen kvar för granskning.
+> Regeln gäller batch, mappbevakning och omskanning; obekräftade filer går
+> aldrig automatiskt till `_Osorterat`.
 
-Varje gång användaren svarar lär sig appen. Efter tio–femton svar känner
-den igen de vanligaste leverantörerna och sköter resten på egen hand.
+Stödordsförslag sparas inte automatiskt: användaren väljer vilka ord som ska
+sparas. En bekräftad inlärning får flytta andra filer endast om de också
+uppfyller den strikta, unika exakta stödordsträffen. Detta ersätter äldre
+krav längre ned som beskriver bredare automatisk flyttning eller automatisk
+borttagning från granskningskön.
 
 ## 3. Arkitektur — fem samverkande moduler
 
@@ -183,7 +622,7 @@ pdfsorter_theme.py  ──►  (helt fristående)
   undantag; fel hamnar i `Extraction.error`.
 - **Zoneindelning** skiljer *avsändare* från *mottagare* (se §6.2).
 - **`suggest_keywords()`** är helt deterministisk och lokal (ingen AI/nät).
-  Producerar upp till `keywords_per_file` (10) kandidatord.
+  Producerar upp till `keywords_per_file` (25) kandidatord.
 - **`find_document_date()`** väljer dokumentets datum för årsmappar.
 - **`Extraction`** är datakontraktet: `.text`, `.combined`, `.page_header`,
   `.page_footer`, `.used_ocr`, `.ocr_logo`, `.doc_date`, `.date_source`,
@@ -198,7 +637,8 @@ pdfsorter_theme.py  ──►  (helt fristående)
 - **Tre JSON-filer**, alla skrivna **atomiskt** (temp-fil + `os.replace`):
   `rules.json`, `settings.json`, `history.json`.
 - **`Rules`** representerar `rules.json`: `categories[]` med
-  `name`, `folder`, `keywords[]`, `enabled`, `subfolder`, `min_keywords`,
+  `name`, `folder`, `keywords[]`, `enabled`, `subfolder` (datumsmall),
+  `subfolder_path` (fast relativ standardundermapp), `min_keywords`,
   `created`, `files_sorted`. Stödord: `{text, weight, whole_word, hits,
   added, source}`.
 - **`InstanceLock`** säkerställer bara en körande instans (PID+starttid,
@@ -247,8 +687,10 @@ pdfsorter_theme.py  ──►  (helt fristående)
 - `TextCache` — minnescache nycklad på (sökväg, storlek, mtime). Sparar
   dyr OCR-text mellan omskanningar.
 
-**GUI (Tkinter):** sju flikar — Sortera, Matchningar, Inställningar,
-Granska, Historik, JSON, Hjälp. Kärnan är `ReviewDialog` med 10 föreslagna
+**GUI (Tkinter):** sju flikar — Start, Granska, Kategorier, Inställningar,
+Historik, Hjälp och Avancerat. En gemensam varumärkesrad ligger ovanför flikarna;
+startsidan visar sorteringens tre steg i tydliga kort. JSON-redigering finns under
+Avancerat. Kärnan är `ReviewDialog` med upp till 25 föreslagna
 stödord att bocka i.
 
 ## 6. Matchningslogik i detalj
@@ -306,6 +748,7 @@ identifierar företaget lika säkert ensamt som tillsammans med tio vanliga ord.
       "folder": "Pilkington",
       "enabled": true,
       "subfolder": "{år}",
+      "subfolder_path": "Fakturor",
       "min_keywords": 0,
       "created": "...",
       "files_sorted": 27,
@@ -453,17 +896,15 @@ OS-platsen om appmappen är skrivskyddad (read-only USB/programkatalog).
 - AC-5.3 Launcher (.pyw) och `--diag` använder samma regel så att allt
   pekar på samma ställe. Verifierat: USB-simulering (tom appmapp),
   skrivskyddad mapp (fallback), migrering med rules.json.
-- AC-5.4 **EN enda startfil med tydligt namn (ANVÄNDARORDER 2026-10-06:
-  "inga bat-filer, endast en ... alltid installera senaste python,
-  tydligt namn"):** `PDF Sorter - Installera senaste Python och
-  starta.bat`. Den 1) söker Python (py-launcher → PATH utan
-  Store-stubben → per-user/Program Files-kataloger, högsta versionen
-  väljs), 2) jämför mot senaste stabila från python.org och installerar
-  UPPGRADERAR alltid vid behov (tyst, per user, inget admin: `/quiet
-  InstallAllUsers=0 PrependPath=1 Include_pip=1`), 3) `pip install -r
-  requirements.txt` tyst, 4) start via `pythonw.exe pdfsorter.pyw`
-  (konsolfritt). Äldre `starta_pdfsorter.bat` borttagen - exakt en
-  bat-fil finns. Felvägar: tydligt meddelande + manuell länk.
+- AC-5.4 **En ordinarie startfil per plattform; ingen fristående Python-
+  installations-BAT.** Windows-startfilen hittar Python (py-launcher → PATH
+  utan Store-stubben → installationsmappar). Bara om Python saknas frågar den
+  om senaste stabila versionen ska hämtas från python.org. Finns Python
+  frågar den aldrig och gör ingen nätverkskontroll eller versionsuppdatering.
+  macOS/Linux-installationsstarten erbjuder installation via systemets
+  pakethanterare endast om Python saknas. Veckoschemat uppdaterar bara Python-
+  paketen. En befintlig Python-version lämnas orörd; en frånvarande Python
+  installeras bara efter användarens uttryckliga ja.
 
 ### REQ-B1 (M) — Textextraktion från flera motorer
 Text ska kunna läsas ur en PDF via åtminstone en av `pymupdf` / `pypdf` /
@@ -828,8 +1269,8 @@ inmapp** (t.ex. Arkiv/ eller redan sorterade undermappar).
   `updated`, `categories`.
 - AC-1.2 Återinläsning av en sparad fil ger identiska kategorier och
   stödord.
-- AC-1.3 Kategorifält `subfolder`, `min_keywords`, `files_sorted`
-  överlever spara/läsa.
+- AC-1.3 Kategorifält `subfolder`, `subfolder_path`, `min_keywords`,
+  `files_sorted` överlever spara/läsa.
 
 ### REQ-E2 (M) — Olika sorters matchningsregler
 **AC-E2:**
@@ -875,26 +1316,35 @@ En osäker fil öppnas med **tio föreslagna stödord** som användaren bockar i
   fält; okänt skrivet namn växlar till Ny mapp-läge.
 
 ### REQ-F2 (M) — Inlärning & omskanning
-När användaren svarat ska appen lära sig och tillämpa regeln på allt
-osorterat.
+När användaren svarat ska appen spara valda stödord och uppdatera
+osorterade filer. En kategori behöver 100 olika manuellt bekräftade filer
+innan automatflytt kan börja. Därefter krävs minst två olika sparade stödord
+som träffar bokstavligt och inte finns i andra kategorier; övriga fall kräver granskning.
 **AC-F2:**
-- AC-2.1 Valda ord sparas som permanenta regler (om "Spara valda ord" är
-  på).
+- AC-2.1 Valda ord sparas som permanenta regler om "Spara valda ord" är
+  på; kryssrutan är på som standard så användarval lärs in vid bekräftelse.
 - AC-2.2 Filen flyttas till vald kategori.
-- AC-2.3 Filer som den nya regeln nu täcker tas automatiskt bort ur kön.
+- AC-2.3 Automatflytt aktiveras för en kategori först efter 100 distinkta manuella bekräftelser; därefter krävs minst två olika exakta helords-/frasträffar som inte delas med andra kategorier.
 - AC-2.4 `rescan_after_learn` skannar om kön, inmapparna och `_Osorterat`
-  i bakgrunden. Redan sorterade filer rörs aldrig.
+  i bakgrunden. Samma 100 bekräftelser och två kategoriexklusiva exakta träffar krävs; övriga läggs i kön.
+- AC-2.5 Manuellt valda undermappar per fil sparas som användarvalda dokumenttyper. Efter minst 100 manuella bekräftelser i huvudkategorin får en typundermapp väljas automatiskt först när minst två typer har fem manuella exempel vardera, två särskiljande typord träffar och modellen är säker; annars skickas filen till granskning.
+- AC-2.6 Granskningsrutans PDF-förhandsvisning kan valfritt rita en ruta runt markerbar text och spara text, sidnummer, relativ sidposition och vald undermapp som mall. Aktiva mallar kräver samma normaliserade text i samma sidområde; mallar är av/på-valbara per kategori. Ingen eller motstridig mallträff lämnar filen för granskning. Mallar kringgår aldrig 100 manuella bekräftelser eller de två kategoriexklusiva stödorden.
+- AC-2.7 I kategoriredigeraren visas sparade stödord till vänster och endast skapade undermappar för vald kategori till höger. Årsmappskomponenter visas inte och identiska undermappsökvägar från flera år visas en gång. Användaren kan skapa en mapp både i kategorivyn och i kopplingsdialogen, dra ett stödord till en mapp och välja exakt ett standardord per kategori. Ett kopplat ord avgör endast undermapp efter att den separata kategorisäkerheten är uppfylld; utebliven eller motstridig undermappsträff lämnar filen för granskning.
+- AC-2.8 När Arkivbevakning är aktiverad kontrollerar appen regelbundet PDF:er under den konfigurerade arkivroten. Den ignorerar mappar som inte motsvarar en aktiv kategori, flyttar endast vid samma säkra kategorikrav som vanlig autosortering och en entydig undermapp, och lägger möjliga men osäkra felplaceringar i granskningskön. Originalet skrivs aldrig över.
 
 ### REQ-F3 (M) — Flikar
 **AC-F3:**
-- AC-3.1 Flikar: Sortera, Matchningar, Inställningar, Granska, Historik,
-  JSON, Hjälp.
+- AC-3.1 Flikar i ordning: Start, Granska, Kategorier, Inställningar,
+  Historik, Hjälp, Avancerat.
 - AC-3.2 Statusrad längst ned visar PDF-motor och OCR-status.
 
-### REQ-F4 (M) — Matchningar: sök, sortera och visa
+### REQ-F4 (M) — Kategorier: sök, sortera och visa
 **AC-F4:**
-- AC-4.1 Kategorilista till vänster, stödord för vald kategori till höger.
-- AC-4.2 Sökfält igenom alla kategorier.
+- AC-4.1 Kategori väljs i en rullgardinsmeny överst. Vänsterfältet listar endast sparade stödord för vald kategori; högerfältet listar endast skapade mappar i kategorin. Årsmappskomponenter utelämnas och mappar med samma relativa sökväg under olika år visas en gång.
+- AC-4.1a Sparade stödord dras från vänsterfältet till en skapad mapp i högerfältet. Ett stödord får finnas i flera kategorier; mappfältet visar inte stödord eller andra kopplingsdata.
+- AC-4.1b Ett standardstödord väljs per kategori. Standardvalet är kategorispecifikt även när samma ord finns i flera kategorier. Vid automatflytt måste standardordet också finnas; ett delat standardord är bara en ankarkontroll och räknas inte bland de två kategoriexklusiva stödorden eller ersätter kraven på 100 manuella bekräftelser.
+- AC-4.1c Användaren kan markera ett eller flera stödord och en undermapp och koppla dem med knappen eller `Ctrl+M`; dra-och-släpp finns kvar som alternativ. Funktionen ändrar bara kopplingen, aldrig PDF-filer.
+- AC-4.2 Stödordslistan visar alla stödord för vald kategori utan ett separat sök-/filterfält.
 - AC-4.3 Klick på rubrik sorterar; TYP, VIKT, HELT ORD, TRÄFFAR visas.
 - AC-4.4 Varannan rad tonad + statusfärger (stark/weak/off).
 
@@ -903,7 +1353,7 @@ Användaren ska kunna ta bort **både enskilda stödord** ur en kategori och
 **en hel kategori (hela listan)** med alla dess stödord, direkt i
 gränssnittet utan att öppna JSON-filen.
 **AC-F5:**
-- AC-5.1 **Enskilt stödord:** Markera ett/flera stödord i Matchningar →
+- AC-5.1 **Enskilt stödord:** Markera ett/flera stödord i Kategorier →
   knappen "Ta bort" eller tangenten `Delete`. En bekräftelsedialog frågar
   först.
 - AC-5.2 **Hela kategorin (hela listan):** Markera en kategori → knappen
@@ -1336,8 +1786,9 @@ KOMMANDE tills beställaren uttryckligen ger klartecken.
   "bygg nu").
 - AC-4.3 Beställaren kan när som helst skjuta upp, avbryta eller avbeställa
   utan att andra krav påverkas.
-- AC-4.4 Regeln gäller även funktioner som redan kodlevererats men är
-  avstängda i väntan på order (t.ex. N7, `preview_in_dialog=False`).
+- AC-4.4 Kodade funktioner är inte automatiskt aktiverade om de kräver
+  uttryckligt godkännande; användarens senare, uttryckliga klartecken ändrar
+  statusen och dokumenteras i respektive krav.
 ## L. Robusthet mot nya krav — tillägg som ska hållas
 
 ### REQ-L1 (M) — Ta bort matchningar i GUI (se REQ-F5)
@@ -1427,10 +1878,9 @@ Varje session får ett SESSION_ID (uuid[:12]) som skrivs i startbanderollen.
   `✗ FEL (N ms): exc` till sessionsloggen. Används runt per-fil-analys
   (`tid`) och batchsortering; undantag loggas och propagerar.
 - AC-1.9 **Loggmigrering (LÅNAT MÖNSTER L7, leverans 2026-09-17):**
-  `migrate_legacy_logs()` körs vid sessionsstart: äldre `krasch.log` i
-  config-roten flyttas till `logs/krasch.log`; finns redan en ny
-  parkeras den gamla som `krasch-gammal.log` (nyast vinner, inget
-  raderas).
+  `migrate_legacy_logs()` körs vid sessionsstart: äldre `.log`-filer i
+  config-roten flyttas till `logs/` eller `logs/äldre/`; namnkonflikter
+  får ett numrerat namn. Inget skrivs över eller raderas.
 - AC-1.10 **Tilläggsdialog vid start (ANVÄNDARORDER 2026-09-28):**
   strax efter start erbjuder appen installation av saknade valfria
   tillägg (Tesseract OCR, pytesseract, PyMuPDF, pdftoppm, pystray) med
@@ -1461,8 +1911,12 @@ Varje session får ett SESSION_ID (uuid[:12]) som skrivs i startbanderollen.
   och `show_window` garderas med `winfo_exists()` (tydlig logg i stället
   för TclError-spam); `App.run()` avslutar processen hårt när mainloop
   tar slut med dött fönster (zombieskydd, flush först).
-  (b) `archive_old_logs(3)` vid varje start: sessionsloggar äldre än
-  3 dagar flyttas till `logs/arkiv/<ÅR>/<MÅNAD>/` - inget raderas.
+  (b) `archive_old_logs(1)` vid varje start: sessionsloggar från gårdagen
+  och äldre flyttas till `logs/arkiv/<ÅR>/<MÅNAD>/`, baserat på datumet i
+  filnamnet. Dagens logg lämnas kvar. `felkoder.log`, `fel-samlat.log` och
+  månadsvisa `errors.log` arkiveras aldrig; stabila felkoder med status
+  `ÖPPEN` finns kvar separat i `felkoder.log` tills de markeras åtgärdade
+  med `--mark-felkod-atgardad KOD`. Historiken raderas inte.
 - AC-1.11 **Autoinstall vid start (ANVÄNDARORDER 2026-10-06: "saknade
   python-tillbehör installeras/uppdateras automatiskt, visa progress
   bar"):** vid start kontrolleras pypdf/Pillow/pytesseract/pystray;
@@ -1520,9 +1974,9 @@ bryter dödlägen i granskningskön. Inspireation: Paperless-ngx tränar ML
 på 20–30 manuellt arkiverade dokument; AI-fakturaprocessorer lär av
 varje korrigering.
 **AC-N14:**
-- AC-14.1 Klassificeraren tränas på historikens beslut (auto + användar-
-  val i granskning), helt lokalt, deterministiskt och utan nätverk/ML-
-  paket — en ordvägare per kategori räcker för volymen.
+- AC-14.1 Klassificeraren tränas fortlöpande och helt lokalt på historikens
+  uttryckligen bekräftade användarval och rättelser. Autosorteringar och
+  omskanningar räknas aldrig som facit; ingen nätverks- eller ML-tjänst används.
 - AC-14.2 Minst N fattade beslut per kategori (standard: 5, inställbart)
   krävs innan kategorins lärda profil används; under det är den tyst.
 - AC-14.3 Den lärda profilen är en SVAG signal: den kan föreslå/förbättra
@@ -1532,33 +1986,40 @@ varje korrigering.
 - AC-14.4 Korrigeringar matas tillbaka: väljer användaren en annan
   kategori än den föreslagna uppdateras profilen (negativ inlärning för
   det falska spåret, kopplat till förslag #116).
-- AC-14.5 Profilen följer med rules.json-säkerhetskopior och påverkar
-  aldrig redan sorterade filer; den kan slås av helt i inställningarna
-  (`learned_matching`, standard på efter beslut).
+- AC-14.5 Profilen sparas lokalt och påverkar inte redan sorterade filer.
+  Självlärningen är alltid aktiv och kan inte stängas av i inställningarna;
+  gamla `learned_matching=false` ignoreras. Vid första körningen efter
+  uppgraderingen byggs profilen om från historikens användarbekräftade val,
+  så äldre autosorteringar inte fortsätter påverka modellen.
 - AC-14.6 **LEVERERAD 2026-09-28:** `LearnedMatcher` (naiv Bayes,
   Laplace-mjukning + prior) i `learned_model.json`; träningsdata =
   `learn_tokens()` (~60 karakteristiska ord, stoppsord gallrade) som
-  sparas i varje historikpost (`tokens`) och tränas stegvis vid varje
-  flytt i `engine.apply()`, flush vid batchslut/avslut. Integration i
-  `decide()`: (a) bryter regelgodkända dödlägen när marginalen är säker
-  (≥0,25 i log-rummet) på någon av de två nära kandidaterna, (b) på
-  nivån "Lös" auto-flyttar en säker modell ensam, (c) annars
-  `learned_hint` som visas i granskningsrutan ("lärd: X – N liknande
-  filer"). Kryssruta "Lärande matchning" i Inställningar
-  (`learned_matching`, standard på). Verifierat: 14 tester (träning,
-  prediktion, min_files-grind, dödläge, Lös-auto, hint, avstängd,
-  träning-via-apply + journal/historik) + e2e-regression (auto 9,55).
+  sparas i historiken; bara användarbekräftade val/rättelser tränar modellen,
+  manuella val väger tyngre, och autosorteringar/omskanningar hoppas över.
+  Flush sker vid batchslut/avslut. Integrationen i `decide()` kan förbättra
+  rangordningen men kan aldrig ensam flytta en fil; automatflytt kräver 100
+  manuella bekräftelser i kategorin och därefter två exakta, unika,
+  användarsparade stödordsträffar. Inlärningen är
+  alltid aktiv, utan av/på-kryssruta. Vid uppgradering byggs den gamla
+  profilen om en gång från bekräftade historikposter. Verifierat med tester
+  för träning, walk-forward, återbyggnad, rättelser och filtrering av
+  obekräftade beslut.
 
-### REQ-N2 (B) — requirements.txt med pinnade versioner
-En `requirements.txt` bredvid `pdfsorter.py` med `==`-pinnade versioner för
-`pymupdf`, `pypdf`, `pdfminer.six`, `pystray`, `Pillow` och `pytesseract`.
+### REQ-N2 (B) — requirements.txt och veckovis uppdatering
+En `requirements.txt` bredvid `pdfsorter.py` listar Python-tilläggen. Från
+2026-11-05 versionslåses de inte: den veckovisa Windows-uppgiften hämtar
+senaste version som är kompatibel med installerad Python. Appens egna
+programuppdateringar distribueras fortfarande enbart via GitHub Releases.
 **AC-N2:**
-- AC-2.1 Filen finns och pinningen motsvarar testad kombination.
-  **Leverans 2026-08-26:** testad kombination (pypdf, Pillow) pinnad;
-  övriga valfria paket anges som kommenterad installationsväg, eftersom
-  appens reservvägar (REQ-A2) gör dem valfria per miljö.
-- AC-2.2 Kommentar anger att samtliga beroenden är valfria (appens
-  reservvägar gäller fortfarande, REQ-A2).
+- AC-2.1 Första installationen installerar Python om den saknas och
+  installerar tilläggen en gång. Python-tolkens version uppdateras inte
+  automatiskt. Därefter uppdaterar Windows Schemaläggaren endast Python-
+  tilläggen måndagar kl. 08:00, inte vid varje appstart. En missad körning
+  startar när datorn är tillgänglig igen.
+- AC-2.2 Tilläggen använder vald delad Python-miljö (ingen separat venv);
+  andra program som använder samma Python-miljö kan därför påverkas.
+- AC-2.3 Appens start kan fortsätta om ett valfritt tillägg saknas och visar
+  diagnostik enligt appens reservvägar (REQ-A2).
 
 ### REQ-N3 (B) — Diagnostikvy i GUI och --status
 `get_diagnostics()` samlar version, PDF-motorer, OCR-status, textcachens
@@ -1589,6 +2050,17 @@ får "(2)" i namnet). Ingen tyst överskrivning, någonsin.
   med sina namn; "(2)" används vid namnkrock.
 - AC-4.4 Flytt mellan diskar verifieras med hashen efter kopiering, före
   radering av källan.
+- AC-4.5 Möjlig fakturadubblett flaggas endast när leverantörskategori,
+  uttryckligt märkt fakturanummer, belopp att betala och känd valuta (om
+  båda finns) stämmer. Saknas någon nyckel flaggas ingen dubblett.
+- AC-4.6 Granskningen kontrollerar högst 200 senast ändrade PDF:er under
+  samma kategorimapp. Äldre text-PDF:er indexeras lokalt utan att starta
+  ny OCR; appens egna framtida sorteringar sparar identifieraren i
+  `invoice_index.json` och historiken. Indexet flyttas med övriga appdata.
+- AC-4.7 Träff tvingar aktuell fil till användargranskning och visar
+  tidigare sökväg samt matchade uppgifter. Funktionen varnar bara: den
+  hoppar inte över, skriver inte över, flyttar inte och raderar aldrig en
+  fil automatiskt.
 
 ### REQ-N5 (B) — Effektmål: 5000 % bättre avläsning av skannade PDF:er
 Avläsningen (OCR-röret) av inskannade och svåra PDF:er ska förbättras
@@ -1634,13 +2106,32 @@ bild, med bläddring fram/bakåt, så att användaren kan bocka i stödord med
 - AC-7.2 Knappar för föregående/nästa sida (minst de tre första sidorna).
 - AC-7.3 Saknas PyMuPDF döljs förhandsvisningen och dialogen behåller
   knappen Förhandsgranska PDF (extern visning) — reservväg enligt REQ-A2.
-- AC-7.4 Förhandsvisningen är skrivskyddad och påverkar inte matchning,
-  regler eller filer (AC-K1.5).
-- AC-7.5 Kodleverans finns (3 sidor, ‹/›-bläddring, bakgrundsrendering,
-  pymupdf-fallback), men funktionen är **FRAMSKJUTEN** på beställarens
-  order 2026-08-26: `settings["preview_in_dialog"] = False` är standard och
-  förhandsvisningen visas inte förrän beställaren säger till. Koden är
-  bortkopplad, inte borttagen (INGA FUNKTIONER TAS BORT).
+- AC-7.4 Förhandsvisningen är skrivskyddad; rotation i förhandsvisningen
+  påverkar inte originalfilen, matchning eller regler.
+- AC-7.5 90°-rotation kan antingen sparas direkt i originalet efter en
+  tydlig bekräftelse och skapad `.bak`-säkerhetskopia, eller som separat
+  vektorbevarande PDF-kopia om användaren väljer Spara som.
+- AC-7.6 Rätning uppskattar sidornas lutning var för sig och skapar ett
+  separat rasteriserat exemplar efter tydlig varning/ja-nej-fråga för
+  dokumentet; originalet lämnas orört.
+- AC-7.7 Förhandsvisningen är på som standard efter engångsmigrering, kan
+  stängas av från granskningsfliken och faller tillbaka till extern visning
+  om PyMuPDF saknas.
+
+### REQ-N8 (M) — Granskningsflöde, genvägar och läsbarhet
+**AC-N8:**
+- Användaren väljer om kön går vidare efter ett bekräftat beslut; avstängt
+  läge stannar efter varje fil och lämnar resten i kön.
+- **Vänta med den här** lämnar PDF:en orörd och kvar i kön; nästa PDF kan
+  granskas utan att den uppskjutna filen försvinner.
+- Hjälp-menyn visar tangentbordsgenvägarna och dialogens vanliga kortkommandon.
+- Större text kan väljas live och sparas; inga tecken eller kontroller döljs,
+  och befintlig rullning finns kvar.
+- Granskningsdialogens förhandsvisning krymper på korta fönster, rotationsknappar
+  ligger intill sidnavigeringen och den fasta beslutsraden hålls synlig.
+- Import- och exportmappar för kategoriregler kan öppnas från Arkiv-menyn;
+  filväljaren startar i motsvarande mapp.
+- Undantag i GUI-loggen kompletteras med ett konkret säkert nästa steg.
 
 ---
 *Detta är kontraktet för godkännande av PDF Sorter.*
@@ -1675,33 +2166,18 @@ bild, med bläddring fram/bakåt, så att användaren kan bocka i stödord med
 | 199 | "Varför?" i granskningsrutan: klartext ("ordet X i brevhuvudet, org.nr i sidfoten") | Enkelhet |
 | 200 | Hälsokort på Sortera-fliken: grönt/rött för OCR, bevakning, mappar, lär-läge | Enkelhet |
 
-### REQ-N15 (B) — Donationsvy + Swish-QR + SV/EN (LEVERERAD 2026-10-15)
-(ANVÄNDARORDER: "donationssida som dom andra apparna, anpassad för denna
-app, visas i app och html bredvid, swish qr ska jämföras med original,
-sve/eng i appen".)
-**AC-15:**
-- AC-15.1 Donationsvy i appen (Hjälp → "Stöd projektet 💖"): nivåer
-  39/99/299 kr, PayPal/Ko-fi/valfritt, SV/EN-växel som översätter vyn
-  direkt.
-- AC-15.2 HTML-sida bredvid appen: "Stöd ArkivPiloten.html" med samma
-  design, SV/EN-växel (JS), Swish-sektion som visar swish_qr.png när
-  den finns.
-- AC-15.3 Swish-QR ritas BEROENDEFRITT i appen (egen QR-kodare: byte-läge,
-  EC M, v1-6, mask 0) när användaren fyller i sitt nummer
-  (`settings["swish_number"]`). Verifierad mot oberoende avkodare
-  (OpenCV): payloaden avkodas tecken för tecken identiskt - det är
-  jämförelsen med originalet. Payload + kopieringsknappar visas i vyn
-  så att originalet kan skannas och jämföras.
-- AC-15.5 Swish-numret 0721817177 inbakat som standard; swish_qr.png
-  ligger bredvid HTML-sidan och visas där ("visa endast QR" -
-  Öppna Swish-knappen och fejk-citat/sektionen "quotes" borttagna
-  på beställning). QR-payloaden verifierad mot oberoende avkodare.
-- AC-15.6 Donationsvyn i appen visar liksom HTML-sidan ENDAST
-  QR-koden i Swish-sektionen (nummer/text/payload/kopieringsknappar
-  borttagna 2026-10-15: "samma i appen nu?"). Numret ändras vid
-  behov via settings["swish_number"].
-- AC-15.4 Helappens i18n (SV/EN i hela gränssnittet) läggs som förslag
-  #201 i kön - donationsvyn är först ut.
+### REQ-N15 (B) — Inbyggd donationsvy (uppdaterad)
+- Donationsvyn öppnas från Hjälp → "Stöd projektet 💖" och innehåller endast
+  Swish-QR-koden, PayPal-knappen och Ko-fi-knappen. Mottagare och länkar är
+  fasta i den officiella appen; äldre `swish_number`-värden ignoreras.
+- Swish QR-koden använder standardbelopp (inget förifyllt belopp) och det
+  fasta numret 0721817177. Numret eller QR-payloaden visas inte i klartext.
+- PayPal och Ko-fi finns endast som knappar i appen. Ingen separat
+  donationswebbsida eller QR-bild levereras.
+- Inga nivåer, påhittade statistikvärden eller löften om prioriterad support.
+  Alla gåvor är frivilliga och låser inte upp funktioner.
+- Programkoden distribueras under MIT License, vilken tillåter privat och
+  kommersiell användning enligt licensvillkoren.
 
 | 201 | Helappens i18n: SV/EN-växel i hela gränssnittet (strängtabell + växling live) | Enkelhet | VÄNTAR |
 
@@ -1710,17 +2186,86 @@ sve/eng i appen".)
 senast ändrat/skapat datum, sker automatiskt" + "bättre avläsning av
 skannade pdf:er, mer matchningsord".)
 **AC-16:**
-- AC-16.1 `year_subfolder` (standard PÅ): filer utan egen datummall
-  läggs automatiskt i `<kategori>/<år>` där året = äldsta av
-  ändrat/skapat datum (kopia bevarar ursprungligt ändringsdatum).
-  Kryssruta i Datum-kortet; verifierat e2e (2022-fil → Pilkington/2022).
+- AC-16.1 `year_subfolder` (standard PÅ): alla sorterade filer läggs i
+  `<vald mapp>/<år>`, inklusive `_Osorterat`; dokumentdatum styr året när
+  det finns, annars används filens datum. En anpassad datummall behålls
+  innanför årsmappen (och ett år som redan ingår dupliceras inte).
+  Kryssruta i Datum-kortet; verifierat med egen datum- och unmatched-test.
 - AC-16.2 Bättre avläsning: `ocr_max_pages` 3→6 (engångsmigrering för
   gamla inställningar) + extra OCR-pass (psm 4) i läget "high".
-- AC-16.3 Fler matchningsord: `keywords_per_file` 10→15 (gransknings-
+- AC-16.3 Fler matchningsord: `keywords_per_file` höjs till 25 (gransknings-
   rutan visar fler kandidater att bocka i).
 - AC-16.4 Donationsidan: belöpssektionen ("Välj hur du vill hjälpa")
   borttagen ur HTML-sidan på beställning; hjältenivåer nås via hero-knappar
   och slutkort.
+
+### REQ-N17 (B) — Robust, förklarbar självinlärning (IMPLEMENTERAS 2026-10-30)
+(ANVÄNDARVAL: förslag 1, 2, 5, 6, 8, 9 och 10. Modellen är lokal,
+regelstödd och får inte försvaga sorteringens säkerhetsgränser.)
+**AC-17:**
+- AC-17.1 Lärsignaler byggs per zon: generell text samt prefixade
+  avsändar-/brevhuvud-, sidfots-, mottagar- och filnamnsord. Korrigering
+  lagrar fel kategori och endast träffade ord i deras zon (plus den
+  generella ordsignalen), inte samtliga dokumentord som felbevis.
+- AC-17.2 Kategoriprofilen kalibreras med valda respektive korrigerade
+  beslut. Manuellt granskade beslut väger tre gånger tyngre än automatiska
+  utfall, men varje PDF räknas fortfarande som ett enda dokument vid
+  minimiunderlaget. Enskilda signaler klingar av med två års halveringstid;
+  den senaste träffen per signal sparas för drifthantering. Modellen är
+  fortfarande bara en rangordningssignal och kan aldrig ensam utlösa flytt.
+- AC-17.3 Granskningsdialogen förklarar förslaget med matchade stödord,
+  deras dokumentzoner och eventuell lärd/historisk förstärkning.
+- AC-17.4 Walk-forward-testet poängsätter varje historikpost innan den
+  tränas in (ingen framtida läcka), visar träffsäkerhet totalt och per
+  kategori. Historiken kan återuppspelas; en enskild kategoriprofil kan
+  inspekteras, nollställas eller återställas från positiva och negativa
+  historiksignaler.
+- AC-17.5 Modellen sparas lokalt i konfigkatalogen med befintlig atomisk
+  JSON-skrivning, säkerhetskopia och korruptionsåterställning. Synkroniserad
+  åtkomst skyddar samtidiga sorteringstrådar. Befintlig UI-konfigurerbar
+  autostart på Windows, macOS och Linux lämnas intakt; uppdateringar tas
+  fortfarande enbart från GitHub Releases.
+- AC-17.6 `year_subfolder` standard PÅ appliceras även när datumsmall
+  används och i `_Osorterat`: årsmappen ligger direkt under vald mapp,
+  eventuell datummallsökväg följer innanför.
+
+### REQ-N18 (B) — Ny gemensam ArkivPiloten-ikon och autostart utan pyw-filassociation
+(ANVÄNDARORDER 2026-10-30: ny passande ikon överallt; om autostart väljs
+ska den inte använda en `.pyw`-fil som kan visa Pythons ikon.)
+**AC-18:**
+- AC-18.1 `ArkivPiloten.png` är 512×512 RGBA med transparenta hörn och är
+  appikonen för fönster, dialoger, aktivitetsfält, tray, genvägar och
+  macOS-app. `ArkivPiloten.ico` har lager från 16 till 256 px. Den nya
+  mapp-/kompassymbolen och ordmärket finns dessutom som tryckfärdiga,
+  rasterfria SVG-filer under `brand/`; ordmärket är konverterat till banor
+  så att ingen installerad font krävs vid utskrift.
+- AC-18.2 Windows autostart startar `pythonw.exe pdfsorter.py --tray`
+  direkt, aldrig `pdfsorter.pyw` via filassociation. AppUserModelID och
+  den gemensamma `.ico`-filen används för att undvika Python-standardikon;
+  `pythonw.exe` väljs för att undvika konsolfönster.
+- AC-18.3 Autostartens plattformsstöd och UI-val för Windows/macOS/Linux
+  bevaras. Test täcker att Windows autostart inte pekar på `.pyw`.
+- AC-18.4 Windows, macOS och Linux har separata installations-/startflöden;
+  CI kör testsviten på samtliga tre plattformar och på Python 3.10/3.12.
+
+### REQ-N19 (B) — Autouppdatering jämför releasebyggen även vid samma versionsnummer
+(ANVÄNDARORDER 2026-10-30: jämför releasefiler och commit, och erbjud
+uppdatering när något skiljer även om versionsnumret är oförändrat.)
+**AC-19:**
+- AC-19.1 Releasepaketet innehåller `BUILD-MANIFEST.json` med versions-
+  nummer, Git-commit och SHA-256 per distribuerad fil. Release-noterna
+  bär samma manifest i en maskinläsbar, dold markör.
+- AC-19.2 Vid samma versionsnummer jämför appen installerade filer och
+  lokal commit mot manifestet. Olika filhash eller commit ger
+  `available=True`; samma version, commit och filer ger ingen onödig
+  ominstallation.
+- AC-19.3 Äldre releaser utan manifest jämförs från ZIP-filen efter
+  SHA-256-verifiering; resultatet cachelagras mot releasehash och lokal
+  filfingeravtryck. Endast publicerade GitHub Releases används.
+- AC-19.4 Samma versionsnummer får installeras endast när jämförelsen
+  bekräftat ett nytt bygge. Paketets release-manifest måste stämma med
+  releaseinformationen; appfiler säkerhetskopieras och rollback gäller
+  som vid versionsbyte. Versionen bumpas inte automatiskt.
 
 ### REQ-W1 (M) — Workspace-hygien var 10:e chatt
 (ANVÄNDARORDER 2026-10-06: "rensa ws och endast aktiva filer + spec
@@ -1743,7 +2288,7 @@ i kravsektionerna ovan (N1-N14 m.fl.).
 | 4 | Mörkt läge & högkontrast | Ny funktion | **GODKÄND → REQ-H3** (designorder 2026-08-26) | | 5 | Förslagsfunktionen i appen (Förslag-vy + utlösare "förslag") | Ny funktion |
 | 6 | Full testsvit tests/test_full_system.py | Kvalitet |
 | 8 | Diagnostikkort i GUI + utökat --status | Ny funktion | **GODKÄND → REQ-N3** | | 9 | CSV-export av historiken | Ny funktion |
-| 10 | Inbyggd PDF-förhandsvisning i granskningsdialogen | Ny funktion | **KOMMANDE (REQ-N7)** — kod finns men är AVSTÄNGD (`preview_in_dialog=False`) tills beställaren säger till | | 11 | Drag-och-släpp batch-import | Ny funktion |
+| 10 | Inbyggd PDF-förhandsvisning i granskningsdialogen | Ny funktion | **GODKÄND OCH LEVERERAD (REQ-N7)** — sidrotation, vektorbevarande kopia och separat varnad rätad kopia | | 11 | Drag-och-släpp batch-import | Ny funktion |
 | 12 | Duplikatspärr + SHA-256, alltid fråga: ersätt eller "(2)" | Ny funktion | **GODKÄND → REQ-N4** | | 13 | Auto-omladdning av rules.json vid extern ändring | Ny funktion |
 | 14 | NAS-/nätverksmappar med återanslutning + status | Förbättring |
 | 15 | Tangentbordsnav, Ctrl+Z (ångra), Ctrl+F (sök) | Förbättring |
@@ -1805,7 +2350,7 @@ i kravsektionerna ovan (N1-N14 m.fl.).
 | 83 | Minifeed med senaste händelser på Sortera-fliken | Design |
 | 84 | Tillgänglighetsnamn (skärmläsare) på alla kontroller | Design |
 | 85 | Veckorapport autoexporteras till mapp (utan nätverk) | Design |
-| 86 | Färgteckenförklaring på Matchningar-fliken | Design |
+| 86 | Färgteckenförklaring på Kategorier-fliken | Design |
 | 87 | Poängnormalisering mot kategoristorlek (stora kategorier straffas) | Matchning |
 | 88 | Kombinationsregel: två stödord måste träffa i samma stycke | Matchning |
 | 89 | Tidsdecay: nyligen tillagda ord väger tyngre under inlärningsfasen | Matchning |
@@ -1840,7 +2385,7 @@ i kravsektionerna ovan (N1-N14 m.fl.).
 | 119 | Ctrl+T växlar tema direkt | Design |
 | 120 | In-app-toasts (icke-modala) i stället för messagebox för små saker | Design |
 | 121 | Tidslinjevy i Historik, grupperad per dag | Design |
-| 122 | Kategorikort med sparkline på Matchningar | Design |
+| 122 | Kategorikort med sparkline på Kategorier | Design |
 | 123 | Ångra över sessioner (ångra senaste flytten efter omstart) | Design |
 | 124 | Sökmarkering i Hjälp-fliken | Design |
 | 125 | Statuspille med live minnesanvändning (cache-MB) | Design/Minne |
@@ -1859,7 +2404,7 @@ i kravsektionerna ovan (N1-N14 m.fl.).
 | 135 | Flyttverifiering: hashkontroll av målfilen efter flytt/kopiering (billig: hashen finns redan från dubblettkontrollen) | Robusthet |
 | 136 | Loggläsare i appen: bläddra/filtrera gamla sessionsloggar per nivå och kategori, kopiera urval | Felsökning |
 | 137 | Gzip-komprimera sessionsloggar äldre än 3 månader (raderas aldrig — komprimeras bara) | Minne/Ordning |
-| 138 | Träffsäkerhets-KPI: andel auto vs användaröverskrivningar per kategori, pill på Matchningar | Ny funktion |
+| 138 | Träffsäkerhets-KPI: andel auto vs användaröverskrivningar per kategori, pill på Kategorier | Ny funktion |
 | 139 | Filnamnsnormalisering vid flytt (valfritt): datumprefix, understreck, gemener | Ny funktion |
 | 140 | Global sökning (Ctrl+F): ett fält som söker kö + historik + regler och hoppar till rätt flik | Design |
 | 141 | Bevakningshälsa per mapp: kort med antal sedda filer, senaste fil, fel per bevakad mapp | Design |
@@ -1881,7 +2426,7 @@ i kravsektionerna ovan (N1-N14 m.fl.).
 | 152 | 14-dagars sparkline (sorterade filer/dag) på Sortera-fliken | Design |
 | 153 | Högerklick i granskningskön: öppna mapp / förhandsvisa / ignorera / ta ur kön | Design |
 | 154 | Inställbar teckenstorlek (tillgänglighet) utöver HiDPI-autoskalning | Design |
-| 155 | Søkfält på Matchningar-fliken: filtrerar kategorier + stödord direkt | Design |
+| 155 | Søkfält på Kategorier-fliken: filtrerar kategorier + stödord direkt | Design |
 | 156 | Klick på ett stödord → lista tidigare filer det matchade (ur historiken) | Design |
 | 157 | Kön visar föreslagen kategori bredvid filnamnet (regel eller lärd) | Design |
 | 158 | ETA vid långa batcher: filer/min → beräknad återstående tid | Design/Snabbhet |
