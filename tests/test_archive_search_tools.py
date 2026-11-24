@@ -11,7 +11,7 @@ def test_archive_search_returns_case_insensitive_page_hits_and_snippets():
         "invoice", context=8)
 
     assert hits == [{
-        "path": "archive/report.pdf", "page": 2,
+        "path": str(Path("archive/report.pdf")), "page": 2,
         "snippet": "The INVOICE number…",
     }]
 

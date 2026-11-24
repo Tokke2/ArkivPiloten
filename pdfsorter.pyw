@@ -45,16 +45,51 @@ def _config_dir():
     return Path.home() / ".config" / "pdfsorter"
 
 
+class _LazyLogFile:
+    # Öppnar startare.log först när något faktiskt skrivs till stderr.
+
+    def __init__(self, path):
+        self._path = Path(path)
+        self._fh = None
+        self.encoding = "utf-8"
+        self.errors = "replace"
+
+    def writable(self):
+        return True
+
+    def isatty(self):
+        return False
+
+    def write(self, data):
+        text = str(data or "")
+        if not text:
+            return 0
+        if self._fh is None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = open(self._path, "a", encoding="utf-8", buffering=1)
+        return self._fh.write(text)
+
+    def flush(self):
+        if self._fh is not None:
+            self._fh.flush()
+
+    def close(self):
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            finally:
+                self._fh = None
+
+
 def _fixa_stdio():
     # pythonw har ingen konsol: sys.stdout/sys.stderr är None, vilket får
-    # print() och felrapporter att själva krascha. Styr om dem.
+    # print() och felrapporter att själva krascha. Styr om dem utan att
+    # skapa eller låsa en tom startare.log i onödan.
     try:
         if sys.stdout is None:
             sys.stdout = open(os.devnull, "w", encoding="utf-8")
         if sys.stderr is None:
-            logg = _config_dir() / "logs" / "startare.log"
-            logg.parent.mkdir(parents=True, exist_ok=True)
-            sys.stderr = open(logg, "a", encoding="utf-8", buffering=1)
+            sys.stderr = _LazyLogFile(_config_dir() / "logs" / "startare.log")
     except OSError:
         pass
 
@@ -141,6 +176,12 @@ def main():
                 pass
             _fel_dialog(f"ArkivPiloten kunde inte starta.\n\n{text[:1500]}")
         return 1
+    finally:
+        if isinstance(sys.stderr, _LazyLogFile):
+            try:
+                sys.stderr.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

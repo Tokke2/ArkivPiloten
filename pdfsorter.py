@@ -5251,21 +5251,49 @@ def _fit_geometry(win, want_w: int, want_h: int, min_w: int, min_h: int) -> None
                 f"(önskat {want_w}x{want_h}, min {min_w_fit}x{min_h_fit})")
 
 
-def _bind_responsive_wrap(label, container=None, *, pad: int = 36,
-                          min_w: int = 180, max_w: int = 960) -> None:
-    """Anpassa en etiketts radbrytning (wraplength) efter aktuell bredd."""
-    target = container if container is not None else getattr(label, "master", None)
-    if target is None:
+def _bind_responsive_wrap(container_or_label, label=None, *,
+                          reserve: Optional[int] = None, pad: int = 36,
+                          minimum: Optional[int] = None, min_w: int = 180,
+                          maximum: Optional[int] = None, max_w: int = 960) -> None:
+    """Anpassa en etiketts radbrytning (wraplength) efter aktuell bredd.
+
+    Stöder både ``_bind_responsive_wrap(container, label, reserve=..., minimum=..., maximum=...)``
+    och ``_bind_responsive_wrap(label, container=..., pad=..., min_w=..., max_w=...)``.
+    """
+    if label is None:
+        lbl = container_or_label
+        target = getattr(lbl, "master", None)
+    elif reserve is not None or minimum is not None or maximum is not None:
+        target = container_or_label
+        lbl = label
+    else:
+        def _has_wraplength(widget: Any) -> bool:
+            try:
+                widget.cget("wraplength")
+                return True
+            except Exception:
+                return False
+
+        if _has_wraplength(container_or_label) and not _has_wraplength(label):
+            lbl = container_or_label
+            target = label
+        else:
+            target = container_or_label
+            lbl = label
+    if target is None or lbl is None:
         return
+    eff_pad = pad if reserve is None else int(reserve)
+    eff_min = min_w if minimum is None else int(minimum)
+    eff_max = max_w if maximum is None else int(maximum)
 
     def _update(_event=None) -> None:
         try:
             width = int(target.winfo_width())
             if width <= 1:
                 return
-            wrap = max(min_w, min(max_w, width - pad))
-            if int(label.cget("wraplength") or 0) != wrap:
-                label.configure(wraplength=wrap)
+            wrap = max(eff_min, min(eff_max, width - eff_pad))
+            if int(lbl.cget("wraplength") or 0) != wrap:
+                lbl.configure(wraplength=wrap)
         except Exception:
             pass
 
@@ -9295,6 +9323,15 @@ class App:
         varför = "--tray" if start_hidden else "alltid minimerad"
         if self._restart_after_update:
             self._h("fönster", "Appen startas minimerad efter uppdateringen.")
+        if (self.tray is not None and hasattr(self.tray, "is_alive")
+                and not self.tray.is_alive()):
+            self._h("systemfält", "Systemfältsikonens tråd svarade inte längre "
+                    "vid fönsterstart - växlar till aktivitetsfältet", "warn")
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
+            self.tray = None
         if not self.tray:
             self._h("fönster", "Systemfältsikonen saknas - startar "
                     "minimerad i aktivitetsfältet", "warn")
@@ -9322,6 +9359,36 @@ class App:
         with self._ui_lock:
             self._ui_calls.append(fn)
 
+    def _check_tray_health(self) -> None:
+        """Starta om systemfältsikonen om bakgrundstråden dött; visa annars fönstret."""
+        tray = getattr(self, "tray", None)
+        if tray is None or getattr(self, "_quitting", False):
+            return
+        is_alive = getattr(tray, "is_alive", None)
+        if not callable(is_alive) or is_alive():
+            return
+        self._h("systemfält", "Systemfältsikonens tråd har stannat - "
+                "försöker återstarta", "warn")
+        try:
+            tray.stop()
+        except Exception:
+            pass
+        attempts = int(getattr(self, "_tray_restart_attempts", 0))
+        if (attempts < 2 and self.settings.get("tray_enabled", True)
+                and TrayIcon is not None):
+            self._tray_restart_attempts = attempts + 1
+            restarted = TrayIcon(self)
+            if restarted.start():
+                self.tray = restarted
+                self._sync_tray()
+                self._h("systemfält", "Systemfältsikonen återstartades", "ok")
+                return
+        self.tray = None
+        self._h("systemfält", "Systemfältsikonen kunde inte hållas vid liv - "
+                "visar fönstret så appen förblir åtkomlig", "warn")
+        if not getattr(self, "visible", True):
+            self.show_window("systemfältsikonen slutade svara")
+
     def _pump(self) -> None:
         with self._ui_lock:
             calls, self._ui_calls = self._ui_calls, []
@@ -9343,6 +9410,12 @@ class App:
                     self.show_window("en andra instans begärde fönstret")
             except Exception as exc:
                 session_error("fönster", exc)
+        if now - getattr(self, "_last_tray_check", 0.0) >= 3.0:
+            self._last_tray_check = now
+            try:
+                self._check_tray_health()
+            except Exception as exc:
+                session_error("systemfält", exc)
         active = bool(calls or getattr(self, "_busy", False)
                       or self._review_is_open())
         if active:
@@ -18357,7 +18430,17 @@ class App:
             pass
 
     def run(self) -> None:
-        self.root.mainloop()
+        try:
+            self.root._arkivpiloten_running = True
+        except Exception:
+            pass
+        try:
+            self.root.mainloop()
+        finally:
+            try:
+                self.root._arkivpiloten_running = False
+            except Exception:
+                pass
         # Zombieskydd (buggfix 2026-10-15): om huvudfönstret rivits
         # (t.ex. av en felrapport) men en tray-tråd fortfarande håller
         # processen vid liv, skulle instanslåset hållas av en zombie som
@@ -19134,9 +19217,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     session_log("start", f"GUI startar (startar gömd i systemfältet: "
                 f"{args.tray}, återupptar bevakningen: {args.resume_watch})")
     try:
-        App(start_hidden=args.tray, instanslås=lås,
-            resume_watch=args.resume_watch,
-            restart_after_update=args.restart_after_update).run()
+        app = App(start_hidden=args.tray, instanslås=lås,
+                  resume_watch=args.resume_watch,
+                  restart_after_update=args.restart_after_update)
+        app.run()
+    except BaseException:
+        # Om App.__init__ kraschade innan mainloop startade finns en dold,
+        # trasig Tk-rot kvar; rensa den så att crash_report() kan visa en dialog.
+        try:
+            import tkinter as _tk_clean
+            _rot = getattr(_tk_clean, "_default_root", None)
+            if _rot is not None and not getattr(_rot, "_arkivpiloten_running", False):
+                try:
+                    _rot.destroy()
+                except Exception:
+                    pass
+                try:
+                    _tk_clean._default_root = None
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        raise
     finally:
         lås.release()
     session_log("avslut", "main() avslutas normalt")

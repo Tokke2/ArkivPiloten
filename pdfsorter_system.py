@@ -1791,14 +1791,14 @@ class TrayIcon:
 
             # Starta inte appen dold utifrån enbart en lyckad Thread.start():
             # vänta tills pystray har byggt sin native-ikon och visat den.
-            if not self._ready.wait(timeout=3.0):
+            if not self._ready.wait(timeout=5.0):
                 self._startup_error = TimeoutError(
-                    "pystray startade inte systemfältsikonen inom 3 sekunder")
+                    "pystray startade inte systemfältsikonen inom 5 sekunder")
             if self._startup_error is not None:
                 session_error("systemfält", self._startup_error)
                 self.stop()
                 return False
-            if not self._detached and not (self._thread and self._thread.is_alive()):
+            if not self.is_alive():
                 session_error("systemfält", RuntimeError(
                     "pystray-tråden avslutades direkt efter start"))
                 self.stop()
@@ -1808,6 +1808,16 @@ class TrayIcon:
             session_error("systemfält", exc)
             self.stop()
             return False
+
+    def is_alive(self) -> bool:
+        """Lever systemfältsikonens backend fortfarande?"""
+        if self.icon is None:
+            return False
+        if self._detached:
+            return True
+        if self._thread is None:
+            return getattr(self.icon, "visible", True) is not False
+        return self._thread.is_alive()
 
     def _setup_icon(self, icon) -> None:
         """Visa ikonen efter att pystray har initierat sin native-backend."""
@@ -2312,16 +2322,51 @@ def _config_dir():
     return Path.home() / ".config" / "pdfsorter"
 
 
+class _LazyLogFile:
+    # Öppnar startare.log först när något faktiskt skrivs till stderr.
+
+    def __init__(self, path):
+        self._path = Path(path)
+        self._fh = None
+        self.encoding = "utf-8"
+        self.errors = "replace"
+
+    def writable(self):
+        return True
+
+    def isatty(self):
+        return False
+
+    def write(self, data):
+        text = str(data or "")
+        if not text:
+            return 0
+        if self._fh is None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = open(self._path, "a", encoding="utf-8", buffering=1)
+        return self._fh.write(text)
+
+    def flush(self):
+        if self._fh is not None:
+            self._fh.flush()
+
+    def close(self):
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            finally:
+                self._fh = None
+
+
 def _fixa_stdio():
     # pythonw har ingen konsol: sys.stdout/sys.stderr är None, vilket får
-    # print() och felrapporter att själva krascha. Styr om dem.
+    # print() och felrapporter att själva krascha. Styr om dem utan att
+    # skapa eller låsa en tom startare.log i onödan.
     try:
         if sys.stdout is None:
             sys.stdout = open(os.devnull, "w", encoding="utf-8")
         if sys.stderr is None:
-            logg = _config_dir() / "logs" / "startare.log"
-            logg.parent.mkdir(parents=True, exist_ok=True)
-            sys.stderr = open(logg, "a", encoding="utf-8", buffering=1)
+            sys.stderr = _LazyLogFile(_config_dir() / "logs" / "startare.log")
     except OSError:
         pass
 
@@ -2408,6 +2453,12 @@ def main():
                 pass
             _fel_dialog(f"ArkivPiloten kunde inte starta.\n\n{text[:1500]}")
         return 1
+    finally:
+        if isinstance(sys.stderr, _LazyLogFile):
+            try:
+                sys.stderr.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
@@ -2473,12 +2524,7 @@ def crash_report(exc: BaseException) -> None:
     # då syns kraschen i sitt sammanhang (vad hände precis innan). Om felet
     # inträffar före sessionsstart skrivs det ändå till samlingsloggen.
     felrad = f"{type(exc).__name__}: {exc}"
-    nu = _dt.now()
-    ts = nu.strftime("%H:%M:%S.") + f"{nu.microsecond // 1000:03d}"
     session_log("krasch", felrad + "\n" + text.rstrip(), level="err")
-    if _SESSION_FH is None:
-        _append_consolidated_error(
-            ts, "krasch".ljust(10), [felrad, *text.rstrip().splitlines()])
     if _diag is not None:
         _diag.note("krasch", f"{type(exc).__name__}: {exc}", tb_text=text,
                    logg=False)
@@ -2501,8 +2547,9 @@ def crash_report(exc: BaseException) -> None:
     # process (t.ex. från tray-tråden) kan vid destroy() riva med
     # huvudfönstret ("application has been destroyed") och lämna en
     # zombie som håller instanslåset - appen gick inte att öppna igen.
-    # Därför: dialog ENDAST från huvudtråden och ENDAST när inget
-    # Tk-fönster redan lever; annars bara logg.
+    # Därför: dialog ENDAST från huvudtråden och ENDAST när inget aktivt
+    # huvudfönster redan kör mainloop; en halvbyggd dold rot från en
+    # avbruten __init__ städas först så att startkrascher inte tystas.
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -2513,6 +2560,17 @@ def crash_report(exc: BaseException) -> None:
             if levande_rot is not None and not levande_rot.winfo_exists():
                 levande_rot = None
         except Exception:
+            levande_rot = None
+        if (i_huvudtrad and levande_rot is not None
+                and not getattr(levande_rot, "_arkivpiloten_running", False)):
+            try:
+                levande_rot.destroy()
+            except Exception:
+                pass
+            try:
+                tk._default_root = None
+            except Exception:
+                pass
             levande_rot = None
         if not i_huvudtrad or levande_rot is not None:
             session_log("krasch", "Felrapport utan dialog (tråd/fönster-läge)",
@@ -2839,12 +2897,83 @@ def swish_payload(number: str, amount: Optional[int] = None) -> str:
     return url
 
 
-def archive_old_logs(days: int = 1) -> int:
-    """Arkivera sessionsloggar från och med angivet antal kalenderdagar bakåt.
+_KEEP_VISIBLE_LOG_ROOT = {"fel-samlat.log", "felkoder.log"}
 
-    Standardvärdet 1 flyttar gårdagens och äldre sessionsloggar till
-    logs/arkiv/<ÅÅÅÅ>/<MM>/. Dagens logg och felkodernas permanenta logg
-    arkiveras aldrig. Datumet i sessionsfilens namn styr, inte mtime.
+
+def _gzip_archive_file(fil: Path, dest: Path, archive_name: str) -> bool:
+    """Komprimera en loggfil atomiskt till arkivet och ta bort originalet."""
+    import gzip
+    import tempfile
+
+    try:
+        st = fil.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    if st.st_size == 0:
+        try:
+            fil.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        return False
+
+    dest.mkdir(parents=True, exist_ok=True)
+    mål = dest / archive_name
+    if mål.exists():
+        stem = archive_name[:-7] if archive_name.endswith(".log.gz") else (
+            archive_name[:-3] if archive_name.endswith(".gz") else archive_name)
+        ext = ".log.gz" if archive_name.endswith(".log.gz") else ".gz"
+        mål = dest / f"{stem}_{st.st_mtime_ns}{ext}"
+    suffix = 2
+    grundmål = mål
+    while mål.exists():
+        stem = grundmål.name[:-3] if grundmål.name.endswith(".gz") else grundmål.name
+        mål = grundmål.with_name(f"{stem} ({suffix}).gz")
+        suffix += 1
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{mål.name}-", suffix=".tmp", dir=str(dest))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        with open(fil, "rb") as source:
+            with gzip.open(tmp, "wb") as fo:
+                shutil.copyfileobj(source, fo)
+        os.replace(tmp, mål)
+        tmp = None
+        fil.unlink()
+        return True
+    except (FileNotFoundError, PermissionError):
+        return False
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _cleanup_empty_dir(path: Path) -> None:
+    """Ta bort nu tomma undermappar i logs/ (aldrig logs/arkiv eller logs/)."""
+    try:
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    except OSError:
+        pass
+
+
+def archive_old_logs(days: int = 1) -> int:
+    """Arkivera alla loggar från gårdagen och bakåt så endast dagens logg syns.
+
+    Standardvärdet 1 flyttar gårdagens och äldre sessionsloggar, månadsloggar
+    (t.ex. ``errors.log``), äldre rotloggar (``install.log``, ``startare.log``,
+    ``krasch.log``, ``python-packages-update.log``, ``autostart.log`` m.fl.)
+    samt filer i ``logs/äldre/`` till ``logs/arkiv/<ÅÅÅÅ>/<MM>/``.
+    Dagens logg samt de permanenta felkod/felsökningsloggarna
+    (``felkoder.log``, ``fel-samlat.log``) lämnas alltid framme.
     """
     flyttade = 0
     try:
@@ -2854,10 +2983,35 @@ def archive_old_logs(days: int = 1) -> int:
         bas = session_dir()
         if not bas.is_dir():
             return 0
-        for månadsmap in list(bas.iterdir()):
-            if not månadsmap.is_dir() or månadsmap.name == "arkiv":
+        for post in list(bas.iterdir()):
+            if post.name == "arkiv":
                 continue
-            for fil in list(månadsmap.glob("app_*.log")):
+            if post.is_file():
+                if (post.name.startswith(".")
+                        or post.name.lower() in _KEEP_VISIBLE_LOG_ROOT
+                        or post.name.lower().endswith(".gz")):
+                    continue
+                try:
+                    if _SESSION_PATH is not None and post.resolve() == _SESSION_PATH.resolve():
+                        continue
+                    loggdatum = _dt.fromtimestamp(post.stat().st_mtime).date()
+                    if loggdatum > gränsdatum:
+                        continue
+                    dest = bas / "arkiv" / f"{loggdatum:%Y}" / f"{loggdatum:%m}"
+                    arc_name = f"{post.stem}_{loggdatum:%Y%m%d}{post.suffix}.gz"
+                    if _gzip_archive_file(post, dest, arc_name):
+                        flyttade += 1
+                except (FileNotFoundError, PermissionError):
+                    continue
+                except Exception as exc:
+                    session_log("logg", f"Kunde inte arkivera {post.name}: "
+                                f"{type(exc).__name__}: {exc}", "warn")
+                continue
+            if not post.is_dir():
+                continue
+            for fil in list(post.iterdir()):
+                if not fil.is_file() or fil.name.lower().endswith(".gz"):
+                    continue
                 try:
                     if _SESSION_PATH is not None and fil.resolve() == _SESSION_PATH.resolve():
                         continue
@@ -2867,41 +3021,26 @@ def archive_old_logs(days: int = 1) -> int:
                             loggdatum = _dt.strptime(match.group(1), "%Y%m%d").date()
                         except ValueError:
                             loggdatum = _dt.fromtimestamp(fil.stat().st_mtime).date()
+                        arc_name = fil.name + ".gz"
                     else:
                         loggdatum = _dt.fromtimestamp(fil.stat().st_mtime).date()
+                        arc_name = f"{fil.stem}_{loggdatum:%Y%m%d}{fil.suffix}.gz"
                     if loggdatum > gränsdatum:
                         continue
-
-                    st = fil.stat()
                     dest = bas / "arkiv" / f"{loggdatum:%Y}" / f"{loggdatum:%m}"
-                    dest.mkdir(parents=True, exist_ok=True)
-                    mål = dest / (fil.name + ".gz")
-                    if mål.exists():
-                        mål = dest / (fil.stem + f"_{st.st_mtime_ns}" + ".log.gz")
-                    suffix = 2
-                    grundmål = mål
-                    while mål.exists():
-                        mål = grundmål.with_name(
-                            f"{grundmål.stem} ({suffix}){grundmål.suffix}")
-                        suffix += 1
-                    import gzip
-                    try:
-                        with gzip.open(mål, "xb") as fo:
-                            with open(fil, "rb") as source:
-                                shutil.copyfileobj(source, fo)
-                    except Exception:
-                        mål.unlink(missing_ok=True)
-                        raise
-                    fil.unlink()
-                    flyttade += 1
+                    if _gzip_archive_file(fil, dest, arc_name):
+                        flyttade += 1
+                except (FileNotFoundError, PermissionError):
+                    continue
                 except Exception as exc:
                     session_log("logg", f"Kunde inte arkivera {fil.name}: "
                                 f"{type(exc).__name__}: {exc}", "warn")
                     continue
+            _cleanup_empty_dir(post)
         if flyttade:
-            session_log("logg", f"Arkiverade {flyttade} sessionslogg(ar) "
+            session_log("logg", f"Arkiverade {flyttade} loggfil(er) "
                         f"från {gränsdatum:%Y-%m-%d} och äldre till "
-                        "logs/arkiv/ÅR/MÅNAD; felkodloggar lämnades kvar")
+                        "logs/arkiv/ÅR/MÅNAD; dagens logg och felkodloggar lämnades kvar")
     except Exception:
         pass
     return flyttade
@@ -2977,6 +3116,9 @@ def start_session(banner_lines: Optional[List[str]] = None) -> Optional[Path]:
     for r in rader:
         session_log("start", r)
     try:
+        # Om appens kod/bygge uppdaterats rensas äldre pre-uppdateringsfel
+        # automatiskt; kvarstående buggar öppnas igen om de upprepas.
+        auto_resolve_on_build_change()
         # Kvarlämnade poster för åtgärdade koder (markerade av en äldre
         # version, eller medan loggfilen var låst) städas här.
         purge_resolved_error_codes()
@@ -3037,29 +3179,47 @@ def session_log(category: str, message: str, level: str = "info") -> None:
 
     Radformat: HH:MM:SS.mmm  NIVÅ   kategori   meddelande
     Flerradiga meddelanden indenteras så att varje rad syns i klistret.
-    Alla FEL speglas dessutom till logs/fel-samlat.log, som är en enda
-    lättfunnen felsökningslogg över flera sessioner.
+    Alla FEL speglas dessutom alltid till logs/fel-samlat.log och
+    logs/felkoder.log - även före start_session() eller efter avslut.
     """
-    if _SESSION_FH is None:
-        return
-    _archive_logs_on_new_day()
     nu = _dt.now()
     ts = nu.strftime("%H:%M:%S.") + f"{nu.microsecond // 1000:03d}"
     lvl = _LEVELS.get(level, "INFO").ljust(5)
     cat = (category or "app")[:10].ljust(10)
+    lines = str(message).splitlines() or [""]
+    is_err = lvl.strip() == "FEL"
+    if _SESSION_FH is None:
+        if is_err:
+            try:
+                with _SESSION_LOCK:
+                    _append_consolidated_error(ts, cat, lines)
+            except Exception:
+                pass
+        return
+    _archive_logs_on_new_day()
     try:
         with _SESSION_LOCK:
             _rotateIfNeeded()
             if _SESSION_FH is None:
+                if is_err:
+                    _append_consolidated_error(ts, cat, lines)
                 return
-            lines = str(message).splitlines() or [""]
             _SESSION_FH.write(f"{ts}  {lvl} {cat} {lines[0]}\n")
             for ln in lines[1:]:
                 _SESSION_FH.write(f"{'':22}{ln}\n")
-            if lvl.strip() == "FEL":
+            if is_err:
                 _append_consolidated_error(ts, cat, lines)
     except Exception:
         pass
+
+
+def _error_fingerprint(message: str, traceback_text: str = "") -> str:
+    """Samma felavtryck som pdfsorter_diag.fingerprint (även utan _diag)."""
+    if _diag is not None:
+        return _diag.fingerprint(message, traceback_text)
+    return hashlib.sha1(
+        (str(message) + "\n" + str(traceback_text)).encode("utf-8", "replace")
+    ).hexdigest()[:8]
 
 
 def _append_consolidated_error(ts: str, category: str,
@@ -3067,6 +3227,8 @@ def _append_consolidated_error(ts: str, category: str,
     """Spara feltexten och dess stabila kod i två egna, icke-arkiverade loggar."""
     message = str(lines[0] if lines else "okänt fel")
     traceback_text = "\n".join(str(line) for line in (lines[1:] if lines else []))
+    code = _error_fingerprint(message, traceback_text)
+    stamp = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         target = session_dir() / "fel-samlat.log"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -3074,17 +3236,12 @@ def _append_consolidated_error(ts: str, category: str,
             fh.write(f"{ts}  FEL   {category} {message}\n")
             for line in lines[1:]:
                 fh.write(f"{'':22}{line}\n")
+            fh.write(f"{'':22}[felkod {code} · {stamp}]\n")
     except Exception:
         # Fel i felsökningsloggen får aldrig hindra appens normala loggning.
         pass
 
     try:
-        if _diag is not None:
-            code = _diag.fingerprint(message, traceback_text)
-        else:
-            code = hashlib.sha1(
-                (message + "\n" + traceback_text).encode("utf-8", "replace")
-            ).hexdigest()[:8]
         code_log = session_dir() / "felkoder.log"
         code_log.parent.mkdir(parents=True, exist_ok=True)
         with open(code_log, "a", encoding="utf-8", buffering=1) as fh:
@@ -3262,9 +3419,9 @@ def purge_resolved_error_codes() -> Dict[str, Any]:
             kvar.append(post["rad"])
         kodfil.write_text("".join(kvar), encoding="utf-8")
         resultat["koder"] = sorted(atgardade)
-        if nycklar:
-            resultat["samlat"] = _purge_samlat(mapp / "fel-samlat.log",
-                                               nycklar)
+        if nycklar or atgardade:
+            resultat["samlat"] = _purge_samlat(
+                mapp / "fel-samlat.log", nycklar, atgardade)
         session_log("logg",
                     f"Rensade {resultat['block']} felpost(er) för "
                     f"{len(resultat['koder'])} åtgärdade felkod(er) ur loggen")
@@ -3278,31 +3435,148 @@ def purge_resolved_error_codes() -> Dict[str, Any]:
 _RE_SAMLAT_FEL = re.compile(
     r"^\d{2}:\d{2}:\d{2}\.\d{3}\s{1,3}FEL\s+(\S+)\s+(.*)$")
 _RE_SAMLAT_FORTS = re.compile(r"^ {20,}")
+_RE_SAMLAT_KOD = re.compile(r"^\[felkod ([0-9a-f]{8})\b")
 
 
-def _purge_samlat(fil: Path, nycklar: set) -> int:
-    """Ta bort felposter ur fel-samlat.log som matchar åtgärdade koder."""
+def _purge_samlat(fil: Path, nycklar: set,
+                  atgardade: Optional[set] = None) -> int:
+    """Ta bort felposter ur fel-samlat.log som matchar åtgärdade koder.
+
+    Matchar på tre sätt så inget fixat fel blir kvar:
+      1) exakt (kategori, meddelande) ur borttagna ÖPPEN-block,
+      2) inbäddad ``[felkod XXXXXXXX ...]``-rad i posten,
+      3) beräknat felavtryck från meddelande + spårning mot ``atgardade``.
+    """
     try:
         rader = fil.read_text(encoding="utf-8").splitlines(keepends=True)
     except OSError:
         return 0
+    koder = set(atgardade or ())
     kvar: List[str] = []
     borttagna = 0
-    hoppa_fortsättning = False
-    for rad in rader:
-        if hoppa_fortsättning:
-            if _RE_SAMLAT_FORTS.match(rad):
-                continue
-            hoppa_fortsättning = False
+    i = 0
+    while i < len(rader):
+        rad = rader[i]
         match = _RE_SAMLAT_FEL.match(rad.rstrip("\n"))
-        if match and (match.group(1), match.group(2)) in nycklar:
-            borttagna += 1
-            hoppa_fortsättning = True
+        if not match:
+            kvar.append(rad)
+            i += 1
             continue
-        kvar.append(rad)
+        kat, msg = match.group(1), match.group(2).strip()
+        forts: List[str] = []
+        tb_rader: List[str] = []
+        tag_kod = ""
+        j = i + 1
+        while j < len(rader) and _RE_SAMLAT_FORTS.match(rader[j]):
+            forts.append(rader[j])
+            innehall = rader[j][22:].rstrip("\n") if len(rader[j]) > 22 else rader[j].strip()
+            km = _RE_SAMLAT_KOD.match(innehall.strip())
+            if km:
+                tag_kod = km.group(1)
+            else:
+                tb_rader.append(innehall)
+            j += 1
+        fp = _error_fingerprint(msg, "\n".join(tb_rader)) if koder else ""
+        traff = (
+            (kat, msg) in nycklar
+            or (koder and (fp in koder or (tag_kod and tag_kod in koder)))
+        )
+        if traff:
+            borttagna += 1
+        else:
+            kvar.append(rad)
+            kvar.extend(forts)
+        i = j
     if borttagna:
         fil.write_text("".join(kvar), encoding="utf-8")
     return borttagna
+
+
+def _current_build_signature() -> str:
+    """Stabil signatur för installerad kodversion/bygge."""
+    hasher = hashlib.sha256()
+    hasher.update(APP_VERSION.encode("utf-8", "replace"))
+    bas = _main_script.parent
+    manifest = _read_build_manifest(bas / UPDATE_MANIFEST_NAME)
+    if manifest and manifest.get("commit"):
+        hasher.update(str(manifest.get("commit", "")).encode("utf-8", "replace"))
+    for namn in ("pdfsorter.py", "pdfsorter_data.py", "pdfsorter_read.py",
+                 "pdfsorter_system.py", "pdfsorter_theme.py",
+                 "pdfsorter_diag.py"):
+        p = bas / namn
+        if p.is_file():
+            try:
+                hasher.update(namn.encode("utf-8"))
+                hasher.update(hashlib.sha256(p.read_bytes()).digest())
+            except OSError:
+                pass
+    return hasher.hexdigest()[:16]
+
+
+def auto_resolve_on_build_change() -> List[str]:
+    """Rensa automatiskt gamla fel när ett nytt bygge/uppdatering körs.
+
+    När koden uppdaterats (t.ex. efter en buggfix) markeras tidigare
+    ``[ÖPPEN]``-felkoder som åtgärdade och ``fel-samlat.log`` rensas.
+    Om något fel trots allt finns kvar i den nya koden öppnas det igen
+    så fort det inträffar på nytt.
+    """
+    mapp = session_dir()
+    state_file = mapp / ".build_state.json"
+    curr_sig = _current_build_signature()
+    prev_sig = ""
+    had_state = False
+    if state_file.is_file():
+        had_state = True
+        try:
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            prev_sig = str(data.get("signature", ""))
+        except Exception:
+            prev_sig = ""
+
+    klara: List[str] = []
+    if had_state and prev_sig and prev_sig != curr_sig:
+        for post in list_error_codes():
+            if post.get("status") == "ÖPPEN" and mark_error_code_resolved(
+                    post["kod"], f"Automatiskt: nytt appbygge ({APP_VERSION})"):
+                klara.append(post["kod"])
+    elif not had_state:
+        # Första starten med byggstämpel: om det finns en nylig uppdateringsmarkör
+        # i samma appdatamapp, rensa fel som loggades före uppdateringen.
+        try:
+            if mapp.parent == config_dir():
+                upd_file = config_dir() / "updates" / "last_update.json"
+                if upd_file.is_file():
+                    upd = json.loads(upd_file.read_text(encoding="utf-8"))
+                    upd_ts = _felkod_tid(str(upd.get("time", "")))
+                    if upd_ts is not None:
+                        for post in list_error_codes():
+                            if post.get("status") != "ÖPPEN":
+                                continue
+                            err_ts = _felkod_tid(str(post.get("senast", "")))
+                            if err_ts is not None and err_ts <= upd_ts:
+                                if mark_error_code_resolved(
+                                        post["kod"],
+                                        f"Automatiskt: före uppdatering ({APP_VERSION})"):
+                                    klara.append(post["kod"])
+        except Exception:
+            pass
+
+    if klara:
+        session_log("logg", f"Automatiskt åtgärdade {len(klara)} felkod(er) "
+                    f"efter koduppdatering ({APP_VERSION})")
+    try:
+        _atomic_text(
+            state_file,
+            json.dumps({
+                "signature": curr_sig,
+                "version": APP_VERSION,
+                "updated": now_iso(),
+            }, ensure_ascii=False, indent=1),
+        )
+    except Exception:
+        pass
+    return klara
 
 
 def _felkod_tid(rubrik: Optional[str]) -> Optional[Any]:
@@ -3396,6 +3670,8 @@ def latest_session_log() -> Optional[Path]:
         if not bas.is_dir():
             return None
         for month in sorted(bas.iterdir(), reverse=True):
+            if month.name in ("arkiv", "äldre") or not month.is_dir():
+                continue
             try:
                 filer = [f for f in month.iterdir()
                          if f.name.startswith("app_") and f.is_file()]

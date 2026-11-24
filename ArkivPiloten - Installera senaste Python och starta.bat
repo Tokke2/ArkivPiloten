@@ -51,6 +51,11 @@ echo       Python: %PYEXE%
 echo Python: %PYEXE% >> "%LOG%"
 
 set "PKGSTATE=%~dp0cache\python-packages-state.txt"
+if exist "%PKGSTATE%" (
+    set "SAVED_PY="
+    for /f "usebackq delims=" %%p in ("%PKGSTATE%") do if not defined SAVED_PY set "SAVED_PY=%%p"
+    if /i not "!SAVED_PY!"=="%PYEXE%" del /f /q "%PKGSTATE%" >nul 2>&1
+)
 if not exist "%PKGSTATE%" (
     echo [2/6] Kontrollerar Python-tillagg forsta gangen ...
     "%PYEXE%" -c "import importlib.util as u,sys;mods=['fitz','pypdf','pdfminer','PIL','pystray','pytesseract'];sys.exit(any(u.find_spec(m) is None for m in mods))" >nul 2>&1
@@ -61,8 +66,8 @@ if not exist "%PKGSTATE%" (
     ) else (
         echo       Tillaeggen finns redan; versionsuppdatering sker mandag kl. 08:00.
     )
-    rem Markera engangskontrollen sa tillagg inte kontrolleras vid varje appstart.
-    > "%PKGSTATE%" echo bootstrap-attempted
+    rem Markera engangskontrollen for aktuell Python sa tillagg inte kontrolleras vid varje appstart.
+    > "%PKGSTATE%" echo %PYEXE%
     "%PYEXE%" "%~dp0pdfsorter.py" --status >> "%LOG%" 2>&1
 ) else (
     echo [2/6] Python-tillagg uppdateras schemalagt mandagar kl. 08:00.

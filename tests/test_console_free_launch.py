@@ -25,7 +25,8 @@ def test_pythonw_redirects_diagnostics_and_python_exe_hands_off_the_gui():
     app = (ROOT / "pdfsorter.py").read_text(encoding="utf-8")
 
     assert "def _fixa_stdio()" in launcher
-    assert "sys.stderr = open(logg" in launcher
+    assert "_LazyLogFile" in launcher
+    assert "startare.log" in launcher
     assert "def _start_gui_without_console" in app
     assert "pythonw.exe" in app
     assert "CREATE_NO_WINDOW" in app
