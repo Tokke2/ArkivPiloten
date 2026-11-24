@@ -249,7 +249,23 @@ def display_dpi(root: Any) -> float:
     return max(72.0, min(288.0, dpi))
 
 
-def calibrate_tk_scaling(root: Any, dpi: float | None = None) -> float:
+def window_dpi(widget: Any) -> float:
+    """Läs aktuell skärm-DPI för just detta fönster (Per-Monitor v2 på Windows)."""
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            hwnd = int(widget.winfo_id())
+            if hwnd:
+                dpi_val = int(ctypes.windll.user32.GetDpiForWindow(hwnd))
+                if 72 <= dpi_val <= 384:
+                    return float(dpi_val)
+        except Exception:
+            pass
+    return display_dpi(widget)
+
+
+def calibrate_tk_scaling(root: Any, dpi: float | None = None,
+                         *, allow_down: bool = False) -> float:
     """Synka Tk:s inbyggda punkt-till-pixel-skala med skärmens DPI."""
     if dpi is None:
         dpi = display_dpi(root)
@@ -258,7 +274,7 @@ def calibrate_tk_scaling(root: Any, dpi: float | None = None) -> float:
         tk_obj = getattr(root, "tk", None)
         if tk_obj is not None:
             current = float(tk_obj.call("tk", "scaling"))
-            if abs(current - target) > 0.08 and target > current:
+            if abs(current - target) > 0.08 and (allow_down or target > current):
                 tk_obj.call("tk", "scaling", target)
                 return target
             return current
@@ -367,15 +383,77 @@ def navigation_icon_image(kind: str, palette: Dict[str, str], size: int = 20):
         return None
 
 
-def action_icon_image(kind: str, palette: Dict[str, str], size: int = 18,
-                      inverted: bool = False):
-    """Rita skarpa små vektorikoner för knappar och verktygsrader."""
+MICRO_ICON_SVGS: Dict[str, str] = {
+    "sort": '<polygon points="7,5 17,12 7,19"/>',
+    "watch": '<ellipse cx="12" cy="12" rx="8" ry="5"/><circle cx="12" cy="12" r="2.4" fill="currentColor"/>',
+    "folder": '<path d="M3.5,7 H9.5 L11,9.5 H20.5 L19.5,18.5 H4.5 Z"/>',
+    "folder_clean": '<path d="M3.5,7 H9.5 L11,9.5 H20.5 L19.5,18.5 H4.5 Z"/><path d="M9.5,14 L11.5,16 L15,12"/>',
+    "search": '<circle cx="10" cy="10" r="5.5"/><line x1="14" y1="14" x2="19.5" y2="19.5"/>',
+    "audit": '<path d="M12,3.5 L19,6.5 V12.5 L12,20.5 L5,12.5 V6.5 Z"/><polyline points="8.5,12 11,14.5 16,9.5"/>',
+    "add": '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    "refresh": '<path d="M18.5,8.5 A7,7 0 1 0 19,14"/><polyline points="16.5,4.5 19.5,7.5 15.5,9"/>',
+    "help": '<circle cx="12" cy="12" r="8"/><path d="M9.5,9.5 L11,7.8 H13.5 L14.8,9.5 L12,12.5 V14.5"/><circle cx="12" cy="17.5" r="0.8" fill="currentColor"/>',
+    "review": '<rect x="5" y="4" width="11" height="16" rx="1.5"/><line x1="8" y1="9" x2="13" y2="9"/><line x1="8" y1="12" x2="11.5" y2="12"/><polyline points="12.5,16 14.2,17.8 19,12.5"/>',
+    "ocr": '<polyline points="4,8 4,4 8,4"/><polyline points="16,4 20,4 20,8"/><polyline points="4,16 4,20 8,20"/><polyline points="16,20 20,20 20,16"/><line x1="7" y1="10" x2="17" y2="10"/><line x1="7" y1="14" x2="14" y2="14"/>',
+    "pdf_text": '<rect x="5.5" y="3.5" width="13" height="17" rx="1.5"/><line x1="8.5" y1="8.5" x2="15.5" y2="8.5"/><line x1="8.5" y1="12" x2="15.5" y2="12"/><line x1="8.5" y1="15.5" x2="13" y2="15.5"/>',
+    "status_ok": '<circle cx="12" cy="12" r="8"/><polyline points="8.5,12 11,14.5 16,9.5"/>',
+    "status_warn": '<polygon points="12,4 20.5,19 3.5,19"/><line x1="12" y1="9.5" x2="12" y2="14"/><circle cx="12" cy="16.8" r="0.8" fill="currentColor"/>',
+    "status_err": '<circle cx="12" cy="12" r="8"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/>',
+    "status_idle": '<circle cx="12" cy="12" r="5"/>',
+    "status_active": '<circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/>',
+    "jump": '<line x1="6" y1="18" x2="18" y2="6"/><polyline points="10,6 18,6 18,14"/>',
+    "undo": '<polyline points="9,7 4.5,11.5 9,16"/><path d="M5.5,11.5 H14.5 A4.5,4.5 0 0 1 19,16 V17.5"/>',
+    "export": '<rect x="5" y="13" width="14" height="7" rx="1"/><line x1="12" y1="4" x2="12" y2="14"/><polyline points="8.5,10.5 12,14 15.5,10.5"/>',
+    "stop": '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
+    "trash": '<polyline points="4.5,7 19.5,7"/><path d="M9,7 V4.5 H15 V7"/><path d="M6.5,7 L7.5,19.5 H16.5 L17.5,7"/>',
+}
+
+
+def micro_icon_svg(kind: str, color: str, *, size: int = 16,
+                   bg: str = "") -> str:
+    """Returnera skalbar SVG-definition för en vektor-mikroikon (24×24 viewBox)."""
+    body = MICRO_ICON_SVGS.get(str(kind))
+    if not body:
+        return ""
+    size = max(12, min(64, int(size)))
+    bg_rect = (
+        f'<rect x="0" y="0" width="24" height="24" rx="5" fill="{bg}"/>'
+        if bg else ""
+    )
+    rendered = body.replace('fill="currentColor"', f'fill="{color}"')
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" '
+        f'height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" '
+        f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+        f'{bg_rect}{rendered}</svg>'
+    )
+
+
+def _tone_colors(palette: Dict[str, str], tone: str,
+                 inverted: bool) -> Tuple[str, str]:
+    if inverted:
+        return palette["text_invert"], palette["accent"]
+    tone_map = {
+        "on_accent": (palette["text_invert"], palette["accent"]),
+        "ok": (palette["ok"], palette["ok_light"]),
+        "warn": (palette["warn"], palette["warn_light"]),
+        "err": (palette["err"], palette["err_light"]),
+        "muted": (palette["text_muted"], palette["surface_alt"]),
+        "text": (palette["text"], palette["surface_alt"]),
+    }
+    return tone_map.get(tone, (palette["accent"], palette["accent_light"]))
+
+
+def micro_icon_image(kind: str, palette: Dict[str, str], size: int = 16,
+                     *, tone: str = "accent", inverted: bool = False):
+    """Rendera en skarp SVG-baserad mikroikon skalad till aktuell bildstorlek."""
+    if kind not in MICRO_ICON_SVGS:
+        return None
     try:
         from PIL import Image, ImageDraw, ImageEnhance
 
-        size = max(14, min(48, int(size)))
-        fg = palette["text_invert"] if inverted else palette["accent"]
-        bg = palette["accent"] if inverted else palette["accent_light"]
+        size = max(12, min(48, int(size)))
+        fg, bg = _tone_colors(palette, tone, inverted)
         cache_key = (str(kind), fg, bg, size)
         cached = _ACTION_ICON_CACHE.get(cache_key)
         if cached is not None:
@@ -396,16 +474,24 @@ def action_icon_image(kind: str, palette: Dict[str, str], size: int = 18,
             draw.line([xy(x, y) for x, y in points], fill=fg,
                       width=stroke, joint="curve")
 
+        def dot(cx_u, cy_u, r_u, fill=fg, outline=None):
+            cx, cy = xy(cx_u, cy_u)
+            r = r_u * unit
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r),
+                         fill=fill, outline=outline, width=width)
+
         if kind == "sort":
             line(((7, 5), (17, 12), (7, 19), (7, 5)))
         elif kind == "watch":
             draw.ellipse((xy(4, 7), xy(20, 17)), outline=fg, width=width)
-            cx, cy = xy(12, 12)
-            r = 2.4 * unit
-            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=fg)
+            dot(12, 12, 2.4)
         elif kind == "folder":
             line(((3.5, 7), (9.5, 7), (11, 9.5), (20.5, 9.5),
                   (19.5, 18.5), (4.5, 18.5), (3.5, 7)))
+        elif kind == "folder_clean":
+            line(((3.5, 7), (9.5, 7), (11, 9.5), (20.5, 9.5),
+                  (19.5, 18.5), (4.5, 18.5), (3.5, 7)))
+            line(((9, 14), (11.5, 16.5), (15.5, 12)))
         elif kind == "search":
             draw.ellipse((xy(4.5, 4.5), xy(15.5, 15.5)), outline=fg, width=width)
             line(((14, 14), (19.5, 19.5)), stroke=max(1, round(2.4 * unit)))
@@ -423,9 +509,63 @@ def action_icon_image(kind: str, palette: Dict[str, str], size: int = 18,
             draw.ellipse((xy(4, 4), xy(20, 20)), outline=fg, width=width)
             line(((9.5, 9.5), (11, 7.8), (13.5, 7.8), (14.8, 9.5),
                   (12, 12.5), (12, 14.5)))
-            cx, cy = xy(12, 17.5)
-            r = 0.8 * unit
-            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=fg)
+            dot(12, 17.5, 0.8)
+        elif kind == "review":
+            draw.rounded_rectangle(
+                (xy(5, 4), xy(16, 20)), radius=round(1.5 * unit),
+                outline=fg, width=width)
+            line(((8, 9), (13, 9)), stroke=max(1, round(1.6 * unit)))
+            line(((8, 12), (11.5, 12)), stroke=max(1, round(1.6 * unit)))
+            line(((12.5, 16), (14.2, 17.8), (19, 12.5)),
+                 stroke=max(1, round(2.2 * unit)))
+        elif kind == "ocr":
+            line(((4, 8), (4, 4), (8, 4)))
+            line(((16, 4), (20, 4), (20, 8)))
+            line(((4, 16), (4, 20), (8, 20)))
+            line(((16, 20), (20, 20), (20, 16)))
+            line(((7, 10), (17, 10)), stroke=max(1, round(1.6 * unit)))
+            line(((7, 14), (14, 14)), stroke=max(1, round(1.6 * unit)))
+        elif kind == "pdf_text":
+            draw.rounded_rectangle(
+                (xy(5.5, 3.5), xy(18.5, 20.5)), radius=round(1.5 * unit),
+                outline=fg, width=width)
+            line(((8.5, 8.5), (15.5, 8.5)), stroke=max(1, round(1.6 * unit)))
+            line(((8.5, 12), (15.5, 12)), stroke=max(1, round(1.6 * unit)))
+            line(((8.5, 15.5), (13, 15.5)), stroke=max(1, round(1.6 * unit)))
+        elif kind == "status_ok":
+            draw.ellipse((xy(4, 4), xy(20, 20)), outline=fg, width=width)
+            line(((8.5, 12), (11, 14.5), (16, 9.5)))
+        elif kind == "status_warn":
+            line(((12, 4), (20.5, 19), (3.5, 19), (12, 4)))
+            line(((12, 9.5), (12, 14)))
+            dot(12, 16.8, 0.8)
+        elif kind == "status_err":
+            draw.ellipse((xy(4, 4), xy(20, 20)), outline=fg, width=width)
+            line(((9, 9), (15, 15)))
+            line(((15, 9), (9, 15)))
+        elif kind == "status_idle":
+            dot(12, 12, 4.5, fill=fg)
+        elif kind == "status_active":
+            draw.ellipse((xy(4.5, 4.5), xy(19.5, 19.5)), outline=fg, width=width)
+            dot(12, 12, 3.6, fill=fg)
+        elif kind == "jump":
+            line(((6, 18), (18, 6)))
+            line(((10, 6), (18, 6), (18, 14)))
+        elif kind == "undo":
+            line(((9, 7), (4.5, 11.5), (9, 16)))
+            line(((5.5, 11.5), (15.5, 11.5), (18.5, 14.5), (18.5, 18)))
+        elif kind == "export":
+            line(((5, 14), (5, 19.5), (19, 19.5), (19, 14)))
+            line(((12, 4), (12, 14)))
+            line(((8.5, 10.5), (12, 14), (15.5, 10.5)))
+        elif kind == "stop":
+            draw.rounded_rectangle(
+                (xy(6, 6), xy(18, 18)), radius=round(1.5 * unit),
+                outline=fg, width=width)
+        elif kind == "trash":
+            line(((4.5, 7), (19.5, 7)))
+            line(((9, 7), (9, 4.5), (15, 4.5), (15, 7)))
+            line(((6.5, 7), (7.5, 19.5), (16.5, 19.5), (17.5, 7)))
         else:
             return None
 
@@ -433,11 +573,19 @@ def action_icon_image(kind: str, palette: Dict[str, str], size: int = 18,
         out = image.resize((size, size), resampling.LANCZOS)
         out = ImageEnhance.Sharpness(out).enhance(1.15)
         _ACTION_ICON_CACHE[cache_key] = out
-        while len(_ACTION_ICON_CACHE) > 48:
+        while len(_ACTION_ICON_CACHE) > 64:
             _ACTION_ICON_CACHE.popitem(last=False)
         return out.copy()
     except Exception:
         return None
+
+
+def action_icon_image(kind: str, palette: Dict[str, str], size: int = 18,
+                      inverted: bool = False):
+    """Rita skarpa små vektorikoner för knappar och verktygsrader."""
+    return micro_icon_image(
+        kind, palette, size=max(14, min(48, int(size))),
+        tone="accent", inverted=inverted)
 
 
 class Theme:
@@ -456,11 +604,13 @@ class Theme:
     INNER = 10      # inuti ett kort
 
     def __init__(self, root, ttk, dark: bool = False,
-                 contrast: str = "normal", text_scale: float = 1.0):
+                 contrast: str = "normal", text_scale: float = 1.0,
+                 dpi_override: float | None = None):
         self.root = root
         self.ttk = ttk
         self.dark = dark
         self.contrast = contrast
+        self._micro_icon_refs: list = []
         try:
             self.text_scale = max(1.0, min(1.5, float(text_scale)))
         except (TypeError, ValueError):
@@ -482,8 +632,12 @@ class Theme:
 
         # HiDPI: känn av riktig pixeltäthet, synka Tk-skalning och skala både
         # typsnitt, ikoner och pixelavstånd mjukt även på 4K/5K-skärmar.
-        dpi = display_dpi(root)
-        tk_scale = calibrate_tk_scaling(root, dpi)
+        if dpi_override is not None:
+            dpi = max(72.0, min(288.0, float(dpi_override)))
+            tk_scale = calibrate_tk_scaling(root, dpi, allow_down=True)
+        else:
+            dpi = window_dpi(root)
+            tk_scale = calibrate_tk_scaling(root, dpi)
         if dpi >= 144:
             dpi_scale = min(1.85, round(1.25 + (dpi - 144.0) / 192.0, 2))
         elif dpi >= 120:
@@ -531,6 +685,24 @@ class Theme:
     def px(self, value: float) -> int:
         """Skala ett basmått (96 DPI) till aktuell skärmtäthet och textstorlek."""
         return max(1, int(round(float(value) * getattr(self, "pixel_scale", 1.0))))
+
+    def micro_icon_photo(self, kind: str, size: int = 16,
+                         *, tone: str = "accent", inverted: bool = False):
+        """Skapa och håll kvar en Tk-bild av en SVG-mikroikon skalad med pixel_scale."""
+        try:
+            from PIL import ImageTk
+        except Exception:
+            return None
+        image = micro_icon_image(
+            kind, self.c, size=self.px(size), tone=tone, inverted=inverted)
+        if image is None:
+            return None
+        try:
+            photo = ImageTk.PhotoImage(image, master=self.root)
+            self._micro_icon_refs.append(photo)
+            return photo
+        except Exception:
+            return None
 
     def _apply_navigation_icons(self) -> None:
         """Sätt temafärgade, skalbara ikoner på huvudfönstrets flikar."""

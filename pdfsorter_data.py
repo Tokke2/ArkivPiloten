@@ -734,6 +734,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "contrast": "normal",        # normal | high (högkontrast, tema rond 3)
     "kw_column_order": [],       # tom = standardordning på stödordstabellen
     "kw_hide_linked": False,     # dölj redan mappkopplade stödord i listan
+    "q_column_order": [],        # tom = standardordning på granskningstabellen
+    "q_column_widths": {},       # anpassade kolumnbredder i Granska
+    "h_column_order": [],        # tom = standardordning på historiktabellen
+    "h_column_widths": {},       # anpassade kolumnbredder i Historik
 }
 
 
