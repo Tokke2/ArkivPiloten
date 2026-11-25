@@ -14,7 +14,8 @@ Detta dokument sammanfattar projektets stående regler (anpassade efter ArkivPil
 - **Skriv alltid nya regler till GitHub (hård regel):**
   - När användaren skriver **`- hård regel`** eller **`regel`** i chatten ska den regeln alltid läggas in här i `AGENTS.md` på GitHub (commit + push till den aktiva grenen, följt av release- och CI-kontroll).
 - **Anpassa regler efter varje app:**
-  - Generella regler från användarens standardlista tillämpas utifrån ArkivPilotens faktiska arkitektur; delar från andra appar (t.ex. projektskapare eller användarprofiler under Inställningar) införs inte utan uppdrag.
+  - Generella regler från användarens standardlista tillämpas utifrån ArkivPilotens faktiska arkitektur.
+  - Egen underflik i Inställningar för att skapa profiler gäller **endast appar som använder profiler** (ArkivPiloten arbetar med kategorier och stödordsregler, inte användarprofiler); delar från andra appar (som projektskaparen) införs inte utan uppdrag.
 
 ---
 
@@ -57,7 +58,7 @@ Detta dokument sammanfattar projektets stående regler (anpassade efter ArkivPil
 
 - **Loggarkivering (7 dagar) & aktiv fellogg:**
   - Gårdagens app-loggar arkiveras automatiskt och arkiverade loggar äldre än 7 dagar raderas automatiskt (`archive_old_logs()`, `purge_archived_logs(7)`).
-  - Det ska finnas en komplett app-logg samt en aktiv fellogg (`errors.jsonl` / felloggsrapportering) med alla aktiva fel; när ett fel åtgärdats rensas det bort ur den aktiva felloggen (automatiskt vid hälsokoll samt manuellt via GUI/CLI `mark_error_code_resolved`).
+  - Det ska finnas en komplett app-logg (`app_*.log`) samt komplett aktiv fellogg (`fel-samlat.log` + `felkoder.log`) med alla aktiva fel; när ett fel åtgärdats rensas det bort ur felloggen (`mark_error_code_resolved()` + `purge_resolved_error_codes()`, automatiskt vid hälsokoll samt manuellt via GUI/CLI).
 - **Konsolfri drift & minimerad start:**
   - Inget terminalfönster får visas varken vid start (`pdfsorter.pyw`) eller vid bakgrundsskanning/OCR (`CREATE_NO_WINDOW`).
   - Appen startar alltid minimerad till systemfältet (med taskbar-reserv).
