@@ -42,12 +42,14 @@ Detta dokument sammanfattar projektets stående regler (anpassade efter ArkivPil
 - **`REQ-K4` (hård regel) — inget byggs utan order:**
   - Förslag i `PDFSORTER_FORSLAG.md` och `PDFSORTER_SPEC.md` med status `VÄNTAR` eller `KOMMANDE` får **aldrig** implementeras automatiskt. Vänta alltid på explicit order (t.ex. `kör <nummer>` eller `bygg <nummer>`).
   - Markera färdigbyggda förslag tydligt som **`KLAR (YYYY-MM-DD)`** i `PDFSORTER_FORSLAG.md`.
-- **Cykelregel (`REQ-K2` + 10-meddelanderegel):**
-  - Efter var **10:e chattmeddelande** (samt efter var 10:e koduppdateringscykel) ska **10 helt nya, ej återbrukade förbättringsförslag** visas i chatten och loggas i `PDFSORTER_FORSLAG.md` under nästa Omgång (`VÄNTAR`).
+- **25 nya förslag — ska alltid skrivas i chatten (hård regel):**
+  - När användaren begär **25 nya förslag som konkurrenterna saknar och användare efterfrågar** (eller via tangentordet `förslag`), ska förslagslistan **alltid skrivas direkt i chatten** (inte bara i en fil) och samtidigt loggas som `VÄNTAR` i `PDFSORTER_FORSLAG.md` utan återbruk av tidigare nummer/idéer.
+- **Cykelregel (`REQ-K2` + 10-meddelanderegel — ska alltid skrivas i chatten, hård regel):**
+  - Efter var **10:e chattmeddelande** (samt efter var 10:e koduppdateringscykel) ska en ny förslagslista på **10 helt nya, ej återbrukade förslag** **alltid skrivas direkt i chatten** och loggas i `PDFSORTER_FORSLAG.md` under nästa Omgång (`VÄNTAR`).
 - **Styrande tangentord i chatt:**
-  - `förslag` → ta fram upp till 25 nya förbättringsförslag (som konkurrenter saknar och användare efterfrågar) brett över kod, design, minne, snabbhet, matchning och robusthet (`REQ-K1`/`REQ-K3`).
-  - `lista` → visa grupperad checklista över `KOMMANDE`-krav (`REQ-N*`) och `VÄNTAR`-förslag (`REQ-K5`).
-  - `forskning` → genomför omvärldskoll av liknande PDF-/dokumentappar och ge rekommendationer, utan att implementera något innan val (`REQ-K6`).
+  - `förslag` → ta fram upp till 25 nya förbättringsförslag (som konkurrenter saknar och användare efterfrågar) brett över kod, design, minne, snabbhet, matchning och robusthet och **skriv dem direkt i chatten** (`REQ-K1`/`REQ-K3`).
+  - `lista` → visa grupperad checklista direkt i chatten över `KOMMANDE`-krav (`REQ-N*`) och `VÄNTAR`-förslag (`REQ-K5`).
+  - `forskning` → genomför omvärldskoll av liknande PDF-/dokumentappar och ge rekommendationer direkt i chatten, utan att implementera något innan val (`REQ-K6`).
 
 ---
 
@@ -60,10 +62,10 @@ Detta dokument sammanfattar projektets stående regler (anpassade efter ArkivPil
   - Inget terminalfönster får visas varken vid start (`pdfsorter.pyw`) eller vid bakgrundsskanning/OCR (`CREATE_NO_WINDOW`).
   - Appen startar alltid minimerad till systemfältet (med taskbar-reserv).
 - **Skärmanpassning, skärpa, design & tabeller:**
-  - Skarpa typsnitt, hög/dynamisk per-skärms-DPI (`#237`), anpassad fönsterlayout för olika skärmar med minimal scrollning och enhetlig, skarp varumärkesgrafik överallt (`ArkivPiloten.png`, `ArkivPiloten.ico`, rena redigerbara vektor-SVG:er inklusive tryckvektor `brand/arkivpiloten-print.svg`, `pdfsorter_system.py`, `pdfsorter_theme.py`).
-  - Tabeller med flera kolumner stöder anpassning/omordning och sparade bredder (och kolumnsortering där det stöds).
+  - Skarpa typsnitt, hög/dynamisk per-skärms-DPI (`#237`), anpassad fönsterlayout för olika skärmar med allt väsentligt synligt och minimal scrollning (maxhöjd + anpassad bredd vid visning där det passar), ingen grumlig bild/text/kolumn, samt enhetlig skarp varumärkesgrafik överallt (`ArkivPiloten.png`, `ArkivPiloten.ico`, rena redigerbara vektor-SVG:er inklusive tryckvektor `brand/arkivpiloten-print.svg`, `pdfsorter_system.py`, `pdfsorter_theme.py`).
+  - Alla tabeller med kolumner stöder anpassning/flytt av kolumner och sparade bredder samt kolumnsortering där tabellen har stöd för det.
 - **Minne, snabbhet, energisnålhet & kärnregler:**
-  - Begränsade cacher, stängda PDF-handtag, minimal idle-belastning.
+  - Låg minnesanvändning, snabba svarstider och låg bakgrunds-/energiförbrukning (begränsade cacher, stängda PDF-handtag, minimal idle-belastning).
   - Körbart utan installation (`python pdfsorter.py` / `pythonw pdfsorter.pyw`); `pdfsorter_system.py` och `pdfsorter_theme.py` är valfria vid körning.
   - Automatisk flytt (`auto`) endast efter ≥ 100 manuellt bekräftade filer i kategorin **och** ≥ 2 exklusiva exakta stödord i dokumenttexten, med SHA-256-kontroll före flytt.
   - Användardata sparas endast under `config_dir()`; committa aldrig användarspecifik `settings.json`, temporära bilder/loggar, `.venv` eller `dist/`.
