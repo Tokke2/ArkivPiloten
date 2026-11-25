@@ -2,8 +2,9 @@
 > Alla förslag är **VÄNTAR** tills du säger `kör <nummer>` eller `bygg <nummer>`.
 > Inget implementeras automatiskt (REQ-K4). Status: **VÄNTAR = ej påbörjad**.
 > **Cykelregel:** Efter var **10:e chattmeddelande** ska en ny förslagslista på **10 helt nya, ej återbrukade förslag** visas i chatten (och loggas här under nästa Omgång).
+> **Stående regler:** Se `AGENTS.md` i repots rot.
 
-Aktuell release på GitHub: **v1.0.0** (låst tills du säger annat — inga nya taggar skapas).
+Aktuell release på GitHub: uppdateras automatiskt vid varje kodpush via `.github/workflows/release.yml`, markeras alltid som **`Latest`**, och appens uppdaterare jämför filer/hashar samt commit mot den.
 
 ---
 
@@ -43,7 +44,7 @@ Skriv `lista` för komplett checklista, `forskning` för omvärldskoll.
 
 ### Hur du väljer
 Skriv t.ex. `kör 203` eller `bygg 202+207` — då flyttas de till KOMMANDE (REQ-N*) och implementeras först efter din explicita order (REQ-K4).  
-Allt förblir **VÄNTAR** tills du säger till. Version stannar på **v1.0.0** tills du beordrar annat.
+Allt förblir **VÄNTAR** tills du säger till. Vid varje kodändring uppdateras den aktuella releasen på GitHub och markeras alltid som **`Latest`** (se `AGENTS.md`).
 
 ---
 *Genererad 2026-10-19 från kodgranskning (7731 rader huvudmodul, polling-watcher, TextCache 800/24 MB, mypy/CI saknas, native watcher saknas, 200+ VÄNTAR i kön).*
