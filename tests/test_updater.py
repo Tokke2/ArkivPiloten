@@ -528,6 +528,9 @@ def test_safe_extract_rejects_symlinks_backslashes_and_drive_prefixes(tmp_path):
         zpath = tmp_path / "bad.zip"
         with zipfile.ZipFile(zpath, "w") as zf:
             info = zipfile.ZipInfo(bad_name)
+            # ZipInfo.__init__ replaces os.sep with "/" on Windows; preserve raw
+            # header bytes so backslash traversal inside malicious zips is tested on Win32.
+            info.filename = bad_name
             info.external_attr = ext_attr
             zf.writestr(info, b"/etc/passwd")
         ok, err = S._safe_extract(zpath, dest)
