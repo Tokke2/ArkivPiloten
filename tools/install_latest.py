@@ -60,6 +60,7 @@ FILES = (
     "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
     "ArkivPiloten.png", "ArkivPiloten.ico",
     "brand/arkivpiloten-logo.svg", "brand/arkivpiloten-icon.svg",
+    "brand/arkivpiloten-print.svg",
     "ArkivPiloten - Starta tyst.vbs",
     "ArkivPiloten - Installera senaste Python och starta.bat",
     "arkivpiloten_python.ps1", "arkivpiloten_schedule_python_updates.ps1",
@@ -460,6 +461,26 @@ def run(root: Optional[Path], dry_run: bool = False,
             _log(f"Varning: pdfsorter.py anger {kontroll or '?'} efter "
                  f"kopieringen (väntade {ny}).")
             return 1
+        if backup_dir:
+            try:
+                from datetime import datetime as _dt
+                import json
+                upd_dir = root / "updates"
+                upd_dir.mkdir(parents=True, exist_ok=True)
+                (upd_dir / "last_update.json").write_text(
+                    json.dumps({
+                        "time": _dt.now().isoformat(timespec="seconds"),
+                        "from": nuvarande,
+                        "to": ny,
+                        "files": list(bytta),
+                        "backup": str(mal),
+                        "action": "update",
+                        "pending_verify": True,
+                    }, ensure_ascii=False, indent=1),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
         _log("")
         _log(f"Klart - ArkivPiloten är nu {ny} och uppdaterar sig själv "
              "via GitHub Releases från och med nu.")

@@ -130,3 +130,57 @@ def test_tray_update_shows_window_then_starts_manual_check():
         ("show", "uppdatering via systemfältet"),
         ("check", True),
     ]
+
+
+def test_tray_icon_shows_badge_menu_label_and_tooltip_when_update_available(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pystray", SimpleNamespace(
+        MenuItem=_FakeItem, Menu=_FakeMenu))
+
+    normal_icon = S.make_icon_image(64, update_available=False)
+    badge_icon = S.make_icon_image(64, update_available=True)
+    if normal_icon is not None and badge_icon is not None:
+        assert normal_icon.tobytes() != badge_icon.tobytes()
+
+    seen_badge_flags = []
+    monkeypatch.setattr(
+        S, "make_icon_image",
+        lambda size, active=False, badge=0, update_available=False: (
+            seen_badge_flags.append(update_available) or object()
+        ),
+    )
+
+    class _Icon:
+        title = ""
+        visible = False
+        menu = None
+
+        def update_menu(self):
+            pass
+
+    app = SimpleNamespace(
+        watcher=None,
+        queue=[],
+        _available_update_info={"remote": "9.9.9"},
+        _pending_restart_update=None,
+        _post=lambda cb: cb(),
+        _check_updates_from_tray=lambda: None,
+        show_window=lambda *_: None,
+        _sort_now=lambda: None,
+        _toggle_watch=lambda: None,
+        open_output=lambda: None,
+        show_review=lambda: None,
+        quit_app=lambda: None,
+    )
+    tray = S.TrayIcon(app)
+    tray.icon = _Icon()
+    tray.refresh()
+
+    assert seen_badge_flags[-1] is True
+    assert "Uppdatering: 9.9.9" in tray.icon.title
+    assert tray._update_label() == "↑ Uppdatera till 9.9.9…"
+
+    app._available_update_info = None
+    app._pending_restart_update = {"to": "9.9.9"}
+    tray.refresh()
+    assert "Starta om för att slutföra 9.9.9" in tray.icon.title
+    assert tray._update_label() == "↻ Starta om för 9.9.9…"

@@ -628,3 +628,46 @@ def test_process_queue_impl_skips_destroyed_root_and_tcl_error():
     app.root = DeadRoot()
     P.App._process_queue_impl(app, 0)
 
+
+def test_purge_archived_logs_deletes_older_than_7_days_and_keeps_recent(
+        tmp_path, monkeypatch):
+    import datetime as _dt
+    bas = tmp_path / "logs"
+    today = _dt.date.today()
+    old_day = today - _dt.timedelta(days=8)
+    edge_day = today - _dt.timedelta(days=7)
+    recent_day = today - _dt.timedelta(days=3)
+
+    def make_arc(day: _dt.date, name: str) -> Path:
+        p = bas / "arkiv" / f"{day:%Y}" / f"{day:%m}" / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"gz")
+        return p
+
+    old_file = make_arc(old_day, f"app_{old_day:%Y%m%d}_120000_old.log.gz")
+    edge_file = make_arc(edge_day, f"install_{edge_day:%Y%m%d}.log.gz")
+    recent_file = make_arc(recent_day, f"app_{recent_day:%Y%m%d}_120000_keep.log.gz")
+    # Fallback directory age without YYYYMMDD in filename (very old year/month dir)
+    legacy_dir_file = bas / "arkiv" / "2024" / "01" / "custom.log.gz"
+    legacy_dir_file.parent.mkdir(parents=True, exist_ok=True)
+    legacy_dir_file.write_bytes(b"gz")
+    # Permanent root error logs must never be removed
+    fel_samlat = bas / "fel-samlat.log"
+    felkoder = bas / "felkoder.log"
+    fel_samlat.write_text("err\n", encoding="utf-8")
+    felkoder.write_text("code\n", encoding="utf-8")
+
+    monkeypatch.setattr(S, "session_dir", lambda: bas)
+    monkeypatch.setattr(S, "_SESSION_FH", None)
+
+    removed = S.purge_archived_logs(7)
+
+    assert removed == 3
+    assert not old_file.exists()
+    assert not edge_file.exists()
+    assert not legacy_dir_file.exists()
+    assert not (bas / "arkiv" / "2024").exists()
+    assert recent_file.is_file()
+    assert fel_samlat.is_file()
+    assert felkoder.is_file()
+

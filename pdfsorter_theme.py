@@ -330,45 +330,59 @@ def navigation_icon_image(kind: str, palette: Dict[str, str], size: int = 20):
                 width=stroke if fill is None else 1)
 
         if kind == "start":
-            line(((5, 11), (12, 5), (19, 11)))
-            line(((7, 10), (7, 19), (17, 19), (17, 10)))
-            line(((10, 19), (10, 14), (14, 14), (14, 19)))
+            draw.polygon(
+                [xy(12, 4.4), xy(19.6, 10.8), xy(17.5, 10.8),
+                 xy(17.5, 19.2), xy(6.5, 19.2), xy(6.5, 10.8), xy(4.4, 10.8)],
+                fill=accent,
+            )
+            rect((10.2, 13.4, 13.8, 19.3), radius=0.8, fill=bg)
         elif kind == "review":
-            rect((6, 4.5, 16, 19.5), radius=1.4)
-            line(((9, 9), (13, 9)), stroke=max(1, round(1.2 * unit)))
-            line(((9, 12), (12, 12)), stroke=max(1, round(1.2 * unit)))
-            line(((12.5, 16), (14, 17.5), (18.5, 12.5)),
-                 stroke=max(1, round(2.2 * unit)))
+            rect((5.2, 4.2, 16.4, 19.2), radius=1.8, fill=accent)
+            line(((8.0, 8.4), (13.6, 8.4)), fill=bg, stroke=max(1, round(1.5 * unit)))
+            line(((8.0, 11.6), (12.2, 11.6)), fill=bg, stroke=max(1, round(1.5 * unit)))
+            cx, cy = xy(16.6, 16.6)
+            r = 4.2 * unit
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r),
+                         fill=bg, outline=accent, width=max(1, round(1.6 * unit)))
+            line(((14.8, 16.7), (16.1, 18.0), (18.7, 15.0)),
+                 stroke=max(1, round(1.9 * unit)))
         elif kind == "categories":
-            line(((4.5, 8), (10, 8), (11.5, 10), (19.5, 10),
-                  (18, 18.5), (5.5, 18.5), (4.5, 8)))
-            line(((5, 10.5), (19, 10.5)), stroke=max(1, round(1.2 * unit)))
+            draw.polygon(
+                [xy(4.5, 6.2), xy(10.2, 6.2), xy(11.8, 8.2), xy(19.5, 8.2),
+                 xy(19.5, 10.5), xy(4.5, 10.5)],
+                fill=accent,
+            )
+            rect((4.5, 9.2, 19.5, 18.8), radius=1.8, fill=accent)
+            line(((6.8, 11.2), (17.2, 11.2)), fill=bg, stroke=max(1, round(1.2 * unit)))
         elif kind == "settings":
-            for y, x in ((7, 8), (12, 15), (17, 10)):
-                line(((5, y), (19, y)), stroke=max(1, round(1.4 * unit)))
-                r = 1.7 * unit
+            for y, x in ((7, 8.5), (12, 15.5), (17, 9.5)):
+                line(((4.8, y), (19.2, y)), stroke=max(1, round(1.7 * unit)))
+                r = 2.0 * unit
                 cx, cy = xy(x, y)
                 draw.ellipse((cx - r, cy - r, cx + r, cy + r),
-                             fill=bg, outline=accent, width=width)
+                             fill=accent, outline=bg, width=max(1, round(0.9 * unit)))
         elif kind == "history":
-            draw.ellipse((xy(4.5, 4.5), xy(19.5, 19.5)),
-                         outline=accent, width=width)
-            line(((12, 7), (12, 12), (16, 14)), stroke=max(1, round(2 * unit)))
+            draw.ellipse((xy(4.6, 4.6), xy(19.4, 19.4)),
+                         outline=accent, width=max(1, round(2.0 * unit)))
+            line(((12, 7.2), (12, 12.2), (15.8, 14.4)),
+                 stroke=max(1, round(2.0 * unit)))
+            draw.polygon([xy(4.5, 8.8), xy(7.4, 6.2), xy(7.6, 9.8)], fill=accent)
         elif kind == "help":
-            draw.ellipse((xy(4.5, 4.5), xy(19.5, 19.5)),
-                         outline=accent, width=width)
-            line(((9, 9), (10, 7), (13, 7), (15, 9), (15, 11),
-                  (12, 13), (12, 15)), stroke=max(1, round(2 * unit)))
-            cx, cy = xy(12, 18)
-            r = 0.65 * unit
-            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=accent)
+            draw.ellipse((xy(4.4, 4.4), xy(19.6, 19.6)), fill=accent)
+            line(((9.6, 9.4), (10.8, 7.6), (13.4, 7.6), (14.6, 9.3),
+                  (13.8, 11.0), (12.0, 12.2), (12.0, 14.0)),
+                 fill=bg, stroke=max(1, round(1.9 * unit)))
+            cx, cy = xy(12, 16.9)
+            r = 1.05 * unit
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=bg)
         elif kind == "advanced":
-            for y, x in ((7, 14), (12, 9), (17, 16)):
-                line(((5, y), (19, y)), stroke=max(1, round(1.4 * unit)))
-                cx, cy = xy(x, y)
-                r = 1.5 * unit
-                draw.ellipse((cx - r, cy - r, cx + r, cy + r),
-                             fill=bg, outline=accent, width=width)
+            line(((9.2, 6.6), (6.8, 6.6), (6.8, 10.8), (5.2, 12.0),
+                  (6.8, 13.2), (6.8, 17.4), (9.2, 17.4)),
+                 stroke=max(1, round(1.9 * unit)))
+            line(((14.8, 6.6), (17.2, 6.6), (17.2, 10.8), (18.8, 12.0),
+                  (17.2, 13.2), (17.2, 17.4), (14.8, 17.4)),
+                 stroke=max(1, round(1.9 * unit)))
+            line(((10.8, 16.6), (13.2, 7.4)), stroke=max(1, round(1.7 * unit)))
         else:
             return None
 
@@ -384,28 +398,28 @@ def navigation_icon_image(kind: str, palette: Dict[str, str], size: int = 20):
 
 
 MICRO_ICON_SVGS: Dict[str, str] = {
-    "sort": '<polygon points="7,5 17,12 7,19"/>',
-    "watch": '<ellipse cx="12" cy="12" rx="8" ry="5"/><circle cx="12" cy="12" r="2.4" fill="currentColor"/>',
-    "folder": '<path d="M3.5,7 H9.5 L11,9.5 H20.5 L19.5,18.5 H4.5 Z"/>',
-    "folder_clean": '<path d="M3.5,7 H9.5 L11,9.5 H20.5 L19.5,18.5 H4.5 Z"/><path d="M9.5,14 L11.5,16 L15,12"/>',
-    "search": '<circle cx="10" cy="10" r="5.5"/><line x1="14" y1="14" x2="19.5" y2="19.5"/>',
-    "audit": '<path d="M12,3.5 L19,6.5 V12.5 L12,20.5 L5,12.5 V6.5 Z"/><polyline points="8.5,12 11,14.5 16,9.5"/>',
-    "add": '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
-    "refresh": '<path d="M18.5,8.5 A7,7 0 1 0 19,14"/><polyline points="16.5,4.5 19.5,7.5 15.5,9"/>',
-    "help": '<circle cx="12" cy="12" r="8"/><path d="M9.5,9.5 L11,7.8 H13.5 L14.8,9.5 L12,12.5 V14.5"/><circle cx="12" cy="17.5" r="0.8" fill="currentColor"/>',
-    "review": '<rect x="5" y="4" width="11" height="16" rx="1.5"/><line x1="8" y1="9" x2="13" y2="9"/><line x1="8" y1="12" x2="11.5" y2="12"/><polyline points="12.5,16 14.2,17.8 19,12.5"/>',
-    "ocr": '<polyline points="4,8 4,4 8,4"/><polyline points="16,4 20,4 20,8"/><polyline points="4,16 4,20 8,20"/><polyline points="16,20 20,20 20,16"/><line x1="7" y1="10" x2="17" y2="10"/><line x1="7" y1="14" x2="14" y2="14"/>',
-    "pdf_text": '<rect x="5.5" y="3.5" width="13" height="17" rx="1.5"/><line x1="8.5" y1="8.5" x2="15.5" y2="8.5"/><line x1="8.5" y1="12" x2="15.5" y2="12"/><line x1="8.5" y1="15.5" x2="13" y2="15.5"/>',
-    "status_ok": '<circle cx="12" cy="12" r="8"/><polyline points="8.5,12 11,14.5 16,9.5"/>',
-    "status_warn": '<polygon points="12,4 20.5,19 3.5,19"/><line x1="12" y1="9.5" x2="12" y2="14"/><circle cx="12" cy="16.8" r="0.8" fill="currentColor"/>',
-    "status_err": '<circle cx="12" cy="12" r="8"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/>',
-    "status_idle": '<circle cx="12" cy="12" r="5"/>',
-    "status_active": '<circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/>',
-    "jump": '<line x1="6" y1="18" x2="18" y2="6"/><polyline points="10,6 18,6 18,14"/>',
-    "undo": '<polyline points="9,7 4.5,11.5 9,16"/><path d="M5.5,11.5 H14.5 A4.5,4.5 0 0 1 19,16 V17.5"/>',
-    "export": '<rect x="5" y="13" width="14" height="7" rx="1"/><line x1="12" y1="4" x2="12" y2="14"/><polyline points="8.5,10.5 12,14 15.5,10.5"/>',
-    "stop": '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
-    "trash": '<polyline points="4.5,7 19.5,7"/><path d="M9,7 V4.5 H15 V7"/><path d="M6.5,7 L7.5,19.5 H16.5 L17.5,7"/>',
+    "sort": '<polygon points="6.5,4.8 18.5,12 6.5,19.2" fill="currentColor"/>',
+    "watch": '<path d="M2.8,12 C5.6,6.8 18.4,6.8 21.2,12 C18.4,17.2 5.6,17.2 2.8,12 Z"/><circle cx="12" cy="12" r="2.8" fill="currentColor"/>',
+    "folder": '<path d="M3.5,6.5 H9.8 L11.5,8.8 H20.5 V18.5 H3.5 Z" rx="1.5"/>',
+    "folder_clean": '<path d="M3.5,6.5 H9.8 L11.5,8.8 H20.5 V18.5 H3.5 Z"/><polyline points="8.8,13.6 11.2,16.0 15.6,11.6"/>',
+    "search": '<circle cx="10.2" cy="10.2" r="5.8"/><line x1="14.5" y1="14.5" x2="20" y2="20"/>',
+    "audit": '<path d="M12,3.2 L19.4,6.4 V12.4 C19.4,16.5 16.2,19.6 12,21 C7.8,19.6 4.6,16.5 4.6,12.4 V6.4 Z"/><polyline points="8.6,12.0 11.0,14.5 15.8,9.4"/>',
+    "add": '<line x1="12" y1="4.8" x2="12" y2="19.2"/><line x1="4.8" y1="12" x2="19.2" y2="12"/>',
+    "refresh": '<path d="M19.2,8.8 A7.5,7.5 0 1 0 19.3,14.5"/><polygon points="20.4,3.8 20.4,10.2 14.2,9.2" fill="currentColor" stroke="none"/>',
+    "help": '<circle cx="12" cy="12" r="8.4"/><path d="M9.6,9.4 C9.9,7.9 11.0,7.2 12.2,7.2 C13.6,7.2 14.6,8.1 14.6,9.4 C14.6,10.7 13.4,11.4 12.0,12.3 V14.2"/><circle cx="12" cy="17.2" r="1.0" fill="currentColor" stroke="none"/>',
+    "review": '<rect x="4.5" y="3.8" width="11.5" height="16.4" rx="1.8"/><line x1="7.8" y1="8.5" x2="13.0" y2="8.5"/><line x1="7.8" y1="11.8" x2="11.6" y2="11.8"/><polyline points="12.5,16.2 14.4,18.2 19.6,12.6"/>',
+    "ocr": '<polyline points="4,8.5 4,4.2 8.5,4.2"/><polyline points="15.5,4.2 20,4.2 20,8.5"/><polyline points="4,15.5 4,19.8 8.5,19.8"/><polyline points="15.5,19.8 20,19.8 20,15.5"/><line x1="7" y1="10" x2="17" y2="10"/><line x1="7" y1="14" x2="14.5" y2="14"/>',
+    "pdf_text": '<path d="M6,3.5 H14.5 L18.5,7.5 V20.5 H6 Z"/><polyline points="14.2,3.5 14.2,7.8 18.5,7.8"/><line x1="8.8" y1="11.5" x2="15.4" y2="11.5"/><line x1="8.8" y1="15.0" x2="13.6" y2="15.0"/>',
+    "status_ok": '<circle cx="12" cy="12" r="8.4"/><polyline points="8.4,12.2 11.0,14.8 16.0,9.4"/>',
+    "status_warn": '<polygon points="12,3.6 20.8,19.4 3.2,19.4"/><line x1="12" y1="9.2" x2="12" y2="14.2"/><circle cx="12" cy="16.9" r="0.9" fill="currentColor" stroke="none"/>',
+    "status_err": '<circle cx="12" cy="12" r="8.4"/><line x1="8.8" y1="8.8" x2="15.2" y2="15.2"/><line x1="15.2" y1="8.8" x2="8.8" y2="15.2"/>',
+    "status_idle": '<circle cx="12" cy="12" r="5.2" fill="currentColor"/>',
+    "status_active": '<circle cx="12" cy="12" r="8.0"/><circle cx="12" cy="12" r="3.8" fill="currentColor" stroke="none"/>',
+    "jump": '<line x1="5.8" y1="18.2" x2="18.2" y2="5.8"/><polyline points="10.2,5.8 18.2,5.8 18.2,13.8"/>',
+    "undo": '<polygon points="4.2,11.2 9.4,6.4 9.4,16.0" fill="currentColor" stroke="none"/><path d="M8.8,11.2 H15.0 C17.8,11.2 19.6,13.1 19.6,15.8 V18.2"/>',
+    "export": '<path d="M4.8,14.2 V19.4 H19.2 V14.2"/><line x1="12" y1="4.2" x2="12" y2="14.2"/><polyline points="8.4,10.6 12,14.4 15.6,10.6"/>',
+    "stop": '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>',
+    "trash": '<line x1="4.4" y1="6.8" x2="19.6" y2="6.8"/><path d="M9.0,6.8 V4.2 H15.0 V6.8"/><path d="M6.4,6.8 L7.4,19.6 H16.6 L17.6,6.8"/><line x1="10.2" y1="10.2" x2="10.6" y2="16.4"/><line x1="13.8" y1="10.2" x2="13.4" y2="16.4"/>',
 }
 
 
@@ -481,91 +495,92 @@ def micro_icon_image(kind: str, palette: Dict[str, str], size: int = 16,
                          fill=fill, outline=outline, width=width)
 
         if kind == "sort":
-            line(((7, 5), (17, 12), (7, 19), (7, 5)))
+            draw.polygon([xy(6.5, 4.8), xy(18.5, 12), xy(6.5, 19.2)], fill=fg)
         elif kind == "watch":
-            draw.ellipse((xy(4, 7), xy(20, 17)), outline=fg, width=width)
-            dot(12, 12, 2.4)
+            draw.ellipse((xy(3.2, 6.8), xy(20.8, 17.2)), outline=fg, width=width)
+            dot(12, 12, 2.8)
         elif kind == "folder":
-            line(((3.5, 7), (9.5, 7), (11, 9.5), (20.5, 9.5),
-                  (19.5, 18.5), (4.5, 18.5), (3.5, 7)))
+            line(((3.5, 6.5), (9.8, 6.5), (11.5, 8.8), (20.5, 8.8),
+                  (20.5, 18.5), (3.5, 18.5), (3.5, 6.5)))
+            line(((5.5, 10.6), (18.5, 10.6)), stroke=max(1, round(1.3 * unit)))
         elif kind == "folder_clean":
-            line(((3.5, 7), (9.5, 7), (11, 9.5), (20.5, 9.5),
-                  (19.5, 18.5), (4.5, 18.5), (3.5, 7)))
-            line(((9, 14), (11.5, 16.5), (15.5, 12)))
+            line(((3.5, 6.5), (9.8, 6.5), (11.5, 8.8), (20.5, 8.8),
+                  (20.5, 18.5), (3.5, 18.5), (3.5, 6.5)))
+            line(((8.8, 13.6), (11.2, 16.0), (15.6, 11.6)))
         elif kind == "search":
-            draw.ellipse((xy(4.5, 4.5), xy(15.5, 15.5)), outline=fg, width=width)
-            line(((14, 14), (19.5, 19.5)), stroke=max(1, round(2.4 * unit)))
+            draw.ellipse((xy(4.4, 4.4), xy(16.0, 16.0)), outline=fg, width=width)
+            line(((14.5, 14.5), (20.0, 20.0)), stroke=max(1, round(2.5 * unit)))
         elif kind == "audit":
-            line(((12, 3.5), (19, 6.5), (19, 12.5), (12, 20.5),
-                  (5, 12.5), (5, 6.5), (12, 3.5)))
-            line(((8.5, 12), (11, 14.5), (16, 9.5)))
+            line(((12, 3.2), (19.4, 6.4), (19.4, 12.6), (12, 20.8),
+                  (4.6, 12.6), (4.6, 6.4), (12, 3.2)))
+            line(((8.6, 12.0), (11.0, 14.5), (15.8, 9.4)))
         elif kind == "add":
-            line(((12, 5), (12, 19)))
-            line(((5, 12), (19, 12)))
+            line(((12, 4.8), (12, 19.2)))
+            line(((4.8, 12), (19.2, 12)))
         elif kind == "refresh":
-            draw.arc((xy(4.5, 4.5), xy(19.5, 19.5)), 35, 315, fill=fg, width=width)
-            line(((16.5, 4.5), (19.5, 7.5), (15.5, 9)))
+            draw.arc((xy(4.5, 4.5), xy(19.5, 19.5)), 38, 322, fill=fg, width=width)
+            draw.polygon([xy(20.4, 3.8), xy(20.4, 10.2), xy(14.2, 9.2)], fill=fg)
         elif kind == "help":
-            draw.ellipse((xy(4, 4), xy(20, 20)), outline=fg, width=width)
-            line(((9.5, 9.5), (11, 7.8), (13.5, 7.8), (14.8, 9.5),
-                  (12, 12.5), (12, 14.5)))
-            dot(12, 17.5, 0.8)
+            draw.ellipse((xy(3.6, 3.6), xy(20.4, 20.4)), outline=fg, width=width)
+            line(((9.6, 9.4), (10.8, 7.5), (13.4, 7.5), (14.6, 9.3),
+                  (12.0, 12.3), (12.0, 14.2)))
+            dot(12, 17.2, 0.95)
         elif kind == "review":
             draw.rounded_rectangle(
-                (xy(5, 4), xy(16, 20)), radius=round(1.5 * unit),
+                (xy(4.5, 3.8), xy(16.0, 20.2)), radius=round(1.8 * unit),
                 outline=fg, width=width)
-            line(((8, 9), (13, 9)), stroke=max(1, round(1.6 * unit)))
-            line(((8, 12), (11.5, 12)), stroke=max(1, round(1.6 * unit)))
-            line(((12.5, 16), (14.2, 17.8), (19, 12.5)),
-                 stroke=max(1, round(2.2 * unit)))
+            line(((7.8, 8.5), (13.0, 8.5)), stroke=max(1, round(1.6 * unit)))
+            line(((7.8, 11.8), (11.6, 11.8)), stroke=max(1, round(1.6 * unit)))
+            line(((12.5, 16.2), (14.4, 18.2), (19.6, 12.6)),
+                 stroke=max(1, round(2.3 * unit)))
         elif kind == "ocr":
-            line(((4, 8), (4, 4), (8, 4)))
-            line(((16, 4), (20, 4), (20, 8)))
-            line(((4, 16), (4, 20), (8, 20)))
-            line(((16, 20), (20, 20), (20, 16)))
-            line(((7, 10), (17, 10)), stroke=max(1, round(1.6 * unit)))
-            line(((7, 14), (14, 14)), stroke=max(1, round(1.6 * unit)))
+            line(((4, 8.5), (4, 4.2), (8.5, 4.2)))
+            line(((15.5, 4.2), (20, 4.2), (20, 8.5)))
+            line(((4, 15.5), (4, 19.8), (8.5, 19.8)))
+            line(((15.5, 19.8), (20, 19.8), (20, 15.5)))
+            line(((7, 10), (17, 10)), stroke=max(1, round(1.7 * unit)))
+            line(((7, 14), (14.5, 14)), stroke=max(1, round(1.7 * unit)))
         elif kind == "pdf_text":
-            draw.rounded_rectangle(
-                (xy(5.5, 3.5), xy(18.5, 20.5)), radius=round(1.5 * unit),
-                outline=fg, width=width)
-            line(((8.5, 8.5), (15.5, 8.5)), stroke=max(1, round(1.6 * unit)))
-            line(((8.5, 12), (15.5, 12)), stroke=max(1, round(1.6 * unit)))
-            line(((8.5, 15.5), (13, 15.5)), stroke=max(1, round(1.6 * unit)))
+            line(((6, 3.5), (14.5, 3.5), (18.5, 7.5), (18.5, 20.5), (6, 20.5), (6, 3.5)))
+            line(((14.2, 3.5), (14.2, 7.8), (18.5, 7.8)), stroke=max(1, round(1.5 * unit)))
+            line(((8.8, 11.5), (15.4, 11.5)), stroke=max(1, round(1.7 * unit)))
+            line(((8.8, 15.0), (13.6, 15.0)), stroke=max(1, round(1.7 * unit)))
         elif kind == "status_ok":
-            draw.ellipse((xy(4, 4), xy(20, 20)), outline=fg, width=width)
-            line(((8.5, 12), (11, 14.5), (16, 9.5)))
+            draw.ellipse((xy(3.6, 3.6), xy(20.4, 20.4)), outline=fg, width=width)
+            line(((8.4, 12.2), (11.0, 14.8), (16.0, 9.4)))
         elif kind == "status_warn":
-            line(((12, 4), (20.5, 19), (3.5, 19), (12, 4)))
-            line(((12, 9.5), (12, 14)))
-            dot(12, 16.8, 0.8)
+            line(((12, 3.6), (20.8, 19.4), (3.2, 19.4), (12, 3.6)))
+            line(((12, 9.2), (12, 14.2)))
+            dot(12, 16.9, 0.9)
         elif kind == "status_err":
-            draw.ellipse((xy(4, 4), xy(20, 20)), outline=fg, width=width)
-            line(((9, 9), (15, 15)))
-            line(((15, 9), (9, 15)))
+            draw.ellipse((xy(3.6, 3.6), xy(20.4, 20.4)), outline=fg, width=width)
+            line(((8.8, 8.8), (15.2, 15.2)))
+            line(((15.2, 8.8), (8.8, 15.2)))
         elif kind == "status_idle":
-            dot(12, 12, 4.5, fill=fg)
+            dot(12, 12, 5.0, fill=fg)
         elif kind == "status_active":
-            draw.ellipse((xy(4.5, 4.5), xy(19.5, 19.5)), outline=fg, width=width)
-            dot(12, 12, 3.6, fill=fg)
+            draw.ellipse((xy(4.0, 4.0), xy(20.0, 20.0)), outline=fg, width=width)
+            dot(12, 12, 3.8, fill=fg)
         elif kind == "jump":
-            line(((6, 18), (18, 6)))
-            line(((10, 6), (18, 6), (18, 14)))
+            line(((5.8, 18.2), (18.2, 5.8)))
+            line(((10.2, 5.8), (18.2, 5.8), (18.2, 13.8)))
         elif kind == "undo":
-            line(((9, 7), (4.5, 11.5), (9, 16)))
-            line(((5.5, 11.5), (15.5, 11.5), (18.5, 14.5), (18.5, 18)))
+            draw.polygon([xy(4.2, 11.2), xy(9.4, 6.4), xy(9.4, 16.0)], fill=fg)
+            line(((8.8, 11.2), (16.2, 11.2), (19.2, 14.2), (19.2, 18.2)))
         elif kind == "export":
-            line(((5, 14), (5, 19.5), (19, 19.5), (19, 14)))
-            line(((12, 4), (12, 14)))
-            line(((8.5, 10.5), (12, 14), (15.5, 10.5)))
+            line(((4.8, 14.2), (4.8, 19.4), (19.2, 19.4), (19.2, 14.2)))
+            line(((12, 4.2), (12, 14.2)))
+            line(((8.4, 10.6), (12, 14.4), (15.6, 10.6)))
         elif kind == "stop":
             draw.rounded_rectangle(
-                (xy(6, 6), xy(18, 18)), radius=round(1.5 * unit),
-                outline=fg, width=width)
+                (xy(6, 6), xy(18, 18)), radius=round(2.0 * unit),
+                fill=fg)
         elif kind == "trash":
-            line(((4.5, 7), (19.5, 7)))
-            line(((9, 7), (9, 4.5), (15, 4.5), (15, 7)))
-            line(((6.5, 7), (7.5, 19.5), (16.5, 19.5), (17.5, 7)))
+            line(((4.4, 6.8), (19.6, 6.8)))
+            line(((9.0, 6.8), (9.0, 4.2), (15.0, 4.2), (15.0, 6.8)))
+            line(((6.4, 6.8), (7.4, 19.6), (16.6, 19.6), (17.6, 6.8)))
+            line(((10.2, 10.2), (10.6, 16.4)), stroke=max(1, round(1.4 * unit)))
+            line(((13.8, 10.2), (13.4, 16.4)), stroke=max(1, round(1.4 * unit)))
         else:
             return None
 

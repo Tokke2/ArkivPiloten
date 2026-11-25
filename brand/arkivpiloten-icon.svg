@@ -1,22 +1,37 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-<title id="title">ArkivPiloten appikon</title><desc id="desc">En marinblå arkivmapp med kompass, bärnstensfärgad nål och turkos väg.</desc>
-<defs><g id="arkivpiloten-mark" stroke-linecap="round" stroke-linejoin="round">
-  <!-- rear file tabs -->
-  <path fill="#078287" d="M103 133V89c0-16 13-29 29-29h90l33 34h123c17 0 30 13 30 30v51H103z"/>
-  <path fill="#0A3158" d="M82 165v-47c0-15 12-27 27-27h117l31 31h137c17 0 30 13 30 30v35H82z"/>
-  <!-- front archive folder -->
-  <path fill="#0A3158" d="M58 183c0-20 15-36 35-36h113c16 0 28 5 39 17l18 18h165c22 0 37 17 33 39l-31 176c-4 20-18 32-39 32H123c-21 0-34-12-38-32L58 183z"/>
-  <!-- compass ring and cardinal pointers -->
-  <circle cx="256" cy="264" r="91" fill="none" stroke="#FFFFFF" stroke-width="15"/>
-  <path fill="#FFFFFF" d="M256 151l-13 48h26zM369 264l-48-13v26zM256 377l13-48h-26zM143 264l48 13v-26z"/>
-  <!-- route leaving the archive -->
-  <path d="M207 324c28-9 76-8 96 16 21 25 13 54-17 78-21 17-14 31 27 47" fill="none" stroke="#078287" stroke-width="32"/>
-  <!-- compass needle -->
-  <path fill="#F3A323" d="M256 264l75-90-43 107z"/>
-  <path fill="#FFFFFF" d="M256 264l-73 75 96-58z"/>
-  <circle cx="256" cy="264" r="16" fill="#0A3158" stroke="#FFFFFF" stroke-width="8"/>
-</g></defs>
-<rect width="512" height="512" rx="92" fill="#F5F8FC"/>
-<use xlink:href="#arkivpiloten-mark"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">ArkivPiloten</title>
+  <desc id="desc">Skarp vektorikon för ArkivPiloten: turkos mappflik, PDF-blad, marinblå arkivmapp och guld/vit kompassnål. Redigerbara vektorlager för tryck och skärm.</desc>
+  <!-- Redigerbar tryck- och skärmvektor · Marin #0B2D52 · Turkos #0D9488 · Guld #F59E0B · PDF-röd #E11D48 -->
+  <defs>
+    <linearGradient id="bg-frost" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#F9FCFF"/>
+      <stop offset="100%" stop-color="#EAF2FA"/>
+    </linearGradient>
+  </defs>
+  <g id="Layer_Badge_Plate">
+    <rect x="6" y="6" width="500" height="500" rx="110" fill="url(#bg-frost)" stroke="#C0D1E6" stroke-width="4"/>
+  </g>
+  <g id="Layer_Folder_Back_Tab">
+    <rect x="88" y="76" width="158" height="84" rx="24" fill="#0D9488"/>
+    <rect x="88" y="106" width="336" height="138" rx="26" fill="#0D9488"/>
+  </g>
+  <g id="Layer_PDF_Document_Sheet">
+    <rect x="240" y="92" width="160" height="148" rx="18" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="3.5"/>
+    <rect x="264" y="114" width="112" height="20" rx="7" fill="#E11D48"/>
+    <rect x="264" y="144" width="84" height="11" rx="5" fill="#96A5BA"/>
+  </g>
+  <g id="Layer_Folder_Front_Body">
+    <path fill="#0B2D52" d="M94 142h108l54 32h154c19.9 0 36 16.1 36 36v188c0 19.9-16.1 36-36 36H102c-19.9 0-36-16.1-36-36V170c0-15.5 12.5-28 28-28Z"/>
+    <path fill="none" stroke="#16487D" stroke-width="4" stroke-linecap="round" d="M92 146h110l52 30h166"/>
+  </g>
+  <g id="Layer_Compass_Ring">
+    <circle cx="256" cy="304" r="88" fill="none" stroke="#FFFFFF" stroke-width="15"/>
+    <path fill="#FFFFFF" d="M256 200l-12 38h24Z M360 304l-38-12v24Z M256 408l12-38h-24Z M152 304l38 12v-24Z"/>
+  </g>
+  <g id="Layer_Compass_Needle">
+    <path fill="#F59E0B" d="M326 234l-86 54 32 32Z"/>
+    <path fill="#FFFFFF" d="M186 374l54-86 32 32Z"/>
+    <circle cx="256" cy="304" r="18" fill="#0B2D52" stroke="#FFFFFF" stroke-width="7"/>
+  </g>
 </svg>

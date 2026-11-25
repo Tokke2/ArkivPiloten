@@ -55,6 +55,8 @@ __all__ = [
     "autostart_session_available", "icon_file_path",
     # uppdatering från Git + Python-paket (2026-10-16)
     "check_for_update", "perform_update", "update_python_packages",
+    "pending_installed_update", "mark_update_verified",
+    "list_update_backups", "rollback_update",
     "UPDATE_REPO", "UPDATE_RELEASES_LATEST",
     "create_desktop_shortcut", "install_helpers",
     # systemfält
@@ -72,6 +74,7 @@ __all__ = [
     # sessionslogg (logga allt, REQ-N1)
     "SESSION_ID", "start_session", "session_log", "session_error",
     "session_path", "session_dir", "log_dir", "latest_session_log",
+    "archive_old_logs", "purge_archived_logs",
     "mark_error_code_resolved",
     "install_excepthooks", "close_session",
 ]
@@ -143,6 +146,12 @@ def _guess_main_script() -> Path:
 
 #: Sökvägen till huvudprogrammet.
 _main_script: Path = _guess_main_script()
+_STARTUP_BUILD_COMMIT: str = ""
+
+
+def _capture_startup_commit(root: Path) -> str:
+    manifest = _read_build_manifest(Path(root) / UPDATE_MANIFEST_NAME)
+    return str((manifest or {}).get("commit") or "")
 
 
 def configure(config_dir: Callable[[], Path],
@@ -156,6 +165,7 @@ def configure(config_dir: Callable[[], Path],
     modulen standardvärden, vilket räcker för att köra den fristående.
     """
     global _config_dir_fn, _now_iso_fn, _main_script, APP_NAME, APP_VERSION
+    global _STARTUP_BUILD_COMMIT
     _config_dir_fn = config_dir
     if now_iso:
         _now_iso_fn = now_iso
@@ -163,6 +173,8 @@ def configure(config_dir: Callable[[], Path],
         _main_script = Path(main_script).resolve()
     APP_NAME = app_name
     APP_VERSION = app_version
+    if not _STARTUP_BUILD_COMMIT:
+        _STARTUP_BUILD_COMMIT = _capture_startup_commit(_main_script.parent)
 
 
 def config_dir() -> Path:
@@ -177,22 +189,22 @@ def now_iso() -> str:
 # IKON
 # ==========================================================================
 
-#: Färgtema för ikonen. Samma blå accent som gränssnittet använder, så att
-#: ikonen i systemfältet hör ihop med fönstret den öppnar.
-ICON_BG_TOP = (37, 99, 199)        # accent      #2563c7
-ICON_BG_BOTTOM = (27, 74, 156)     # accent_dark #1b4a9c
+#: Färgtema för ikonen - enhetligt varumärke överallt (logotyp, appikon,
+#: systemfält, fönster, tryckvektor).
+ICON_BG_TOP = (249, 252, 255)      # frost-ljus topp  #f9fcff
+ICON_BG_BOTTOM = (234, 242, 250)   # frost-ljus botten #eaf2fa
+ICON_NAVY = (11, 45, 82)           # djup marinblå    #0b2d52
+ICON_NAVY_EDGE = (22, 72, 125)     # subtil kantljus  #16487d
+ICON_TEAL = (13, 148, 136)         # pilot-turkos     #0d9488
+ICON_AMBER = (245, 158, 11)        # kompassguld      #f59e0b
 ICON_PAPER = (255, 255, 255)
 ICON_INK = (150, 165, 186)         # textrader på bladet
-ICON_ACCENT = (214, 60, 55)        # röd PDF-markering
-#: De tre målmapparna. Olika kulör betyder olika kategori - det är hela
-#: poängen med appen, och det som gör ikonen läsbar när den är 16 punkter.
-ICON_TARGETS = ((245, 165, 36), (34, 170, 84), (214, 60, 55))
+ICON_ACCENT = (225, 29, 72)        # skarp PDF-markering #e11d48
 ICON_ACTIVE = (34, 170, 84)        # grön statusbricka när bevakningen är på
 
-#: Memo-cache: ikonen renderas en gång per (storlek, aktiv, badge) och
+#: Memo-cache: ikonen renderas en gång per (storlek, aktiv, badge, upd) och
 #: kopieras sedan - tray-refresh och dialoger slipper rita om i onödan.
-#: Tak så att cachen aldrig växer obundet (minimal minnesanvändning).
-_ICON_CACHE: Dict[Tuple[int, bool, int], Any] = {}
+_ICON_CACHE: Dict[Tuple[int, bool, int, bool], Any] = {}
 _ICON_CACHE_MAX = 32
 
 
@@ -206,12 +218,13 @@ def _rounded_mask(size: int, radius_ratio: float = 0.225):
 
 
 def _icon_plate(S: int):
-    """Rundad platta med lodrät toning - ikonens botten."""
+    """Rundad platta med mjuk lodrät toning - ikonens botten."""
     from PIL import Image, ImageDraw
     p = Image.new("RGB", (S, S), ICON_BG_TOP)
     d = ImageDraw.Draw(p)
+    denom = max(1, S - 1)
     for y in range(S):
-        t = y / (S - 1)
+        t = y / denom
         d.line([(0, y), (S, y)], fill=tuple(
             int(ICON_BG_TOP[i] + (ICON_BG_BOTTOM[i] - ICON_BG_TOP[i]) * t)
             for i in range(3)))
@@ -220,75 +233,147 @@ def _icon_plate(S: int):
     return img
 
 
-def _icon_detailed(S: int = 256):
-    """Full version: ett PDF-blad som förgrenar sig till tre färgade mappar.
-
-    Motivet är sorteringen själv - ett dokument kommer in, och delas upp i
-    kategorier. Det säger mer om vad appen gör än en generisk mapp, och
-    de tre kulörerna gör silhuetten igenkännbar även mycket liten.
-    """
-    from PIL import ImageDraw
-    img = _icon_plate(S)
+def _icon_detailed(S: int = 512):
+    """Skarp master-ikon (512-koordinater): arkivmapp + PDF-blad + kompassnål."""
+    from PIL import Image, ImageDraw
+    resampling = getattr(Image, "Resampling", Image)
+    # Rita alltid minst 4x översamplat och skala ned för rakbladsvass AA
+    canvas = max(1024, S * 4 if S < 512 else S * 2)
+    img = _icon_plate(canvas)
     d = ImageDraw.Draw(img)
-    k = S / 256.0                      # allt ritat i 256-koordinater
+    k = canvas / 512.0
 
-    def r(x0, y0, x1, y1, radius, fill):
-        d.rounded_rectangle([x0 * k, y0 * k, x1 * k, y1 * k],
-                            radius=max(1, int(radius * k)), fill=fill)
+    def p(x: float, y: float) -> Tuple[float, float]:
+        return (x * k, y * k)
 
-    # Dokumentet högst upp (samma motiv som master-ikonen ArkivPiloten.png:
-    # PDF-blad -> pil -> tre färgade mappar)
-    r(92, 18, 164, 104, 12, ICON_PAPER)
-    # Vikt hörn uppe till höger
-    d.polygon([(140, 18), (164, 42), (140, 42)], fill=(206, 216, 232))
-    r(104, 44, 152, 66, 6, ICON_ACCENT)      # rött PDF-band
-    r(106, 76, 146, 86, 5, ICON_INK)         # en textrad
+    # Subtil inre ram som ger knivskarp kant mot både ljusa och mörka ytor
+    d.rounded_rectangle(
+        [k * 6.0, k * 6.0, canvas - 1 - k * 6.0, canvas - 1 - k * 6.0],
+        radius=max(1, int(110 * k)),
+        outline=(192, 209, 230, 225),
+        width=max(1, round(4 * k)),
+    )
 
-    # Nedåtpil: dokumentet delas ut till mapparna
-    d.polygon([(120, 104), (136, 104), (136, 122), (146, 122),
-               (128, 142), (110, 122), (120, 122)], fill=ICON_PAPER)
+    # 1. Bakre turkos mappflik (klassisk arkivflik bakom bladet)
+    d.rounded_rectangle(
+        [p(88, 76), p(246, 160)],
+        radius=max(1, int(24 * k)),
+        fill=ICON_TEAL,
+    )
+    d.rounded_rectangle(
+        [p(88, 106), p(424, 244)],
+        radius=max(1, int(26 * k)),
+        fill=ICON_TEAL,
+    )
 
-    # Förgrening
-    r(40, 140, 216, 158, 11, ICON_PAPER)
-    for x in (40, 118, 196):
-        r(x, 150, x + 20, 178, 9, ICON_PAPER)
+    # 2. Vitt PDF-blad som sticker upp mellan bakre flik och främre mapp
+    d.rounded_rectangle(
+        [p(240, 92), p(400, 240)],
+        radius=max(1, int(18 * k)),
+        fill=ICON_PAPER,
+        outline=(203, 213, 225, 255),
+        width=max(1, round(3.5 * k)),
+    )
+    d.rounded_rectangle(
+        [p(264, 114), p(376, 134)],
+        radius=max(1, int(7 * k)),
+        fill=ICON_ACCENT,
+    )
+    d.rounded_rectangle(
+        [p(264, 144), p(348, 155)],
+        radius=max(1, int(5 * k)),
+        fill=ICON_INK,
+    )
 
-    # De tre målmapparna (med mapptungor, som i master-ikonen)
-    for x, col in zip((20, 98, 176), ICON_TARGETS):
-        r(x + 4, 172, x + 34, 188, 6, col)   # mapptunga
-        r(x, 182, x + 60, 236, 14, col)
+    # 3. Främre marinblå arkivmapp (ren lagerordning utan några sudd-ytor)
+    d.rounded_rectangle(
+        [p(66, 142), p(228, 242)],
+        radius=max(1, int(28 * k)),
+        fill=ICON_NAVY,
+    )
+    d.polygon(
+        [p(202, 142), p(256, 174), p(256, 224), p(202, 224)],
+        fill=ICON_NAVY,
+    )
+    d.rounded_rectangle(
+        [p(66, 174), p(446, 434)],
+        radius=max(1, int(36 * k)),
+        fill=ICON_NAVY,
+    )
+    # Skarp övre skarvlinje längs mapptoppen
+    d.line(
+        [p(92, 146), p(202, 146), p(254, 176), p(420, 176)],
+        fill=ICON_NAVY_EDGE,
+        width=max(1, round(4 * k)),
+    )
+
+    # 4. Kompassring + fyra väderstrecksspetsar centrerade vid (256, 304)
+    cx, cy, rad = 256.0, 304.0, 88.0
+    d.ellipse(
+        [p(cx - rad, cy - rad), p(cx + rad, cy + rad)],
+        outline=ICON_PAPER,
+        width=max(1, round(15 * k)),
+    )
+    for tip, left, right in (
+        ((cx, cy - rad - 16), (cx - 12, cy - rad + 22), (cx + 12, cy - rad + 22)),
+        ((cx + rad + 16, cy), (cx + rad - 22, cy - 12), (cx + rad - 22, cy + 12)),
+        ((cx, cy + rad + 16), (cx - 12, cy + rad - 22), (cx + 12, cy + rad - 22)),
+        ((cx - rad - 16, cy), (cx - rad + 22, cy - 12), (cx - rad + 22, cy + 12)),
+    ):
+        d.polygon([p(*tip), p(*left), p(*right)], fill=ICON_PAPER)
+
+    # 5. Tvåfärgad kompassnål riktad mot NO (guld spets, vit motvikt)
+    d.polygon(
+        [p(326, 234), p(240, 288), p(272, 320)],
+        fill=ICON_AMBER,
+    )
+    d.polygon(
+        [p(186, 374), p(240, 288), p(272, 320)],
+        fill=ICON_PAPER,
+    )
+    # Centrumaxel
+    d.ellipse(
+        [p(cx - 18, cy - 18), p(cx + 18, cy + 18)],
+        fill=ICON_NAVY,
+        outline=ICON_PAPER,
+        width=max(1, round(7 * k)),
+    )
+
+    if canvas != S:
+        img = img.resize((S, S), resampling.LANCZOS)
     return img
 
 
 def _icon_simple(S: int = 64):
-    """Förenklad version för små storlekar.
-
-    Att krympa den detaljerade ikonen till 16 punkter ger gröt: strecken
-    blir tunnare än en bildpunkt och textraderna smetar ihop. Under 32
-    punkter ritas därför ett grövre motiv med färre element - samma
-    silhuett, men bara det som faktiskt syns.
-    """
-    from PIL import ImageDraw
-    img = _icon_plate(S)
+    """Förenklad, kontraststark version för mycket små storlekar (<= 32 px)."""
+    from PIL import Image, ImageDraw
+    resampling = getattr(Image, "Resampling", Image)
+    canvas = 256
+    img = _icon_plate(canvas)
     d = ImageDraw.Draw(img)
-    k = S / 256.0
+    k = canvas / 512.0
 
-    def r(x0, y0, x1, y1, radius, fill):
-        d.rounded_rectangle([x0 * k, y0 * k, x1 * k, y1 * k],
-                            radius=max(1, int(radius * k)), fill=fill)
+    def p(x: float, y: float) -> Tuple[float, float]:
+        return (x * k, y * k)
 
-    # Bladet: bredare, utan textrader
-    r(88, 20, 168, 104, 14, ICON_PAPER)
-    r(104, 40, 152, 66, 8, ICON_ACCENT)
-    # Kraftig nedåtpil + balk, ingen stam (den försvinner ändå)
-    d.polygon([(116, 104), (140, 104), (140, 118), (150, 118),
-               (128, 140), (106, 118), (116, 118)], fill=ICON_PAPER)
-    r(32, 134, 224, 158, 13, ICON_PAPER)
-    for x in (32, 114, 196):
-        r(x, 152, x + 28, 180, 11, ICON_PAPER)
-    # Tre feta mål
-    for x, col in zip((14, 96, 178), ICON_TARGETS):
-        r(x, 178, x + 64, 238, 15, col)
+    # Bakre turkos mappflik
+    d.rounded_rectangle([p(80, 74), p(252, 166)], radius=int(26 * k), fill=ICON_TEAL)
+    d.rounded_rectangle([p(80, 108), p(432, 240)], radius=int(28 * k), fill=ICON_TEAL)
+    # Vitt PDF-blad med rött band
+    d.rounded_rectangle([p(242, 88), p(408, 220)], radius=int(18 * k), fill=ICON_PAPER)
+    d.rounded_rectangle([p(266, 110), p(384, 138)], radius=int(8 * k), fill=ICON_ACCENT)
+    # Marinblå huvudmapp
+    d.rounded_rectangle([p(56, 146), p(228, 240)], radius=int(28 * k), fill=ICON_NAVY)
+    d.polygon([p(200, 146), p(254, 178), p(254, 220), p(200, 220)], fill=ICON_NAVY)
+    d.rounded_rectangle([p(56, 176), p(456, 444)], radius=int(40 * k), fill=ICON_NAVY)
+    # Tjock kompassring + tydlig guldnål
+    cx, cy, rad = 256.0, 310.0, 96.0
+    d.ellipse([p(cx - rad, cy - rad), p(cx + rad, cy + rad)],
+              outline=ICON_PAPER, width=max(1, round(24 * k)))
+    d.polygon([p(336, 230), p(234, 288), p(278, 332)], fill=ICON_AMBER)
+    d.polygon([p(176, 390), p(234, 288), p(278, 332)], fill=ICON_PAPER)
+    if canvas != S:
+        img = img.resize((S, S), resampling.LANCZOS)
     return img
 
 
@@ -322,7 +407,7 @@ def _master_icon():
 
 
 def make_icon_image(size: int = 256, active: bool = False,
-                    badge: int = 0) -> Any:
+                    badge: int = 0, update_available: bool = False) -> Any:
     """Appikonen i valfri storlek.
 
     Master-ikonen (ArkivPiloten.png) är primär så att exakt samma ikon
@@ -330,14 +415,14 @@ def make_icon_image(size: int = 256, active: bool = False,
     Under 32 punkter används ett förenklat motiv - se `_icon_simple()`.
     `active=True` lägger till en tydlig grön bricka med vit bock (bevakning
     på); `badge>0` ritar köantalet som en liten bricka (synlig kö utan att
-    öppna).
+    öppna); `update_available=True` lägger en tydlig ↑-bricka uppe till höger.
     """
     try:
         from PIL import Image, ImageDraw, ImageEnhance
     except Exception:
         return None
 
-    key = (int(size), bool(active), int(min(badge, 99)))
+    key = (int(size), bool(active), int(min(badge, 99)), bool(update_available))
     cached = _ICON_CACHE.get(key)
     if cached is not None:
         return cached.copy()
@@ -361,14 +446,13 @@ def make_icon_image(size: int = 256, active: bool = False,
         if size != bas:
             img = img.resize((size, size), Image.LANCZOS)
 
-    # Tunn ljus kant så att ikonen inte försvinner mot mörka aktivitetsfält
-    # och titelrader (design: synlig i både ljust och mörkt läge).
-    if size >= 20:
+    # Subtil ytterram bara vid små storlekar (master-bilden har redan inre ram).
+    if size <= 32 and size >= 20:
         d2 = ImageDraw.Draw(img)
         d2.rounded_rectangle([0.5, 0.5, size - 1.5, size - 1.5],
                              radius=max(1, int(size * 0.225)),
-                             outline=(240, 244, 255, 110),
-                             width=max(1, size // 64))
+                             outline=(148, 163, 184, 120),
+                             width=1)
 
     # Statusbrickan ritas EFTER nedskalningen, i målstorleken, så bocken
     # förblir tydlig även i den lilla systemfältsikonen.
@@ -396,6 +480,23 @@ def make_icon_image(size: int = 256, active: bool = False,
                    width=max(1, size // 48))
         d3.text((cx - r_ * 0.5, cy - r_ * 0.6), str(min(badge, 99)),
                 fill=(255, 255, 255, 255))
+    # Uppdateringsbricka (#228): liten blå/guld ↑-cirkel uppe till höger.
+    if update_available and size >= 24:
+        d4 = ImageDraw.Draw(img)
+        r_ = max(4.5, size * 0.16)
+        pad_u = max(1.0, size * 0.05)
+        cx, cy = size - pad_u - r_, pad_u + r_
+        kant = max(1, int(size * 0.035))
+        d4.ellipse([cx - r_, cy - r_, cx + r_, cy + r_],
+                   fill=(56, 189, 248, 255), outline=(255, 255, 255, 255),
+                   width=kant)
+        lw = max(1, int(size * 0.05))
+        d4.line(((cx, cy + r_ * 0.45), (cx, cy - r_ * 0.45)),
+                fill=(15, 23, 42, 255), width=lw)
+        d4.line(((cx - r_ * 0.40, cy - r_ * 0.05),
+                 (cx, cy - r_ * 0.48),
+                 (cx + r_ * 0.40, cy - r_ * 0.05)),
+                fill=(15, 23, 42, 255), width=lw, joint="curve")
     _ICON_CACHE[key] = img
     if len(_ICON_CACHE) > _ICON_CACHE_MAX:
         _ICON_CACHE.pop(next(iter(_ICON_CACHE)))
@@ -528,7 +629,21 @@ def _hitta_tesseract_mapp() -> Optional[Path]:
     return None
 
 
-def _ladda_ner(url: str, dest: Path, timeout: int = 900) -> None:
+_UPDATE_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
+
+
+def _validate_update_url(url: str) -> str:
+    """Kräv giltig HTTPS-URL för uppdateringar (aldrig okrypterat eller file://)."""
+    from urllib.parse import urlparse
+    raw = str(url or "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise ValueError(f"Osäker uppdateringsadress avvisad: {raw[:120]}")
+    return raw
+
+
+def _ladda_ner(url: str, dest: Path, timeout: int = 900,
+               max_bytes: int = _UPDATE_MAX_DOWNLOAD_BYTES) -> None:
     """Stream to a unique temporary file, then atomically publish it.
 
     Unique temp names prevent simultaneous updater attempts from truncating
@@ -538,6 +653,7 @@ def _ladda_ner(url: str, dest: Path, timeout: int = 900) -> None:
     import tempfile
     import urllib.request
 
+    url = _validate_update_url(url)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -546,12 +662,20 @@ def _ladda_ner(url: str, dest: Path, timeout: int = 900) -> None:
     tmp = Path(tmp_name)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
+        total = 0
         with urllib.request.urlopen(req, timeout=timeout) as svar, \
                 tmp.open("wb") as ut:
+            final_url = getattr(svar, "geturl", lambda: "")()
+            if isinstance(final_url, str) and final_url:
+                _validate_update_url(final_url)
             while True:
                 bit = svar.read(1 << 20)
                 if not bit:
                     break
+                total += len(bit)
+                if total > max_bytes:
+                    raise ValueError(
+                        f"Nedladdningen överskred maxgränsen ({max_bytes // (1024 * 1024)} MB)")
                 ut.write(bit)
         for attempt in range(6):
             try:
@@ -1737,6 +1861,19 @@ class TrayIcon:
         self._startup_error: Optional[BaseException] = None
         self._last_tray_state: Optional[Tuple[bool, int]] = None
 
+    def _update_label(self, _=None) -> str:
+        pend = getattr(self.app, "_pending_restart_update", None)
+        if pend:
+            ver = str(pend.get("to") or "") if isinstance(pend, dict) else ""
+            return (f"↻ Starta om för {ver}…" if ver
+                    else "↻ Starta om för ny version…")
+        avail = getattr(self.app, "_available_update_info", None)
+        if avail:
+            ver = str(avail.get("remote") or "") if isinstance(avail, dict) else ""
+            return (f"↑ Uppdatera till {ver}…" if ver
+                    else "↑ Uppdatera ArkivPiloten…")
+        return "Uppdatera ArkivPiloten…"
+
     # -- meny -------------------------------------------------------------
     def _build_menu(self):
         import pystray
@@ -1745,11 +1882,19 @@ class TrayIcon:
         def watching(_=None) -> bool:
             return bool(self.app.watcher and self.app.watcher.running)
 
+        update_item = (
+            Item(self._update_label,
+                 lambda: self.app._post(self.app._check_updates_from_tray))
+            if (getattr(self.app, "_available_update_info", None)
+                or getattr(self.app, "_pending_restart_update", None))
+            else Item("Uppdatera ArkivPiloten…", lambda: self.app._post(
+                self.app._check_updates_from_tray))
+        )
+
         return Menu(
             Item("Visa fönster", lambda: self.app._post(self.app.show_window),
                  default=True),
-            Item("Uppdatera ArkivPiloten…", lambda: self.app._post(
-                self.app._check_updates_from_tray)),
+            update_item,
             Menu.SEPARATOR,
             Item("Sortera nu", lambda: self.app._post(self.app._sort_now)),
             Item("Bevakning", lambda: self.app._post(self.app._toggle_watch),
@@ -1845,11 +1990,20 @@ class TrayIcon:
         try:
             running = bool(self.app.watcher and self.app.watcher.running)
             n = len(self.app.queue)
-            state = (running, n)
+            avail_info = getattr(self.app, "_available_update_info", None)
+            pend_info = getattr(self.app, "_pending_restart_update", None)
+            avail_ver = (str(avail_info.get("remote") or "")
+                         if isinstance(avail_info, dict) else "")
+            pend_ver = (str(pend_info.get("to") or "")
+                        if isinstance(pend_info, dict) else "")
+            pending_restart = bool(pend_info)
+            update_avail = pending_restart or bool(avail_info)
+            state = (running, n, update_avail, pending_restart, avail_ver, pend_ver)
             if state == getattr(self, "_last_tray_state", None):
                 return
             self._last_tray_state = state
-            img = make_icon_image(64, active=running, badge=n)
+            img = make_icon_image(64, active=running, badge=n,
+                                  update_available=update_avail)
             if img is not None:
                 self.icon.icon = img
             self.icon.visible = True
@@ -1857,7 +2011,22 @@ class TrayIcon:
             delar = [APP_NAME, status]
             if n:
                 delar.append(f"{n} väntar på granskning")
+            if pend_ver:
+                delar.append(f"Starta om för att slutföra {pend_ver}")
+            elif pending_restart:
+                delar.append("Starta om för uppdatering")
+            elif avail_ver:
+                delar.append(f"Uppdatering: {avail_ver}")
+            elif update_avail:
+                delar.append("Uppdatering tillgänglig")
             self.icon.title = " · ".join(delar)
+            prev_update_avail = getattr(self, "_last_tray_update_avail", False)
+            self._last_tray_update_avail = update_avail
+            if update_avail != prev_update_avail:
+                try:
+                    self.icon.menu = self._build_menu()
+                except Exception:
+                    pass
             self.icon.update_menu()
         except Exception:
             pass
@@ -2942,6 +3111,10 @@ def _gzip_archive_file(fil: Path, dest: Path, archive_name: str) -> bool:
         with open(fil, "rb") as source:
             with gzip.open(tmp, "wb") as fo:
                 shutil.copyfileobj(source, fo)
+        try:
+            os.utime(tmp, (st.st_atime, st.st_mtime))
+        except OSError:
+            pass
         os.replace(tmp, mål)
         tmp = None
         fil.unlink()
@@ -2963,6 +3136,79 @@ def _cleanup_empty_dir(path: Path) -> None:
             path.rmdir()
     except OSError:
         pass
+
+
+def _archived_log_date(path: Path, arkiv_root: Path) -> Optional[_date]:
+    """Hämta arkiverad loggfils datum ur filnamn, mappstruktur eller mtime."""
+    import calendar
+    # 1. Datum i filnamnet (t.ex. app_20261110_...log.gz eller errors_20261110.log.gz)
+    for m in re.finditer(r"(?:^|_)(\d{8})(?:_|\.|$)", path.name):
+        try:
+            return _dt.strptime(m.group(1), "%Y%m%d").date()
+        except ValueError:
+            pass
+    # 2. Fallback: mtime + ev. mapp <ÅÅÅÅ>/<MM> så gamla månadsmappar rensas korrekt
+    mtime_date: Optional[_date] = None
+    try:
+        mtime_date = _dt.fromtimestamp(path.stat().st_mtime).date()
+    except OSError:
+        pass
+    try:
+        rel = path.relative_to(arkiv_root)
+        if len(rel.parts) >= 3 and re.fullmatch(r"\d{4}", rel.parts[0]) and re.fullmatch(r"\d{2}", rel.parts[1]):
+            yr, mo = int(rel.parts[0]), int(rel.parts[1])
+            if 1 <= mo <= 12 and 1970 <= yr <= 2999:
+                month_end = _date(yr, mo, calendar.monthrange(yr, mo)[1])
+                if mtime_date is None:
+                    return month_end
+                return min(mtime_date, month_end)
+    except (OSError, ValueError):
+        pass
+    return mtime_date
+
+
+def purge_archived_logs(days: int = 7) -> int:
+    """Rensa komprimerade arkivloggar i logs/arkiv/ som är 7 dagar eller äldre.
+
+    Rör aldrig aktiva loggar, dagens logg eller permanenta felloggar
+    (``felkoder.log``, ``fel-samlat.log``). Tar även bort nu tomma månads-
+    och årsmappar inne i ``logs/arkiv/``.
+    """
+    borttagna = 0
+    try:
+        from datetime import timedelta
+        idag = _dt.now().date()
+        gränsdatum = idag - timedelta(days=max(1, int(days)))
+        arkiv = session_dir() / "arkiv"
+        if not arkiv.is_dir():
+            return 0
+        for fil in list(arkiv.rglob("*")):
+            if not fil.is_file() or fil.name.startswith("."):
+                continue
+            loggdatum = _archived_log_date(fil, arkiv)
+            if loggdatum is None or loggdatum > gränsdatum:
+                continue
+            try:
+                fil.unlink()
+                borttagna += 1
+            except OSError:
+                continue
+        # Städa tomma månads-/årsmappar i logs/arkiv/ (djupast först)
+        for under in sorted(
+            (p for p in arkiv.rglob("*") if p.is_dir()),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        ):
+            _cleanup_empty_dir(under)
+        if borttagna:
+            session_log(
+                "logg",
+                f"Rensade {borttagna} arkiverad(e) loggfil(er) äldre än "
+                f"{max(1, int(days))} dagar från logs/arkiv/",
+            )
+    except Exception:
+        pass
+    return borttagna
 
 
 def archive_old_logs(days: int = 1) -> int:
@@ -3104,6 +3350,7 @@ def start_session(banner_lines: Optional[List[str]] = None) -> Optional[Path]:
     _LAST_LOG_ARCHIVE_DATE = stamp.date()
     migrate_legacy_logs()          # engångsflytt av äldre kraschlogg
     archive_old_logs(1)            # gårdagens + äldre sessionsloggar -> arkiv
+    purge_archived_logs(7)         # ta bort arkivloggar äldre än 7 dagar
     bar = "=" * 78
     rader = [bar,
              f"{APP_NAME} {APP_VERSION} - sessionslogg  (session {SESSION_ID})",
@@ -3172,6 +3419,7 @@ def _archive_logs_on_new_day(today: Optional[_date] = None) -> None:
             return
         _LAST_LOG_ARCHIVE_DATE = current
     archive_old_logs(1)
+    purge_archived_logs(7)
 
 
 def session_log(category: str, message: str, level: str = "info") -> None:
@@ -3857,6 +4105,7 @@ UPDATE_FILES = (
     "pdfsorter_diag.py",
     "requirements.txt", "install.sh", "ArkivPiloten.png", "ArkivPiloten.ico",
     "brand/arkivpiloten-logo.svg", "brand/arkivpiloten-icon.svg",
+    "brand/arkivpiloten-print.svg",
     # Engångsuppgraderingen från 1.0.0/1.1.0. Ligger kvar i mappen så att
     # den som behöver den slipper leta.
     "uppgradera-arkivpiloten.bat", "uppgradera-arkivpiloten.sh",
@@ -3885,12 +4134,19 @@ def _version_tuple(s: str) -> Tuple[int, ...]:
 
 def _http_get(url: str, timeout: float = 15.0, accept: str = "*/*",
               limit: int = 4_000_000) -> bytes:
-    """Hämta en liten resurs (JSON/text) med appens User-Agent."""
+    """Hämta en liten resurs (JSON/text) med appens User-Agent över HTTPS."""
     import urllib.request
+    url = _validate_update_url(url)
     req = urllib.request.Request(
         url, headers={"User-Agent": APP_NAME, "Accept": accept})
     with urllib.request.urlopen(req, timeout=timeout) as svar:
-        return svar.read(limit)
+        final_url = getattr(svar, "geturl", lambda: "")()
+        if isinstance(final_url, str) and final_url:
+            _validate_update_url(final_url)
+        data = svar.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError(f"Svar från {url[:80]} överskred gränsen ({limit} byte)")
+        return data
 
 
 def _latest_release(timeout: float = 15.0) -> Optional[dict]:
@@ -3972,7 +4228,8 @@ def _latest_release(timeout: float = 15.0) -> Optional[dict]:
     }
 
 
-def check_for_update(timeout: int = 15) -> dict:
+def check_for_update(timeout: int = 15,
+                     root: Optional[Path] = None) -> dict:
     """Check version, build commit and packaged-file hashes from Releases only.
 
     Same-version releases are offered when their commit or any shipped file
@@ -3999,10 +4256,11 @@ def check_for_update(timeout: int = 15) -> dict:
     manifest = _valid_build_manifest(rel.get("build_manifest"))
     comparison_error = ""
     if is_same:
-        root = Path(_main_script).resolve().parent
-        local_manifest = _read_build_manifest(root / UPDATE_MANIFEST_NAME)
+        app_root = (Path(root).resolve() if root is not None
+                    else Path(_main_script).resolve().parent)
+        local_manifest = _read_build_manifest(app_root / UPDATE_MANIFEST_NAME)
         local_commit = str((local_manifest or {}).get("commit") or "")
-        local_hashes = _local_content_hashes(root)
+        local_hashes = _local_content_hashes(app_root)
         if manifest:
             changed_files, commit_changed = _compare_manifest_to_local(
                 manifest, local_hashes, local_manifest)
@@ -4011,7 +4269,7 @@ def check_for_update(timeout: int = 15) -> dict:
             try:
                 changed_files, commit_changed, comparison_error = (
                     _legacy_same_version_compare(
-                        rel, root, local_hashes, local_manifest, float(timeout)))
+                        rel, app_root, local_hashes, local_manifest, float(timeout)))
                 build_update = bool(changed_files or commit_changed)
             except Exception as exc:
                 comparison_error = f"{type(exc).__name__}: {exc}"
@@ -4039,6 +4297,7 @@ def check_for_update(timeout: int = 15) -> dict:
         "zip_url": rel["zip_url"] or (
             f"https://codeload.github.com/{UPDATE_REPO}/zip/refs/tags/"
             f"{rel['tag']}"),
+        "zip_digest": rel.get("zip_digest", ""),
         "sha256_url": rel["sums_url"],
         "sha256": rel.get("sha256", ""),
         "release_url": rel["release_url"],
@@ -4080,10 +4339,13 @@ def _valid_build_manifest(value: Any) -> Optional[dict]:
             or (commit and not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit))):
         return None
     files = value.get("files")
-    if not isinstance(files, dict) or set(files) != set(UPDATE_CONTENT_FILES):
+    if not isinstance(files, dict) or not set(UPDATE_CONTENT_FILES).issubset(set(files)):
         return None
-    if not all(re.fullmatch(r"[0-9a-fA-F]{64}", str(digest))
-               for digest in files.values()):
+    if not all(isinstance(name, str) and name
+               and not name.startswith(("/", "\\"))
+               and ".." not in name.replace("\\", "/").split("/")
+               and re.fullmatch(r"[0-9a-fA-F]{64}", str(digest))
+               for name, digest in files.items()):
         return None
     return value
 
@@ -4111,8 +4373,9 @@ def _local_content_hashes(root: Path) -> Dict[str, str]:
 def _compare_manifest_to_local(manifest: dict, local_hashes: dict,
                                local_manifest: Optional[dict]) -> Tuple[List[str], bool]:
     remote_hashes = manifest["files"]
-    changed = sorted(name for name in UPDATE_CONTENT_FILES
-                     if local_hashes.get(name) != remote_hashes.get(name))
+    all_names = sorted(set(UPDATE_CONTENT_FILES) | set(remote_hashes))
+    changed = [name for name in all_names
+               if local_hashes.get(name) != remote_hashes.get(name)]
     local_commit = str((local_manifest or {}).get("commit") or "").lower()
     remote_commit = str(manifest.get("commit") or "").lower()
     commit_changed = bool(local_commit and remote_commit and
@@ -4219,8 +4482,10 @@ def _legacy_same_version_compare(rel: dict, root: Path,
 
 
 def _safe_extract(zippath: Path, dest: Path) -> Tuple[bool, str]:
-    """Packa upp en zip utan att något hamnar utanför dest (zip-slip)."""
+    """Packa upp en zip säkert utan symlänkar, path-traversal eller zip-bomber."""
+    import stat as _stat
     import zipfile as _zip
+
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     dest_res = dest.resolve()
@@ -4228,13 +4493,27 @@ def _safe_extract(zippath: Path, dest: Path) -> Tuple[bool, str]:
     try:
         with _zip.ZipFile(zippath) as zf:
             for info in zf.infolist():
+                raw_name = str(info.filename or "")
+                mode = (info.external_attr >> 16) & 0o170000
+                if _stat.S_ISLNK(mode):
+                    return False, ("zip-filen innehåller en symbolisk länk - "
+                                   "avbryter av säkerhetsskäl")
+                if "\\" in raw_name or raw_name.startswith("/") or re.match(r"^[A-Za-z]:", raw_name):
+                    return False, ("zip-filen försöker skriva utanför "
+                                   "appmappen - avbryter")
+                parts = [p for p in raw_name.split("/") if p]
+                if ".." in parts or "." in parts:
+                    return False, ("zip-filen försöker skriva utanför "
+                                   "appmappen - avbryter")
                 if info.is_dir():
                     continue
-                total += int(info.file_size or 0)
+                if not parts:
+                    return False, "zip-filen innehåller en ogiltig sökväg"
+                total += max(0, int(info.file_size or 0))
                 if total > 300 * 1024 * 1024:
                     return False, ("uppdateringspaketet är orimligt stort "
                                    "- avbryter")
-                target = (dest / info.filename).resolve()
+                target = (dest_res / Path(*parts)).resolve()
                 try:
                     target.relative_to(dest_res)
                     if target == dest_res:
@@ -4242,11 +4521,131 @@ def _safe_extract(zippath: Path, dest: Path) -> Tuple[bool, str]:
                 except ValueError:
                     return False, ("zip-filen försöker skriva utanför "
                                    "appmappen - avbryter")
-            zf.extractall(dest)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
     except Exception as exc:
         return False, (f"kunde inte packa upp uppdateringen: "
                        f"{type(exc).__name__}: {exc}")
     return True, ""
+
+
+def _replace_with_retry(src: Path, dst: Path) -> None:
+    """Atomisk os.replace med kort omförsök vid tillfälligt Windows-fillås."""
+    for attempt in range(6):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.02 * (2 ** attempt))
+
+
+def _record_update_history(root: Path, entry: Dict[str, Any]) -> None:
+    """Spara uppdateringshistorik i updates/history.jsonl (max 50 senaste)."""
+    try:
+        upd = Path(root) / "updates"
+        upd.mkdir(parents=True, exist_ok=True)
+        hist_file = upd / "history.jsonl"
+        lines: List[str] = []
+        if hist_file.is_file():
+            try:
+                lines = [ln for ln in hist_file.read_text(encoding="utf-8").splitlines()
+                         if ln.strip()]
+            except OSError:
+                lines = []
+        lines.append(json.dumps(entry, ensure_ascii=False))
+        lines = lines[-50:]
+        _atomic_text(hist_file, "\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+
+def _prune_old_update_backups(root: Path, keep: int = 10) -> None:
+    """Behåll de senaste uppdateringssäkerhetskopiorna och städa äldre."""
+    try:
+        bdir = Path(root) / "backups"
+        if not bdir.is_dir():
+            return
+        dirs = sorted(
+            (p for p in bdir.iterdir()
+             if p.is_dir() and p.name.startswith("update_")),
+            key=lambda p: p.name,
+            reverse=True,
+        )
+        for old in dirs[max(1, int(keep)):]:
+            try:
+                shutil.rmtree(old, ignore_errors=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _validate_staged_folder(src_root: Path,
+                            strict_manifest: bool = True) -> Tuple[bool, str, Optional[str]]:
+    """Validera kompilerbarhet, versionslikhet och byggmanifest i staging."""
+    if not (src_root / "pdfsorter.py").is_file():
+        return False, "zip-filen har oväntat innehåll (ingen pdfsorter.py)", None
+    try:
+        huvud = (src_root / "pdfsorter.py").read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, f"kunde inte läsa staged pdfsorter.py: {exc}", None
+    m = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', huvud)
+    staged_version = m.group(1) if m else None
+    if not staged_version:
+        return False, "staged pdfsorter.py saknar giltig APP_VERSION", None
+
+    for namn in UPDATE_FILES:
+        kalla = src_root / namn
+        if namn.lower().endswith((".py", ".pyw")) and kalla.is_file():
+            try:
+                compile(kalla.read_bytes(), namn, "exec")
+            except SyntaxError as exc:
+                return False, f"{namn} i uppdateringen kompilerar inte: {exc}", staged_version
+
+    # Kontrollera att alla core-moduler som följer med i paketet har samma version.
+    ver_re = re.compile(r'(?:APP_)?VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"')
+    for mod_name in ("pdfsorter_data.py", "pdfsorter_read.py",
+                     "pdfsorter_system.py", "pdfsorter_theme.py",
+                     "pdfsorter_diag.py"):
+        mp = src_root / mod_name
+        if not mp.is_file():
+            continue
+        try:
+            text = mp.read_text(encoding="utf-8")
+        except OSError as exc:
+            return False, f"kunde inte läsa staged {mod_name}: {exc}", staged_version
+        mm = ver_re.search(text)
+        if mm and mm.group(1) != staged_version:
+            return False, (
+                f"inkonsekvent version i paketet ({mod_name} har {mm.group(1)}, "
+                f"pdfsorter.py har {staged_version})"
+            ), staged_version
+
+    # Om paketet bär BUILD-MANIFEST.json: verifiera att dess filhashar stämmer.
+    manifest_file = src_root / UPDATE_MANIFEST_NAME
+    if manifest_file.is_file():
+        manifest = _read_build_manifest(manifest_file)
+        if not manifest or manifest.get("version") != staged_version:
+            return False, "ogiltigt eller versionskrockande byggmanifest i paketet", staged_version
+        for rel_name, expected_digest in manifest.get("files", {}).items():
+            fp = src_root / rel_name
+            if not fp.is_file():
+                if strict_manifest:
+                    return False, (
+                        f"filintegritet misslyckades i paketet för {rel_name} - "
+                        "avbryter innan något ändras"
+                    ), staged_version
+                continue
+            if _sha256_file(fp) != str(expected_digest).lower():
+                return False, (
+                    f"filintegritet misslyckades i paketet för {rel_name} - "
+                    "avbryter innan något ändras"
+                ), staged_version
+
+    return True, "", staged_version
 
 
 def _restore_files(backup: Path, root: Path, installerade: List[str],
@@ -4273,11 +4672,11 @@ def _install_from_folder(staged: Path, root: Path,
                          allow_same_version: bool = False) -> Tuple[bool, str]:
     """Installera UPDATE_FILES från en uppackad staging-mapp till root.
 
-    Säkerhet: alla .py valideras med compile() FÖRE något rörs, staged
-    version måste vara den väntade, nuvarande filer säkerhetskopieras
-    till backups/update_<tid>/ och varje fil ersätts atomiskt. Går
-    något fel mitt i återställs ALLA filer från kopian (rollback), och
-    efteråt kontrolleras att den nya versionen verkligen ligger på plats.
+    Säkerhet: alla .py/.pyw valideras med compile(), versionslikhet och ev.
+    BUILD-MANIFEST.json kontrolleras FÖRE något rörs, fritt diskutrymme
+    verifieras, nuvarande filer säkerhetskopieras till backups/update_<tid>/
+    och varje fil ersätts atomiskt med omförsök vid tillfälliga Windows-lås.
+    Går något fel mitt i återställs ALLA filer från kopian (rollback).
     """
     import shutil as _sh
     staged = Path(staged); root = Path(root)
@@ -4289,12 +4688,9 @@ def _install_from_folder(staged: Path, root: Path,
         if len(under) != 1:
             return False, "zip-filen har oväntat innehåll (ingen appmapp)"
         src_root = under[0]
-    try:
-        huvud = (src_root / "pdfsorter.py").read_text(encoding="utf-8")
-    except OSError as exc:
-        return False, f"kunde inte läsa staged pdfsorter.py: {exc}"
-    m = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', huvud)
-    staged_version = m.group(1) if m else None
+    ok_stage, stage_err, staged_version = _validate_staged_folder(src_root)
+    if not ok_stage:
+        return False, stage_err
     if expected and staged_version != expected:
         return False, (f"versionerna stämmer inte (väntade {expected}, "
                        f"fick {staged_version}) - avbryter")
@@ -4319,13 +4715,20 @@ def _install_from_folder(staged: Path, root: Path,
                                f"i appmappen (starta om appen i stället)")
     except OSError:
         pass
-    for namn in UPDATE_FILES:
-        kalla = src_root / namn
-        if namn.endswith(".py") and kalla.is_file():
-            try:
-                compile(kalla.read_bytes(), namn, "exec")
-            except SyntaxError as exc:
-                return False, f"{namn} i uppdateringen kompilerar inte: {exc}"
+    try:
+        staged_bytes = sum(
+            (src_root / n).stat().st_size
+            for n in UPDATE_FILES if (src_root / n).is_file()
+        )
+        free_bytes = _sh.disk_usage(root).free
+        needed = max(8 * 1024 * 1024, staged_bytes * 3)
+        if free_bytes < needed:
+            return False, (
+                f"för lite ledigt diskutrymme ({free_bytes // (1024 * 1024)} MB "
+                f"kvar) - avbryter säkert innan något ändras"
+            )
+    except OSError:
+        pass
     stamp = _dt.now().strftime("%Y%m%d_%H%M%S_%f")
     backup = root / "backups" / f"update_{stamp}"
     installerade: List[str] = []
@@ -4343,10 +4746,10 @@ def _install_from_folder(staged: Path, root: Path,
                 _sh.copy2(mal, backup_path)
                 fanns_innan.add(namn)
             mal.parent.mkdir(parents=True, exist_ok=True)
-            tmp = root / (namn + ".update-tmp")
+            tmp = mal.with_name(mal.name + ".update-tmp")
             with open(kalla, "rb") as fi, open(tmp, "wb") as fo:
                 _sh.copyfileobj(fi, fo)
-            os.replace(tmp, mal)
+            _replace_with_retry(tmp, mal)
             installerade.append(namn)
         # Kontrollera att den nya versionen verkligen ligger på plats.
         ny = (root / "pdfsorter.py").read_text(encoding="utf-8")
@@ -4358,14 +4761,19 @@ def _install_from_folder(staged: Path, root: Path,
         info = {"time": now_iso(), "from": APP_VERSION, "to": staged_version,
                 "from_commit": (old_manifest or {}).get("commit", ""),
                 "to_commit": (new_manifest or {}).get("commit", ""),
-                "files": installerade, "backup": str(backup)}
+                "files": installerade, "backup": str(backup),
+                "action": "update", "pending_verify": True}
         upd = root / "updates"
         upd.mkdir(parents=True, exist_ok=True)
-        (upd / "last_update.json").write_text(
-            json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
+        _atomic_text(
+            upd / "last_update.json",
+            json.dumps(info, ensure_ascii=False, indent=1),
+        )
+        _record_update_history(root, info)
+        _prune_old_update_backups(root, keep=10)
     except Exception as exc:
         kvar = _restore_files(backup, root, installerade, fanns_innan)
-        for tmp in root.glob("*.update-tmp"):
+        for tmp in root.rglob("*.update-tmp"):
             try:
                 tmp.unlink()
             except OSError:
@@ -4413,10 +4821,18 @@ def _perform_update_locked(timeout: int = 180,
     packas upp. Allt mellanlager (zip, staging) bor i appmappens egna
     undermappar temp/ och updates/ - inget utanför appmappen.
     """
+    import inspect
     import shutil as _sh
     from urllib.parse import urlparse
     root = Path(root) if root else _main_script.parent
-    info = check_for_update(timeout=min(timeout, 30))
+    try:
+        sig = inspect.signature(check_for_update)
+        if "root" in sig.parameters:
+            info = check_for_update(timeout=min(timeout, 30), root=root)
+        else:
+            info = check_for_update(timeout=min(timeout, 30))
+    except (TypeError, ValueError):
+        info = check_for_update(timeout=min(timeout, 30))
     if not info["ok"]:
         return False, f"Kunde inte söka uppdatering: {info.get('error', '?')}"
     if not info["available"]:
@@ -4454,6 +4870,15 @@ def _perform_update_locked(timeout: int = 180,
                            "eller SHA-256 i release-texten), så paketet kan "
                            "inte verifieras. Uppdateringen avbröts - ladda "
                            "ner manuellt från releasesidan i stället.")
+        api_digest = str(info.get("zip_digest") or "")
+        if api_digest.startswith("sha256:"):
+            api_digest = api_digest.split(":", 1)[1].strip().lower()
+        else:
+            api_digest = ""
+        if (re.fullmatch(r"[0-9a-f]{64}", api_digest)
+                and api_digest != forvantad.lower()):
+            return False, ("Release-API:ts SHA-256 stämmer inte med "
+                           "SHA256SUMS.txt - uppdateringen avbröts.")
         session_log("uppdatering", f"Laddar ner {url}")
         _ladda_ner(url, zippath, timeout=timeout)
         if forvantad:
@@ -4469,8 +4894,13 @@ def _perform_update_locked(timeout: int = 180,
             return False, fel
         expected_manifest = info.get("build_manifest")
         if expected_manifest:
-            staged_manifest = _read_build_manifest(
-                staging / UPDATE_MANIFEST_NAME)
+            manifest_path = staging / UPDATE_MANIFEST_NAME
+            if not manifest_path.is_file() and not (staging / "pdfsorter.py").is_file():
+                under = [d for d in staging.iterdir()
+                         if d.is_dir() and (d / "pdfsorter.py").is_file()]
+                if len(under) == 1:
+                    manifest_path = under[0] / UPDATE_MANIFEST_NAME
+            staged_manifest = _read_build_manifest(manifest_path)
             if not staged_manifest or staged_manifest != expected_manifest:
                 return False, ("Releasepaketets byggmanifest matchar inte "
                                "releaseinformationen - inget installerades.")
@@ -4488,6 +4918,271 @@ def _perform_update_locked(timeout: int = 180,
                 _sh.rmtree(staging, ignore_errors=True)
         except OSError:
             pass
+
+
+def pending_installed_update(root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Returnera info om en installerad uppdatering som ännu väntar på omstart."""
+    root = Path(root) if root else _main_script.parent
+    try:
+        text = (root / "pdfsorter.py").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    m = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', text)
+    disk_ver = m.group(1) if m else ""
+    last_info: Dict[str, Any] = {}
+    upd_file = root / "updates" / "last_update.json"
+    if upd_file.is_file():
+        try:
+            loaded = json.loads(upd_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                last_info = loaded
+        except Exception:
+            last_info = {}
+    if disk_ver and _version_tuple(disk_ver) != _version_tuple(APP_VERSION):
+        return {
+            "from": APP_VERSION,
+            "to": disk_ver,
+            "to_commit": str(last_info.get("to_commit") or ""),
+            "time": str(last_info.get("time") or ""),
+            "action": str(last_info.get("action") or "update"),
+        }
+    if (last_info.get("pending_verify")
+            and str(last_info.get("to") or "") == APP_VERSION
+            and str(last_info.get("to_commit") or "")
+            and _STARTUP_BUILD_COMMIT
+            and str(last_info.get("to_commit") or "") != _STARTUP_BUILD_COMMIT):
+        return {
+            "from": str(last_info.get("from") or APP_VERSION),
+            "to": APP_VERSION,
+            "to_commit": str(last_info.get("to_commit") or ""),
+            "time": str(last_info.get("time") or ""),
+            "action": str(last_info.get("action") or "update"),
+        }
+    return None
+
+
+def _remove_verified_backup_dir(root: Path, backup_str: str) -> bool:
+    """Ta bort säkerhetskopia inne i <root>/backups/ efter verifierat lyckad uppdatering."""
+    if not backup_str:
+        return False
+    broot = (root / "backups").resolve()
+    try:
+        candidate = Path(backup_str).resolve()
+        candidate.relative_to(broot)
+    except (OSError, ValueError):
+        return False
+    if candidate == broot or not candidate.is_dir():
+        return False
+    try:
+        shutil.rmtree(candidate, ignore_errors=False)
+    except OSError:
+        shutil.rmtree(candidate, ignore_errors=True)
+    if not candidate.exists():
+        _cleanup_empty_dir(broot)
+        return True
+    return False
+
+
+def mark_update_verified(root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Markera att nyligen installerad uppdatering/återställning startat utan fel
+    och ta bort uppdateringens säkerhetskopia automatiskt.
+    """
+    root = Path(root) if root else _main_script.parent
+    upd_file = root / "updates" / "last_update.json"
+    if not upd_file.is_file():
+        return None
+    try:
+        info = json.loads(upd_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(info, dict) or not info.get("pending_verify"):
+        return None
+    if str(info.get("to") or "") and str(info.get("to") or "") != APP_VERSION:
+        return None
+    disk_commit = _capture_startup_commit(root)
+    expected_commit = str(info.get("to_commit") or "")
+    if expected_commit and disk_commit and expected_commit != disk_commit:
+        return None
+    backup_str = str(info.get("backup") or "")
+    backup_removed = _remove_verified_backup_dir(root, backup_str)
+    info["pending_verify"] = False
+    info["verified_at"] = now_iso()
+    info["backup_removed"] = bool(backup_removed)
+    try:
+        _atomic_text(upd_file, json.dumps(info, ensure_ascii=False, indent=1))
+        _record_update_history(root, {"action": "verified", "to": APP_VERSION,
+                                      "to_commit": expected_commit,
+                                      "backup_removed": bool(backup_removed),
+                                      "time": info["verified_at"]})
+    except Exception:
+        pass
+    if backup_removed:
+        session_log(
+            "uppdatering",
+            f"Verifierad start i {APP_VERSION}; säkerhetskopia borttagen ({Path(backup_str).name})",
+            "ok",
+        )
+    else:
+        session_log("uppdatering", f"Verifierad start i {APP_VERSION}", "ok")
+    return info
+
+
+def list_update_backups(root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Lista säkerhetskopior i backups/update_* med metadata, nyast först."""
+    root = Path(root) if root else _main_script.parent
+    bdir = root / "backups"
+    if not bdir.is_dir():
+        return []
+    by_backup: Dict[str, Dict[str, Any]] = {}
+    hist_file = root / "updates" / "history.jsonl"
+    if hist_file.is_file():
+        try:
+            for ln in hist_file.read_text(encoding="utf-8").splitlines():
+                if not ln.strip():
+                    continue
+                row = json.loads(ln)
+                if isinstance(row, dict) and row.get("backup"):
+                    by_backup[str(Path(str(row["backup"])).name)] = row
+        except Exception:
+            pass
+    last_file = root / "updates" / "last_update.json"
+    if last_file.is_file():
+        try:
+            row = json.loads(last_file.read_text(encoding="utf-8"))
+            if isinstance(row, dict) and row.get("backup"):
+                by_backup.setdefault(str(Path(str(row["backup"])).name), row)
+        except Exception:
+            pass
+
+    out: List[Dict[str, Any]] = []
+    for folder in sorted(
+        (p for p in bdir.iterdir()
+         if p.is_dir() and p.name.startswith("update_")),
+        key=lambda p: p.name,
+        reverse=True,
+    ):
+        meta = by_backup.get(folder.name, {})
+        py_main = folder / "pdfsorter.py"
+        backup_ver = ""
+        if py_main.is_file():
+            try:
+                m = re.search(
+                    r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"',
+                    py_main.read_text(encoding="utf-8", errors="ignore"),
+                )
+                backup_ver = m.group(1) if m else ""
+            except OSError:
+                pass
+        manifest = _read_build_manifest(folder / UPDATE_MANIFEST_NAME)
+        backup_commit = str((manifest or {}).get("commit")
+                            or meta.get("from_commit") or "")
+        file_count = sum(1 for p in folder.rglob("*") if p.is_file())
+        out.append({
+            "name": folder.name,
+            "path": str(folder),
+            "time": str(meta.get("time") or ""),
+            "from_version": str(meta.get("from") or backup_ver),
+            "to_version": str(meta.get("to") or ""),
+            "backup_version": backup_ver,
+            "commit": backup_commit,
+            "action": str(meta.get("action") or "update"),
+            "file_count": file_count,
+            "valid": py_main.is_file(),
+        })
+    return out
+
+
+def rollback_update(backup_dir: Path,
+                    root: Optional[Path] = None) -> Tuple[bool, str]:
+    """Återställ en tidigare appversion ur backups/update_* med atomisk rollback."""
+    if not _UPDATE_INSTALL_LOCK.acquire(blocking=False):
+        return False, "En uppdatering eller återställning pågår redan."
+    try:
+        return _rollback_update_locked(Path(backup_dir), root=root)
+    finally:
+        _UPDATE_INSTALL_LOCK.release()
+
+
+def _rollback_update_locked(backup_dir: Path,
+                            root: Optional[Path] = None) -> Tuple[bool, str]:
+    import shutil as _sh
+    root = Path(root) if root else _main_script.parent
+    broot = (root / "backups").resolve()
+    try:
+        bdir = Path(backup_dir).resolve()
+        bdir.relative_to(broot)
+    except (OSError, ValueError):
+        return False, "Ogiltig säkerhetskopia - ligger inte i appens backups/-mapp."
+    if not bdir.is_dir() or not bdir.name.startswith("update_"):
+        return False, f"Säkerhetskopian finns inte: {backup_dir}"
+    ok_stage, stage_err, restored_ver = _validate_staged_folder(
+        bdir, strict_manifest=False)
+    if not ok_stage:
+        return False, f"Säkerhetskopian är ofullständig ({stage_err})."
+
+    old_manifest = _read_build_manifest(root / UPDATE_MANIFEST_NAME)
+    stamp = _dt.now().strftime("%Y%m%d_%H%M%S_%f")
+    safety = root / "backups" / f"update_{stamp}_pre_rollback"
+    restored: List[str] = []
+    fanns_innan = set()
+    try:
+        safety.mkdir(parents=True, exist_ok=True)
+        for namn in UPDATE_FILES:
+            kalla = bdir / namn
+            if not kalla.is_file():
+                continue
+            mal = root / namn
+            if mal.is_file():
+                sp = safety / namn
+                sp.parent.mkdir(parents=True, exist_ok=True)
+                _sh.copy2(mal, sp)
+                fanns_innan.add(namn)
+            mal.parent.mkdir(parents=True, exist_ok=True)
+            tmp = mal.with_name(mal.name + ".update-tmp")
+            with open(kalla, "rb") as fi, open(tmp, "wb") as fo:
+                _sh.copyfileobj(fi, fo)
+            _replace_with_retry(tmp, mal)
+            restored.append(namn)
+        ny = (root / "pdfsorter.py").read_text(encoding="utf-8")
+        m3 = re.search(r'APP_VERSION\s*=\s*"([0-9][0-9A-Za-z.\-]*)"', ny)
+        if restored_ver and (not m3 or m3.group(1) != restored_ver):
+            raise OSError(f"pdfsorter.py visar {m3.group(1) if m3 else '?'} efter återställning")
+        new_manifest = _read_build_manifest(root / UPDATE_MANIFEST_NAME)
+        info = {
+            "time": now_iso(),
+            "from": APP_VERSION,
+            "to": restored_ver,
+            "from_commit": (old_manifest or {}).get("commit", ""),
+            "to_commit": (new_manifest or {}).get("commit", ""),
+            "files": restored,
+            "backup": str(safety),
+            "restored_from": str(bdir),
+            "action": "rollback",
+            "pending_verify": True,
+        }
+        upd = root / "updates"
+        upd.mkdir(parents=True, exist_ok=True)
+        _atomic_text(
+            upd / "last_update.json",
+            json.dumps(info, ensure_ascii=False, indent=1),
+        )
+        _record_update_history(root, info)
+    except Exception as exc:
+        kvar = _restore_files(safety, root, restored, fanns_innan)
+        for tmp in root.rglob("*.update-tmp"):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        extra = (" Nuvarande filer återställdes." if not kvar
+                 else f" KUNDE INTE ÅTERSTÄLLA: {', '.join(kvar)}.")
+        return False, f"Återställningen avbröts ({type(exc).__name__}: {exc}).{extra}"
+    session_log("uppdatering",
+                f"Återställd {APP_VERSION} -> {restored_ver} från {bdir.name}", "ok")
+    return True, (
+        f"Återställde ArkivPiloten {restored_ver} ({len(restored)} filer från "
+        f"{bdir.name}). Starta om appen för att köra den återställda versionen."
+    )
 
 
 # ==========================================================================

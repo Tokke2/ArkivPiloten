@@ -801,3 +801,75 @@ def test_up_to_date_dialog_hides_build_when_unknown(monkeypatch):
         manual=True)
 
     assert "Bygge:" not in app.messagebox.shown[0]
+
+
+def test_check_updates_gui_guards_concurrent_install_and_pending_restart(monkeypatch):
+    monkeypatch.setattr(P, "check_for_update", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("GitHub ska inte kontaktas")))
+
+    app = _Sken()
+    app._update_installing = True
+    app._check_updates_gui(manual=True)
+    assert app.messagebox.klart
+
+    app2 = _Sken()
+    app2._pending_restart_update = {"to": "9.9.9"}
+    restarts = []
+    app2._planera_omstart = lambda tyst=False: restarts.append(tyst)
+    app2._check_updates_gui(manual=True)
+    assert app2.messagebox.fragor
+    assert restarts == [False]
+
+
+def test_update_history_menu_entry_is_wired():
+    help_menu = next(m for m in P.meny_spec() if m["titel"] == "Hjälp")
+    entry = next(p for p in help_menu["poster"]
+                 if p.get("id") == "uppdateringshistorik")
+    assert entry["text"] in P._UI_EN
+    assert callable(getattr(P.App, entry["atgard"]))
+
+
+def test_silent_restart_quiet_window_overnight_and_manual_override(monkeypatch):
+    # Default settings keep silent auto-restarts unblocked at any hour
+    assert P.in_silent_restart_window(
+        {}, now=datetime(2026, 11, 24, 14, 0)) is True
+
+    cfg = {
+        "silent_restart_window_enabled": True,
+        "silent_restart_window_start": "23:00",
+        "silent_restart_window_end": "05:00",
+    }
+    assert P.in_silent_restart_window(cfg, now=datetime(2026, 11, 24, 22, 59)) is False
+    assert P.in_silent_restart_window(cfg, now=datetime(2026, 11, 24, 23, 0)) is True
+    assert P.in_silent_restart_window(cfg, now=datetime(2026, 11, 25, 2, 15)) is True
+    assert P.in_silent_restart_window(cfg, now=datetime(2026, 11, 25, 5, 0)) is False
+
+    # Same-day window and safe fallback on malformed input
+    day_cfg = {
+        "silent_restart_window_enabled": True,
+        "silent_restart_window_start": "09:00",
+        "silent_restart_window_end": "12:00",
+    }
+    assert P.in_silent_restart_window(day_cfg, now=datetime(2026, 11, 24, 10, 30)) is True
+    assert P.in_silent_restart_window(day_cfg, now=datetime(2026, 11, 24, 13, 0)) is False
+    assert P._parse_hhmm("99:99", (23, 0)) == (23, 0)
+
+    # _planera_omstart defers silent restart outside window, allows manual tyst=False
+    app = _Sken()
+    app.settings.update(cfg)
+    app._restart_app = lambda tyst=False: app.omstarter.append(tyst) or True
+    monkeypatch.setattr(P, "in_silent_restart_window", lambda s, now=None: False)
+    app._planera_omstart(tyst=True)
+    assert app._omstart_vantar is True
+    assert app.omstarter == []
+    assert app.root.efter[-1] == 60000
+
+    # Manual restart ignores quiet window
+    app._planera_omstart(tyst=False)
+    assert app.omstarter == [False]
+
+    # When window opens, scheduled check fires silent restart
+    monkeypatch.setattr(P, "in_silent_restart_window", lambda s, now=None: True)
+    app._omstart_nar_ledig()
+    assert app.omstarter == [False, True]
+    assert app._omstart_vantar is False

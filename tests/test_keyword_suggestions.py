@@ -106,3 +106,49 @@ Bankgiro 123-4567
                        if kind not in prioritized]
     assert not other_positions or max(kinds.index(kind) for kind in important) < min(
         other_positions)
+
+
+def test_barcode_and_qr_strong_identities_are_parsed_and_ranked(
+        tmp_path, monkeypatch):
+    import pdfsorter as P
+    import pdfsorter_read as R
+
+    # 1. Payload parsing for Swedish invoice QR JSON, URL QR, and Code128/EAN
+    tokens = R.parse_barcode_payloads([
+        ("QRCODE", '{"uqr":1,"nme":"Nordisk Glas AB","cid":"556033-9086","iref":"INV-771"}'),
+        ("QRCODE", "https://pay.nordiskglas.se/faktura/991"),
+        ("EAN13", "7310865001818"),
+    ])
+    assert "556033-9086" in tokens
+    assert "qr:556033-9086" in tokens
+    assert "Nordisk Glas AB" in tokens
+    assert "pay.nordiskglas.se" in tokens
+    assert "7310865001818" in tokens
+    assert "barcode:7310865001818" in tokens
+
+    # 2. Extraction cache + scan_pdf_barcodes integration (even on scan-only PDFs)
+    pdf_file = tmp_path / "qr_only.pdf"
+    pdf_file.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    monkeypatch.setattr(R, "scan_pdf_barcodes",
+                        lambda _p, max_pages=2: ["7310865001818", "barcode:7310865001818"])
+    monkeypatch.setattr(R, "ocr_available", lambda: False)
+    ext = R.extract(pdf_file)
+    assert ext.error == ""
+    assert "7310865001818" in ext.combined
+    restored = R.Extraction.from_cache_dict(pdf_file, ext.to_cache_dict())
+    assert restored.barcodes == ["7310865001818", "barcode:7310865001818"]
+
+    # 3. suggest_keywords treats [QR/Streckkod] tokens as weight-3.0 strong IDs
+    cands = suggest_keywords(ext.combined)
+    by_text = {c.text: c for c in cands}
+    assert by_text["barcode:7310865001818"].kind == "barcode"
+    assert by_text["barcode:7310865001818"].label == "QR-/streckkod"
+    assert R.KIND_INFO["barcode"][0] == 3.0
+
+    # 4. Strong ID matching recognizes qr:/barcode: and GS1-valid EAN-13 only
+    assert P.keyword_strength("qr:556033-9086") == "barcode"
+    assert P.keyword_strength("barcode:INV-771") == "barcode"
+    assert P.keyword_strength("7310865001818") == "barcode"  # valid EAN-13
+    assert P.keyword_strength("7310865001819") == ""         # bad check digit
+    assert P.keyword_strength("20251124") != "barcode"       # 8-digit date not barcode
+    assert P.keyword_strength("202511") == ""                # plain short number not strong

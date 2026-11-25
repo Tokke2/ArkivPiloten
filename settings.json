@@ -1,9 +1,0 @@
-{
-    "notification_email": "rl@tadega.com",
-    "admin_email": "rl@tadega.com",
-    "additional_emails": [
-        "info@tadega.com"
-    ],
-    "company_name": "Tadega AB",
-    "low_stock_threshold": 2
-}

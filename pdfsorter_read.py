@@ -66,7 +66,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 #: Programmets version. Höjs vid varje leverans.
 VERSION = "1.4.15"
-EXTRACTION_CACHE_SCHEMA = 3
+EXTRACTION_CACHE_SCHEMA = 4
 
 __all__ = [
     # extraktion
@@ -74,6 +74,8 @@ __all__ = [
     "reading_health",
     "header_images", "ocr_header_logo", "embedded_images",
     "ocr_embedded_images",
+    "barcode_available", "decode_image_barcodes", "parse_barcode_payloads",
+    "scan_pdf_barcodes",
     "MIN_TEXT_CHARS", "HARD_PAGE_CAP",
     # stödord
     "Candidate", "suggest_keywords", "guess_category_name",
@@ -332,7 +334,9 @@ class Extraction:
     #: Alla datum som hittades, med etikett. Används i förklaringsrutan
     #: och vid felsökning - man ska kunna se vad som fanns att välja på.
     date_candidates: List[Tuple[date, str]] = field(default_factory=list)
-    _combined_cache_key: Optional[Tuple[str, int, str]] = field(
+    #: Avkodade QR-/streckkoder och extraherade starka identifierare (#203).
+    barcodes: List[str] = field(default_factory=list)
+    _combined_cache_key: Optional[Tuple[str, int, str, int]] = field(
         default=None, init=False, repr=False, compare=False)
     _combined_cache_val: str = field(
         default="", init=False, repr=False, compare=False)
@@ -346,7 +350,7 @@ class Extraction:
         brevhuvud, och en fil som hette "offert_101.pdf" fick analysen att
         tro att dokumentet började med ordet "offert".
         """
-        key = (self.text, len(self.metadata), self.filename_text)
+        key = (self.text, len(self.metadata), self.filename_text, len(self.barcodes))
         if self._combined_cache_key == key:
             return self._combined_cache_val
         # Radbrytning mellan fälten, inte mellanslag. Med mellanslag flyter
@@ -359,7 +363,11 @@ class Extraction:
         meta = "\n".join(str(v) for k, v in self.metadata.items()
                          if v and not k.startswith("_")
                          and normalize(str(v)) not in norm)
-        val = "\n".join(p for p in (self.text, meta, self.filename_text) if p)
+        barcode_block = "\n".join(
+            f"[QR/Streckkod] {code}" for code in self.barcodes
+            if code and f"[QR/Streckkod] {code}".casefold() not in norm
+        )
+        val = "\n".join(p for p in (self.text, meta, barcode_block, self.filename_text) if p)
         self._combined_cache_key = key
         self._combined_cache_val = val
         return val
@@ -399,6 +407,7 @@ class Extraction:
             "doc_date": self.doc_date.isoformat() if self.doc_date else None,
             "date_source": self.date_source,
             "token_pages": {t: int(c) for t, c in (self.token_pages or {}).items()},
+            "barcodes": [str(b) for b in (self.barcodes or []) if b],
         }
 
     @classmethod
@@ -435,6 +444,10 @@ class Extraction:
                                in (d.get("token_pages") or {}).items()}
         except (TypeError, ValueError):
             ext.token_pages = {}
+        try:
+            ext.barcodes = [str(b) for b in (d.get("barcodes") or []) if b]
+        except (TypeError, ValueError):
+            ext.barcodes = []
         return ext
 
     def __repr__(self) -> str:
@@ -1388,6 +1401,182 @@ def ocr_header_logo(path: Path, language: str = "swe+eng") -> str:
     return _clean("\n".join(out))
 
 
+def barcode_available() -> bool:
+    """Sant om minst en valfri QR-/streckkodsavkodare finns (pyzbar eller OpenCV)."""
+    return _have("pyzbar.pyzbar") or _have("cv2")
+
+
+def decode_image_barcodes(img: Any) -> List[Tuple[str, str]]:
+    """Avkoda QR-koder och streckkoder ur en PIL-bild (tyst om bibliotek saknas)."""
+    if img is None:
+        return []
+    hits: List[Tuple[str, str]] = []
+    seen: set = set()
+
+    def add_hit(sym: str, raw: Any) -> None:
+        if isinstance(raw, (bytes, bytearray)):
+            val = raw.decode("utf-8", errors="ignore").strip()
+        else:
+            val = str(raw or "").strip()
+        if not val or len(val) < 3:
+            return
+        sym_clean = str(sym or "QR").strip().upper() or "QR"
+        key = (sym_clean, val)
+        if key not in seen:
+            seen.add(key)
+            hits.append(key)
+
+    try:
+        from pyzbar.pyzbar import decode as zbar_decode  # type: ignore
+        for item in zbar_decode(img) or ():
+            add_hit(getattr(item, "type", "BARCODE"), getattr(item, "data", b""))
+    except Exception:
+        pass
+
+    if not hits:
+        try:
+            import cv2  # type: ignore
+            import numpy as np  # type: ignore
+            rgb = img.convert("RGB")
+            arr = np.asarray(rgb)
+            bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            qr = cv2.QRCodeDetector()
+            ok, infos, _pts, _straight = (False, (), None, None)
+            if hasattr(qr, "detectAndDecodeMulti"):
+                ok, infos, _pts, _straight = qr.detectAndDecodeMulti(bgr)
+            if ok and infos is not None:
+                for info in infos:
+                    add_hit("QRCODE", info)
+            else:
+                val, _pts, _straight = qr.detectAndDecode(bgr)
+                if val:
+                    add_hit("QRCODE", val)
+            if hasattr(cv2, "barcode") and hasattr(cv2.barcode, "BarcodeDetector"):
+                det = cv2.barcode.BarcodeDetector()
+                b_ok, b_infos, b_types, _ = det.detectAndDecodeWithType(bgr)
+                if b_ok and b_infos:
+                    for idx, val in enumerate(b_infos):
+                        b_type = (b_types[idx] if b_types and idx < len(b_types)
+                                  else "BARCODE")
+                        add_hit(b_type or "BARCODE", val)
+        except Exception:
+            pass
+    return hits
+
+
+def parse_barcode_payloads(entries: List[Tuple[str, str]]) -> List[str]:
+    """Omvandla råa QR-/streckkodssträngar till sökbara, starka identiteter."""
+    out: List[str] = []
+    seen: set = set()
+
+    def push(token: str) -> None:
+        cleaned = re.sub(r"\s+", " ", str(token or "")).strip()
+        if not cleaned or len(cleaned) > 120:
+            return
+        norm = normalize(cleaned)
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(cleaned)
+
+    for sym, payload in entries or ():
+        raw = str(payload or "").strip()
+        if not raw:
+            continue
+        is_qr = "QR" in str(sym or "").upper()
+        prefix = "qr:" if is_qr else "barcode:"
+
+        # 1. Strukturerad svensk faktura-QR / JSON (t.ex. SS 614314: cid, nme, acc, iref)
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                obj = json.loads(raw)
+                if isinstance(obj, dict):
+                    for key in ("cid", "orgnr", "nme", "acc", "iref", "oid", "ref"):
+                        val = str(obj.get(key) or "").strip()
+                        if val:
+                            push(val)
+                            if key in ("cid", "orgnr", "iref", "oid"):
+                                push(f"{prefix}{val}")
+                    continue
+            except Exception:
+                pass
+
+        # 2. Webbadress / Swish / Betallänk i QR-kod -> domän + kompakt kod
+        url_match = re.match(r"^https?://([^/?#\s]+)(.*)", raw, re.I)
+        if url_match:
+            host = url_match.group(1).lower().split(":")[0]
+            if host.startswith("www."):
+                host = host[4:]
+            if host:
+                push(host)
+                push(f"{prefix}{host}")
+            tail = re.sub(r"[^\w.\-:/=]+", "", url_match.group(2) or "")
+            if 3 <= len(tail) <= 48 and tail != "/":
+                push(f"{prefix}{host}{tail}")
+            continue
+
+        # 3. Kompakt streckkod / order-ID / EAN utan mellanslag
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._\-:/]{2,60}", raw):
+            push(raw)
+            push(f"{prefix}{raw}")
+            continue
+
+        # 4. Flerradig/textbaserad QR (t.ex. EPC/SEPA-QR eller adressblock)
+        for line in raw.splitlines():
+            part = line.strip()
+            if 3 <= len(part) <= 80:
+                push(part)
+        if len(raw) <= 80:
+            push(f"{prefix}{raw}")
+    return out
+
+
+def scan_pdf_barcodes(path: Path, max_pages: int = 2) -> List[str]:
+    """Läs QR- och streckkoder ur PDF:ens första sidor och inbäddade bilder (#203)."""
+    if not barcode_available():
+        return []
+    raw_hits: List[Tuple[str, str]] = []
+    seen_raw: set = set()
+
+    def collect(img: Any) -> None:
+        for item in decode_image_barcodes(img):
+            if item not in seen_raw:
+                seen_raw.add(item)
+                raw_hits.append(item)
+
+    if _have("fitz") or _have("pymupdf"):
+        try:
+            import pymupdf  # type: ignore
+            with pymupdf.open(str(path)) as doc:
+                limit = min(len(doc), max(1, int(max_pages)))
+                for pno in range(limit):
+                    page = doc[pno]
+                    zoom = _bounded_render_zoom(page.rect, 2.0)
+                    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+                    im = None
+                    try:
+                        im = _open_image_quiet(io.BytesIO(pix.tobytes("png")))
+                        collect(im)
+                    finally:
+                        del pix
+                        if im is not None:
+                            try:
+                                im.close()
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+    for im in embedded_images(path, max_images=3):
+        try:
+            collect(im)
+        finally:
+            try:
+                im.close()
+            except Exception:
+                pass
+    return parse_barcode_payloads(raw_hits)
+
+
 def extract(path: Path, max_pages: int = 0, ocr_enabled: bool = True,
             ocr_max_pages: int = 3, ocr_language: str = "swe+eng",
             ocr_quality: str = "high", ocr_dpi: int = 300) -> Extraction:
@@ -1480,6 +1669,15 @@ def extract(path: Path, max_pages: int = 0, ocr_enabled: bool = True,
             except Exception:
                 pass
 
+        # QR- och streckkodsavkodning (#203): starka identifierare ur QR/EAN/Code128.
+        try:
+            res.barcodes = scan_pdf_barcodes(path)
+        except Exception:
+            res.barcodes = []
+
+        if not res.text and res.barcodes:
+            res.text = "\n".join(f"[QR/Streckkod] {b}" for b in res.barcodes)
+            res.error = ""
         if not res.text and not res.error:
             res.error = "Ingen text kunde läsas (skannad PDF utan OCR?)"
 
@@ -1679,6 +1877,7 @@ KIND_INFO = {
     "title":   (3.2, "dokumenttitel"),
     "orgnr":   (3.0, "organisationsnummer"),
     "vat":     (3.0, "VAT-nummer"),
+    "barcode": (3.0, "QR-/streckkod"),
     "giro":    (2.2, "bankgiro/plusgiro"),
     "refnr":   (0.9, "referensnummer"),
     "domain":  (2.6, "domän"),
@@ -2145,6 +2344,10 @@ def suggest_keywords(text: str, filename: str = "", limit: int = 25,
             add(dom, "domain")
     for m in _URL.finditer(hay):
         add(m.group(1).lower(), "domain")
+    for bm in re.finditer(r"^\[QR/Streckkod\]\s+(.+)$", text, re.I | re.M):
+        tok = bm.group(1).strip()
+        if tok:
+            add(tok, "barcode")
 
     # -- företagsnamn ----------------------------------------------------
     for m in _COMPANY.finditer(hay):
@@ -2269,14 +2472,14 @@ def suggest_keywords(text: str, filename: str = "", limit: int = 25,
     # stödordsförslagen vid granskning. Rangordna dem före generiska ord,
     # oavsett frekvenspoäng; inom gruppen behålls den vanliga relevansordningen.
     priority = {"title": 0, "company": 1, "sender": 1,
-                "orgnr": 2, "vat": 3, "giro": 4}
+                "orgnr": 2, "vat": 3, "barcode": 3, "giro": 4}
     ranked = sorted(found.values(),
                     key=lambda c: (priority.get(c.kind, 5), -c.score, c.text))
     kept: List[Candidate] = []
     for cand in ranked:
         # Behåll alltid strukturerade identiteter även om deras text råkar
         # ingå i en längre fras/företagskandidat (t.ex. VAT efter "VAT ").
-        identity = cand.kind in {"orgnr", "vat", "giro"}
+        identity = cand.kind in {"orgnr", "vat", "barcode", "giro"}
         if not identity and any(
                 cand.text != k.text and cand.text in k.text
                 and cand.score < k.score * 1.3 for k in kept):

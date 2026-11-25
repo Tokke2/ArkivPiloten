@@ -1,6 +1,7 @@
 # ArkivPiloten — Förslagslogg
-> Alla förslag är **VÄNTAR** tills du säger `kör <nummer>` eller `bygg <nummer>`.  
+> Alla förslag är **VÄNTAR** tills du säger `kör <nummer>` eller `bygg <nummer>`.
 > Inget implementeras automatiskt (REQ-K4). Status: **VÄNTAR = ej påbörjad**.
+> **Cykelregel:** Efter var **10:e chattmeddelande** ska en ny förslagslista på **10 helt nya, ej återbrukade förslag** visas i chatten (och loggas här under nästa Omgång).
 
 Aktuell release på GitHub: **v1.0.0** (låst tills du säger annat — inga nya taggar skapas).
 
@@ -11,7 +12,7 @@ Aktuell release på GitHub: **v1.0.0** (låst tills du säger annat — inga nya
 | # | Titel | Klass | Beskrivning (1–2 meningar + nytta) |
 |---|---|---|---|
 | 202 | Live-förhandsvisning av målsökväg | Design | I granskningsrutan visas exakt målsökväg `Pilkington/2025/fil.pdf` live när du väljer kategori. Slipper gissa år/månad — färre fel, tryggare klick. |
-| 203 | QR-/streckkod som starkt ID | Matchning | Skanna QR och Code128/EAN i PDF (via pyzbar) och extrahera org.nr/fakturanr som `kod`/`orgnr` med vikt 3.0. Fångar moderna fakturor där ID:t bara ligger i koden. |
+| 203 | QR-/streckkod som starkt ID **(KLAR 2026-11-24)** | Matchning | Skanna QR, EAN-13 och Code128 i PDF (via `pyzbar` / OpenCV) och extrahera org.nr, betallänk och barcode-ID med vikt 3.0. Fångar moderna fakturor där ID:t bara ligger i koden. |
 | 204 | E-postbilaga-import (.eml/.msg) | Ny funktion | Bevaka inkorgen även för e-postfiler: plocka ut PDF-bilagor, läs avsändardomän + bilagenamn och sortera direkt. Sparar manuellt sparande från Outlook/Thunderbird. |
 | 205 | Årsrimlighet + fallback med varning | Robusthet | Om dokumentdatum är framtid eller <2000: flagga gult och använd filens `mtime` i stället för fel år. Förhindrar att 2035-fil hamnar i fel årsmapp. |
 | 206 | Mappmallar per kategori | Ny funktion | Varje kategori kan ha egen subfolder-mall: `Pilkington/{år}/Fakturor`, `Avtal/{år}-{månad}`. Mer ordning utan att ändra global mall. |
@@ -50,9 +51,9 @@ Allt förblir **VÄNTAR** tills du säger till. Version stannar på **v1.0.0** t
 
 | # | Titel | Klass | Beskrivning (1–2 meningar + nytta) |
 |---|---|---|---|
-| 227 | Uppdateringshistorik med 1-klicks återställning | Robusthet | Ny vy (Hjälp → Uppdateringar) listar alla `updates/last_update.json` + `backups/update_*`: tid, från→till, filer. Knapp ”Återställ denna” kopierar tillbaka backupen atomärt och loggar — trygg ångra vid felaktig release. |
-| 228 | Tray-badge ”↑” när uppdatering finns | Design | När `check_for_update` hittar ny version visas gul ↑-badge på tray-ikonen (som köbrickan) + tooltip ”Ny version X finns”. Syns även när fönstret är gömt — ingen missad uppdatering. |
-| 229 | Tyst-fönster för auto-omstart | Robusthet | `silent_restart` sker bara inom ”tyst fönster” (t.ex. 02–04, ställbart) annars skjuts omstart till nästa fönster + tray-notis ”Omstart planerad 03:00”. Undviker att avbryta pågående granskning mitt i dagen. |
+| 227 | Uppdateringshistorik med 1-klicks återställning **(KLAR 2026-11-24)** | Robusthet | Ny vy (Hjälp → Uppdateringshistorik / Återställ…) listar `backups/update_*` och `updates/history.jsonl` med tid, version och filer. Knapp ”Återställ vald kopia…” lägger tillbaka kopian atomärt, säkerhetskopierar nuvarande läge och startar om. |
+| 228 | Tray-badge ”↑” när uppdatering finns **(KLAR 2026-11-24)** | Design | När `check_for_update` hittar ny version eller en installation väntar på omstart visas badge på tray-ikonen, uppdaterad menytext och tooltip (`Uppdatering: X` / `Starta om för att slutföra X`). |
+| 229 | Tyst-fönster för auto-omstart **(KLAR 2026-11-24)** | Robusthet | `silent_restart` kan begränsas till valfritt nattfönster (t.ex. `23:00–05:00` i Inställningar); annars skjuts tyst auto-omstart upp tills fönstret öppnar medan manuella omstarter kör direkt. |
 | 230 | Spara Regeltest som regressionstest | Kod / Kvalitet | I Regeltestaren: knapp ”Spara som testfall” → skriver `tests/regression_*.json` med inklistrad text + förväntad vinnare + threshold. Nästa `--check` kör alla sparade fall — din trim blir permanent skyddad. |
 | 231 | Batch-test i Regeltestaren | Snabbhet | Klistra flera texter (avgränsade med `---` eller tom rad) → kör alla i ett svep och visa tabell: rad 1→ Pilkington 2.3 (auto), rad 2→ fråga (Pilkington/KundAB nära). Ser mönster direkt vid 20 filtyper. |
 | 232 | Konfidens-heatmap i Regeltest-inmatningen | Design / Matchning | Markerad text färgas live efter zonvikt: brevhuvud/sender = mörkblå, sidfot = blå, löptext = grå, mottagare = ljusgrå/röd. Du ser omedelbart varför ”Pilkington i mottagarblocket” bara ger 0.30 i vikt. |
@@ -98,4 +99,4 @@ Allt förblir **VÄNTAR** tills du säger till. Version stannar på **v1.0.0** t
 ---
 *Omgång 11 genererad 2026-11-24 med 25 skrivbordsspecifika förslag; 7 implementerade 2026-11-24 (`#237`, `#240`, `#243`, `#245`, `#249`, `#255`, `#260`).*
 
-Omgång 9: 202–226 | Omgång 10: 227–236 | Omgång 11: 237–261 (7 KLAR, 18 VÄNTAR) | Övriga i kön: 1–236 + resterande i Omgång 11.
+Omgång 9: 202–226 (`#203` KLAR) | Omgång 10: 227–236 (`#227`, `#228`, `#229` KLAR) | Omgång 11: 237–261 (7 KLAR, 18 VÄNTAR) | Övriga i kön: 1–236 + resterande i Omgång 11.

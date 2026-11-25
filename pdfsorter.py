@@ -316,7 +316,7 @@ except ImportError as _data_err:
 
 #: Stödord som är starka bevis - de pekar ut ett bestämt företag eller
 #: projekt och kan inte gärna dyka upp av en slump i någon annans dokument.
-STRONG_KINDS = ("orgnr", "vat", "domain", "giro", "kod")
+STRONG_KINDS = ("orgnr", "vat", "domain", "giro", "kod", "barcode")
 
 #: Vad de starka typerna heter för användaren.
 STRONG_LABELS = {
@@ -325,7 +325,18 @@ STRONG_LABELS = {
     "giro": "bankgiro/plusgiro",
     "domain": "domän",
     "kod": "projekt-/objektkod",
+    "barcode": "QR-/streckkod",
 }
+
+
+def _ean13_ok(digits: str) -> bool:
+    """GS1 EAN-13 kontrollsiffra (skiljer riktiga streckkoder från slumpnummer)."""
+    if len(digits) != 13 or not digits.isdigit():
+        return False
+    nums = [int(ch) for ch in digits]
+    total = sum(nums[i] * (1 if i % 2 == 0 else 3) for i in range(12))
+    return (10 - (total % 10)) % 10 == nums[12]
+
 
 #: Regex för att känna igen starka stödord direkt ur texten, utan att behöva
 #: veta vilken typ de hade när de sparades.
@@ -336,6 +347,9 @@ _STRONG_PATTERNS = (
     ("orgnr", re.compile(r"^\d{6}[-\u2013\u00b7\u2022 ]?\d{4}$")),
     ("vat", re.compile(r"^[a-z]{2}\d{9,12}$")),
     ("giro", re.compile(r"^\d{3,4}[-\u2013\u00b7\u2022]?\d{4}$")),
+    # QR-/streckkoder (#203): prefixade koder eller kontrollsiffre-äkta EAN-13.
+    ("barcode", re.compile(r"^(?:qr|barcode|ean):[a-z0-9][a-z0-9._:/\-]{2,63}$")),
+    ("barcode", re.compile(r"^\d{13}$")),
     # Domän: sista delen måste vara en riktig toppdomän av bokstäver.
     # Tidigare räckte "\w", vilket gjorde "24.10.2025", "1.234" och
     # "v1.4.4" till starka bevis - datum och versionsnummer är precis
@@ -363,6 +377,8 @@ def _strength_of(t: str) -> str:
             # minst en bokstav.
             if kind == "orgnr" and not _luhn_ok(
                     t.replace("-", "").replace("–", "")):
+                continue
+            if kind == "barcode" and t.isdigit() and not _ean13_ok(t):
                 continue
             return kind
     return ""
@@ -4416,6 +4432,10 @@ try:
     search_tesseract = _sys_mod.search_tesseract
     check_for_update = _sys_mod.check_for_update
     perform_update = _sys_mod.perform_update
+    pending_installed_update = _sys_mod.pending_installed_update
+    mark_update_verified = _sys_mod.mark_update_verified
+    list_update_backups = _sys_mod.list_update_backups
+    rollback_update = _sys_mod.rollback_update
     update_python_packages = _sys_mod.update_python_packages
     autostart_status = _sys_mod.autostart_status
     tag_pdf_metadata = _sys_mod.tag_pdf_metadata
@@ -4468,6 +4488,18 @@ except Exception as _sys_err:                       # noqa: BLE001
 
     def perform_update(timeout: int = 180, root=None) -> Tuple[bool, str]:
         return False, "pdfsorter_system.py saknas - kan inte uppdatera"
+
+    def pending_installed_update(root=None):
+        return None
+
+    def mark_update_verified(root=None):
+        return None
+
+    def list_update_backups(root=None):
+        return []
+
+    def rollback_update(_backup_dir, root=None) -> Tuple[bool, str]:
+        return False, "pdfsorter_system.py saknas - kan inte återställa"
 
     def update_python_packages(root=None, timeout: int = 1800) -> Tuple[bool, str]:
         return False, "pdfsorter_system.py saknas - kan inte uppdatera paket"
@@ -5522,7 +5554,8 @@ def _extract_highlight_terms(decision: Decision,
                 return terms
 
     for cand in (candidates or ()):
-        if getattr(cand, "kind", "") in ("orgnr", "vat", "giro", "domain", "kod"):
+        if getattr(cand, "kind", "") in ("orgnr", "vat", "giro", "domain",
+                                         "kod", "barcode"):
             add_term(cand.display or cand.text, cand.kind)
             if len(terms) >= max_terms:
                 return terms
@@ -8449,6 +8482,8 @@ _UI_EN = {
     "Avmarkera": "Deselect all",
     "Räkna om": "Rescan",
     "Sök efter uppdateringar…": "Check for updates…",
+    "Uppdateringshistorik / Återställ…": "Update history / Restore…",
+    "Uppdateringshistorik…": "Update history…",
     "Åtgärda automatiskt fel som inte återkommit på":
         "Automatically resolve errors that have not recurred in",
     "dagar (0 = av)": "days (0 = off)",
@@ -8506,6 +8541,11 @@ _UI_EN = {
     "Visa notis när filer sorterats": "Notify when files are sorted",
     "Sök uppdateringar på GitHub vid start": "Check GitHub for updates at start",
     "Installera uppdateringar automatiskt": "Install updates automatically",
+    "Sök efter ny version automatiskt (tyst)": "Check for new versions automatically (silent)",
+    "Installera automatiskt när paketet är verifierat": "Install automatically when verified",
+    "Starta om tyst när en ny version installerats": "Restart silently when a new version is installed",
+    "Begränsa tyst omstart till tidsfönster:": "Limit silent restart to time window:",
+    "till": "to",
     "Schemalagd sortering": "Scheduled sorting",
     "Skriv kategori som PDF-metadata vid sortering": "Write category as PDF metadata when sorting",
     "Slå upp okända avsändare via nätet (org.nr)": "Look up unknown senders online (org. no.)",
@@ -8791,6 +8831,8 @@ def meny_spec() -> List[Dict[str, Any]]:
             {"typ": "avdelare"},
             {"id": "sok_uppdatering", "text": "Sök efter uppdateringar…",
              "atgard": "_meny_sok_uppdatering"},
+            {"id": "uppdateringshistorik", "text": "Uppdateringshistorik / Återställ…",
+             "atgard": "_open_update_history"},
             {"typ": "avdelare"},
             {"id": "om", "text": "Om ArkivPiloten…", "atgard": "_meny_om"},
         ]},
@@ -8959,6 +9001,36 @@ def tid_kort(iso: str, nu: Optional[datetime] = None) -> str:
     return f"{tid:%Y-%m-%d %H:%M}"
 
 
+def _parse_hhmm(raw: Any, fallback: Tuple[int, int] = (23, 0)) -> Tuple[int, int]:
+    """Tolka 'HH:MM' säkert till (timme, minut); ogiltigt värde ger fallback."""
+    text = str(raw or "").strip()
+    m = re.fullmatch(r"(\d{1,2})\s*[:.]\s*(\d{2})", text)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2))
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
+            return hh, mm
+    return fallback
+
+
+def in_silent_restart_window(settings: Dict[str, Any],
+                             now: Optional[datetime] = None) -> bool:
+    """Sant om tyst auto-omstart tillåts vid ``now`` enligt tidsfönstret (#229)."""
+    if not isinstance(settings, dict) or not settings.get("silent_restart_window_enabled", False):
+        return True
+    sh, sm = _parse_hhmm(settings.get("silent_restart_window_start", "23:00"), (23, 0))
+    eh, em = _parse_hhmm(settings.get("silent_restart_window_end", "05:00"), (5, 0))
+    start_min = sh * 60 + sm
+    end_min = eh * 60 + em
+    if start_min == end_min:
+        return True
+    cur_dt = now or datetime.now()
+    cur_min = cur_dt.hour * 60 + cur_dt.minute
+    if start_min < end_min:
+        return start_min <= cur_min < end_min
+    # Nattfönster över midnatt (t.ex. 23:00–05:00)
+    return cur_min >= start_min or cur_min < end_min
+
+
 def uppdateringsplan(info: Dict[str, Any], manual: bool,
                      settings: Dict[str, Any]) -> Dict[str, Any]:
     """Vad ett svar från GitHub ska leda till - utan Tk-dialoger.
@@ -9112,6 +9184,14 @@ class App:
         self._restart_after_update = bool(restart_after_update)
         #: Vakten för tyst versionssökning (startas en gång).
         self._uppdateringsvakt = False
+        #: En uppdatering/återställning installeras eller pågår just nu.
+        self._update_installing = False
+        #: Känd erbjuden uppdatering (visas i tray-ikonen och menyn).
+        self._available_update_info: Optional[Dict[str, Any]] = None
+        self._verified_startup_update = mark_update_verified()
+        #: Uppdatering installerad på disk som väntar på omstart.
+        self._pending_restart_update: Optional[Dict[str, Any]] = (
+            pending_installed_update())
         #: En smart diskcache-rensning kör just nu.
         self._cache_cleanup_running = False
         #: En omstart väntar på att appen blir ledig.
@@ -9292,6 +9372,15 @@ class App:
         # Ny version (2026-10-26): sök tyst två gånger per dygn, inte vid
         # varje start. Tiden sparas i inställningarna, så en app som startas
         # ofta frågar GitHub lika sällan ändå.
+        if getattr(self, "_verified_startup_update", None):
+            v_info = self._verified_startup_update
+            v_msg = (
+                f"Återställd till {APP_VERSION} och startad utan fel."
+                if v_info.get("action") == "rollback"
+                else f"Uppdaterad till {APP_VERSION} och startad utan fel."
+            )
+            self._h("uppdatering", v_msg, "ok")
+            self._log(v_msg, "ok")
         self._starta_uppdateringsvakt()
 
         # Systemfältsikon. TrayIcon är None när systemmodulen saknas
@@ -10745,6 +10834,12 @@ class App:
             value=self.settings.get("auto_update", True))
         self.var_tystomstart = tk.BooleanVar(
             value=self.settings.get("silent_restart", True))
+        self.var_silent_window_enabled = tk.BooleanVar(
+            value=bool(self.settings.get("silent_restart_window_enabled", False)))
+        self.var_silent_window_start = tk.StringVar(
+            value=str(self.settings.get("silent_restart_window_start", "23:00") or "23:00"))
+        self.var_silent_window_end = tk.StringVar(
+            value=str(self.settings.get("silent_restart_window_end", "05:00") or "05:00"))
         ttk.Checkbutton(updb, text="Sök efter ny version automatiskt (tyst)",
                         style="Card.TCheckbutton",
                         variable=self.var_checkupd,
@@ -10760,13 +10855,30 @@ class App:
                         style="Card.TCheckbutton",
                         variable=self.var_tystomstart).grid(
             row=1, column=0, columnspan=4, sticky="w", padx=8, pady=2)
+        win_rad = ttk.Frame(updb, style="CardInner.TFrame")
+        win_rad.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=2)
+        ttk.Checkbutton(
+            win_rad,
+            text="Begränsa tyst omstart till tidsfönster:",
+            style="Card.TCheckbutton",
+            variable=self.var_silent_window_enabled,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Entry(win_rad, textvariable=self.var_silent_window_start,
+                  width=6).pack(side="left")
+        ttk.Label(win_rad, text="till", style="Card.TLabel").pack(
+            side="left", padx=5)
+        ttk.Entry(win_rad, textvariable=self.var_silent_window_end,
+                  width=6).pack(side="left")
         updrad = ttk.Frame(updb, style="CardInner.TFrame")
-        updrad.grid(row=2, column=0, columnspan=4, sticky="ew",
+        updrad.grid(row=3, column=0, columnspan=4, sticky="ew",
                     padx=8, pady=(2, 6))
         self.btn_update = ttk.Button(
             updrad, text="Sök och uppdatera", style="Accent.TButton",
             command=lambda: self._check_updates_gui(manual=True))
         self.btn_update.pack(side="right")
+        ttk.Button(
+            updrad, text="Uppdateringshistorik…",
+            command=self._open_update_history).pack(side="right", padx=(0, 6))
         self.lbl_uppdatering = ttk.Label(
             updrad, text=self._uppdatering_status_text(),
             style="CardMuted.TLabel")
@@ -11017,6 +11129,11 @@ class App:
         if old_theme is not None:
             self._replace_raw_fonts(old_theme, self.theme)
         self._apply_micro_icons()
+        if hasattr(self.theme, "_apply_navigation_icons"):
+            try:
+                self.theme._apply_navigation_icons()
+            except Exception:
+                pass
         self._refit_tree_columns()
         self._update_pills()
         self._update_stats()
@@ -12505,6 +12622,23 @@ class App:
             "check_updates": bool(self.var_checkupd.get()),
             "auto_update": bool(self.var_autoupd.get()),
             "silent_restart": bool(self.var_tystomstart.get()),
+            "silent_restart_window_enabled": (
+                bool(self.var_silent_window_enabled.get())
+                if hasattr(self, "var_silent_window_enabled")
+                else bool(self.settings.get("silent_restart_window_enabled", False))
+            ),
+            "silent_restart_window_start": (
+                (lambda h, m: f"{h:02d}:{m:02d}")(*_parse_hhmm(
+                    self.var_silent_window_start.get(), (23, 0)))
+                if hasattr(self, "var_silent_window_start")
+                else str(self.settings.get("silent_restart_window_start", "23:00"))
+            ),
+            "silent_restart_window_end": (
+                (lambda h, m: f"{h:02d}:{m:02d}")(*_parse_hhmm(
+                    self.var_silent_window_end.get(), (5, 0)))
+                if hasattr(self, "var_silent_window_end")
+                else str(self.settings.get("silent_restart_window_end", "05:00"))
+            ),
             "cache_cleanup_enabled": bool(self.var_cache_cleanup.get()),
             "low_memory_mode": bool(self.var_low_memory_mode.get()),
             "error_autofix_days": max(0, int(num(self.var_error_autofix_days, 7))),
@@ -16455,6 +16589,8 @@ class App:
              lambda: self._tillaggserbjudande(force=True)),
             ("Sök efter uppdateringar…",
              lambda: self._check_updates_gui(manual=True)),
+            ("Uppdateringshistorik / Återställ…",
+             self._open_update_history),
         ]
         buttons = [ttk.Button(bar, text=label, command=command)
                    for label, command in actions]
@@ -16626,6 +16762,34 @@ class App:
         gränsen två gånger per dygn gäller inte. Den tysta sökningen sparar
         alltid sin tid i inställningarna, så antalet gäller över omstarter.
         """
+        if getattr(self, "_update_installing", False):
+            if manual:
+                self.messagebox.showinfo(
+                    APP_NAME,
+                    "En uppdatering eller återställning pågår redan. "
+                    "Vänta tills den är klar.",
+                    parent=self.root)
+            return
+        pending = getattr(self, "_pending_restart_update", None)
+        if pending is None:
+            try:
+                pending = pending_installed_update()
+            except Exception:
+                pending = None
+        if pending:
+            self._pending_restart_update = pending
+            sync = getattr(self, "_sync_tray", None)
+            if callable(sync):
+                sync()
+            if manual:
+                target = str(pending.get("to") or APP_VERSION)
+                if self.messagebox.askyesno(
+                        APP_NAME,
+                        f"ArkivPiloten {target} är redan installerad på disken "
+                        "och väntar på omstart.\n\nVill du starta om nu?",
+                        parent=self.root):
+                    self._planera_omstart(tyst=False)
+            return
         if not manual and not self._uppdatering_dags():
             self._h("uppdatering", "Tyst versionssökning hoppad - "
                     f"{self._uppdatering_nasta()}")
@@ -17036,6 +17200,10 @@ class App:
                     parent=self.root)
             return
         if steg == "aktuell":
+            self._available_update_info = None
+            sync = getattr(self, "_sync_tray", None)
+            if callable(sync):
+                sync()
             bygge = str(info.get("local_commit") or "")[:12]
             self._h("uppdatering",
                     f"Ingen nyare version (kör {APP_VERSION}, "
@@ -17080,6 +17248,10 @@ class App:
                 build_details += (f"\nCommit: {local_commit} → "
                                   f"{release_commit}")
         if steg == "erbjudande":
+            self._available_update_info = dict(info)
+            sync = getattr(self, "_sync_tray", None)
+            if callable(sync):
+                sync()
             self._h("uppdatering",
                     f"{build_label} finns (kör {APP_VERSION}) - "
                     "autouppdatering är avstängd, så appen installerar "
@@ -17109,13 +17281,41 @@ class App:
                 "inställningar, regler och historik rörs inte. "
                 "En säkerhetskopia tas först.", parent=self.root)
         if not svar:
+            self._available_update_info = dict(info)
+            sync = getattr(self, "_sync_tray", None)
+            if callable(sync):
+                sync()
             self._h("uppdatering", "Uppdateringen avböjd av användaren")
             return
+        if getattr(self, "_update_installing", False):
+            if manual:
+                self.messagebox.showinfo(
+                    APP_NAME,
+                    "En uppdatering laddas redan ner eller installeras.",
+                    parent=self.root)
+            return
+        self._update_installing = True
+        button = getattr(self, "btn_update", None)
+        if button is not None:
+            try:
+                button.configure(state="disabled")
+            except Exception:
+                pass
 
         def install():
-            ok, msg = perform_update()
+            try:
+                ok, msg = perform_update()
+            except Exception as exc:
+                ok, msg = False, f"{type(exc).__name__}: {exc}"
 
             def done():
+                self._update_installing = False
+                btn = getattr(self, "btn_update", None)
+                if btn is not None:
+                    try:
+                        btn.configure(state="normal")
+                    except Exception:
+                        pass
                 self._h("uppdatering", msg, "ok" if ok else "warn")
                 if not ok:
                     if manual:
@@ -17124,6 +17324,16 @@ class App:
                     else:
                         self._log(f"Uppdateringen misslyckades: {msg}", "warn")
                     return
+                self._available_update_info = None
+                self._pending_restart_update = {
+                    "from": APP_VERSION,
+                    "to": str(info.get("remote") or APP_VERSION),
+                    "to_commit": str(info.get("release_commit") or ""),
+                    "action": "update",
+                }
+                sync = getattr(self, "_sync_tray", None)
+                if callable(sync):
+                    sync()
                 self._log(msg, "ok")
                 if plan["omstart"] == "tyst":
                     self._h("uppdatering",
@@ -17138,6 +17348,200 @@ class App:
             self.root.after(0, done)
         threading.Thread(target=install, daemon=True,
                          name="uppdatering").start()
+
+    def _open_update_history(self) -> None:
+        """Visa installerade uppdateringar och återställ från säkerhetskopia (#227)."""
+        existing = getattr(self, "_update_history_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    return
+            except Exception:
+                pass
+        tk, ttk = self.tk, self.ttk
+        english = self.settings.get("ui_language", "sv") == "en"
+        txt = lambda sv, en: en if english else sv
+        win = tk.Toplevel(self.root)
+        win._icon_ref = brand_window(win)
+        self._update_history_window = win
+        win.title(txt("Uppdateringshistorik och återställning",
+                      "Update history and restore"))
+        win.transient(self.root)
+        _fit_geometry(win, 780, 480, 560, 340)
+        try:
+            win.configure(background=self.C["bg"])
+            win.after(80, lambda: dark_titlebar(win, bool(self.theme.dark)))
+        except Exception:
+            pass
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(2, weight=1)
+
+        ttk.Label(
+            win,
+            text=txt(f"Installerad version: {APP_VERSION}",
+                     f"Installed version: {APP_VERSION}"),
+            style="CardTitle.TLabel",
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 2))
+        pending = pending_installed_update()
+        sub_text = (
+            txt(f"Väntar på omstart till {pending.get('to')}",
+                f"Pending restart to {pending.get('to')}")
+            if pending else
+            txt("Säkerhetskopia skapas före varje uppdatering och tas bort "
+                "automatiskt när den nya versionen startat utan fel.",
+                "A backup is created before every update and automatically "
+                "removed once the new version starts cleanly.")
+        )
+        ttk.Label(win, text=sub_text, style="CardMuted.TLabel").grid(
+            row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+
+        box = ttk.Frame(win, style="Card.TFrame")
+        box.grid(row=2, column=0, sticky="nsew", padx=14, pady=(0, 8))
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(0, weight=1)
+        cols = ("time", "transition", "files", "status")
+        tree = ttk.Treeview(box, columns=cols, show="headings", selectmode="browse")
+        tree.heading("time", text=txt("Tidpunkt", "Timestamp"))
+        tree.heading("transition", text=txt("Version i kopia", "Backup version"))
+        tree.heading("files", text=txt("Filer", "Files"))
+        tree.heading("status", text=txt("Status", "Status"))
+        tree.column("time", width=self.theme.px(160), stretch=False)
+        tree.column("transition", width=self.theme.px(250), stretch=True)
+        tree.column("files", width=self.theme.px(75), anchor="center", stretch=False)
+        tree.column("status", width=self.theme.px(160), stretch=False)
+        tree.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        self.theme.zebra(tree)
+        ysb = ttk.Scrollbar(box, orient="vertical", command=tree.yview)
+        ysb.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=10)
+        tree.configure(yscrollcommand=ysb.set)
+
+        backups_by_iid: Dict[str, Dict[str, Any]] = {}
+
+        def refresh_backups() -> None:
+            tree.delete(*tree.get_children())
+            backups_by_iid.clear()
+            for entry in list_update_backups():
+                ver = entry.get("backup_version") or entry.get("from_version") or "?"
+                to_ver = entry.get("to_version") or ""
+                ver_label = f"{ver} → {to_ver}" if to_ver else ver
+                if entry.get("commit"):
+                    ver_label += f" ({str(entry['commit'])[:8]})"
+                stamp = (entry.get("time") or entry.get("name", "").replace("update_", ""))[:19].replace("T", " ")
+                st = (txt("Klar för återställning", "Ready to restore")
+                      if entry.get("valid")
+                      else txt("Ofullständig kopia", "Incomplete backup"))
+                iid = tree.insert(
+                    "", "end",
+                    values=(stamp, ver_label, entry.get("file_count", 0), st),
+                )
+                backups_by_iid[iid] = entry
+
+        def do_rollback() -> None:
+            if getattr(self, "_update_installing", False):
+                self.messagebox.showinfo(
+                    APP_NAME,
+                    txt("En uppdatering eller återställning pågår redan.",
+                        "An update or restore is already running."),
+                    parent=win)
+                return
+            sel = tree.selection()
+            if not sel:
+                self.messagebox.showinfo(
+                    APP_NAME,
+                    txt("Välj en säkerhetskopia i listan först.",
+                        "Select a backup in the list first."),
+                    parent=win)
+                return
+            entry = backups_by_iid.get(sel[0])
+            if not entry or not entry.get("valid"):
+                self.messagebox.showwarning(
+                    APP_NAME,
+                    txt("Den valda säkerhetskopian är ofullständig.",
+                        "The selected backup is incomplete."),
+                    parent=win)
+                return
+            ver = entry.get("backup_version") or entry.get("from_version") or "?"
+            if not self.messagebox.askyesno(
+                    APP_NAME,
+                    txt(
+                        f"Återställ ArkivPiloten till version {ver} från "
+                        f"{entry['name']}?\n\nNuvarande filer sparas i en ny "
+                        "säkerhetskopia innan något ändras. Inställningar, "
+                        "regler och historik rörs inte.",
+                        f"Restore ArkivPiloten to version {ver} from "
+                        f"{entry['name']}?\n\nCurrent files will be backed up "
+                        "first. Settings, rules and history are untouched.",
+                    ),
+                    parent=win):
+                return
+            self._update_installing = True
+            btn_restore.configure(state="disabled")
+
+            def worker() -> None:
+                try:
+                    ok, msg = rollback_update(Path(entry["path"]))
+                except Exception as exc:
+                    ok, msg = False, f"{type(exc).__name__}: {exc}"
+
+                def finish() -> None:
+                    self._update_installing = False
+                    try:
+                        if win.winfo_exists():
+                            btn_restore.configure(state="normal")
+                    except Exception:
+                        pass
+                    self._h("uppdatering", msg, "ok" if ok else "warn")
+                    if not ok:
+                        self.messagebox.showwarning(APP_NAME, msg, parent=win)
+                        return
+                    self._log(msg, "ok")
+                    self._available_update_info = None
+                    self._pending_restart_update = {
+                        "from": APP_VERSION,
+                        "to": str(ver),
+                        "to_commit": str(entry.get("commit") or ""),
+                        "action": "rollback",
+                    }
+                    sync = getattr(self, "_sync_tray", None)
+                    if callable(sync):
+                        sync()
+                    refresh_backups()
+                    try:
+                        win.destroy()
+                    except Exception:
+                        pass
+                    self._visa_omstart_nedrakning()
+
+                self.root.after(0, finish)
+
+            threading.Thread(target=worker, daemon=True, name="aterstallning").start()
+
+        actions = ttk.Frame(win, style="CardInner.TFrame")
+        actions.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 12))
+        actions.columnconfigure(1, weight=1)
+        ttk.Button(
+            actions,
+            text=txt("Öppna backups-mappen", "Open backups folder"),
+            command=lambda: open_externally(
+                Path(__file__).resolve().parent / "backups"),
+        ).grid(row=0, column=0, sticky="w")
+        btn_restore = ttk.Button(
+            actions,
+            text=txt("Återställ vald kopia…", "Restore selected backup…"),
+            style="Accent.TButton",
+            command=do_rollback,
+        )
+        btn_restore.grid(row=0, column=2, sticky="e", padx=(0, 8))
+        ttk.Button(
+            actions,
+            text=txt("Stäng", "Close"),
+            command=win.destroy,
+        ).grid(row=0, column=3, sticky="e")
+
+        tree.bind("<Double-1>", lambda _e: do_rollback())
+        refresh_backups()
 
     # -- omstart ----------------------------------------------------------
     def _visa_omstart_nedrakning(self) -> None:
@@ -17252,7 +17656,7 @@ class App:
             if state["remaining"] > 0:
                 state["remaining"] -= 1
             if state["remaining"] <= 0:
-                ready, reason = self._kan_starta_om()
+                ready, reason = self._kan_starta_om(tyst=False)
                 if ready:
                     close_dialog()
                     self._planera_omstart(tyst=True)
@@ -17273,7 +17677,7 @@ class App:
             close_dialog()
             self._planera_omstart(tyst=True)
 
-    def _kan_starta_om(self) -> Tuple[bool, str]:
+    def _kan_starta_om(self, *, tyst: bool = True) -> Tuple[bool, str]:
         """Får appen startas om nu utan att tappa något?"""
         if self._quitting:
             return False, "appen avslutas redan"
@@ -17283,17 +17687,22 @@ class App:
             return False, "en omskanning pågår"
         if self._review_is_open():
             return False, "granskningsrutan är öppen"
+        if tyst and not in_silent_restart_window(getattr(self, "settings", {})):
+            s = self.settings
+            sh, sm = _parse_hhmm(s.get("silent_restart_window_start", "23:00"), (23, 0))
+            eh, em = _parse_hhmm(s.get("silent_restart_window_end", "05:00"), (5, 0))
+            return False, f"väntar på omstartsfönster ({sh:02d}:{sm:02d}–{eh:02d}:{em:02d})"
         # Pending queue paths are persisted and reanalyzed by the new process.
         # Do not hold an installed update hostage until every review is done.
         return True, ""
 
     def _planera_omstart(self, tyst: bool = True) -> None:
-        """Starta om nu, eller så snart appen är ledig.
+        """Starta om nu, eller så snart appen är ledig och i rätt tidsfönster.
 
         En uppdatering får aldrig avbryta en sortering, omskanning eller
         öppen granskningsdialog. Köade filer sparas och återställs efteråt.
         """
-        ok, orsak = self._kan_starta_om()
+        ok, orsak = self._kan_starta_om(tyst=tyst)
         if ok:
             self._restart_app(tyst=tyst)
             return
@@ -17302,9 +17711,9 @@ class App:
         self._omstart_vantar = True
         self._h("uppdatering", f"Omstarten väntar: {orsak} - görs när appen "
                 "är ledig", "warn")
-        self._log(f"Den nya versionen är installerad, men appen är upptagen "
-                  f"({orsak}). Den startar om automatiskt när den är ledig - "
-                  "eller nästa gång du startar appen.", "info")
+        self._log(f"Den nya versionen är installerad, men appen väntar "
+                  f"({orsak}). Den startar om automatiskt när villkoren "
+                  "uppfylls - eller nästa gång du startar appen.", "info")
         try:
             self.root.after(60000, self._omstart_nar_ledig)
         except Exception:
@@ -17313,7 +17722,7 @@ class App:
     def _omstart_nar_ledig(self) -> None:
         if not self._omstart_vantar:
             return
-        ok, _orsak = self._kan_starta_om()
+        ok, _orsak = self._kan_starta_om(tyst=True)
         if ok:
             self._omstart_vantar = False
             self._restart_app(tyst=True)
@@ -18374,8 +18783,9 @@ class App:
                                           if modal else ""))
 
     def _sync_tray(self) -> None:
-        if self.tray:
-            self.tray.refresh()
+        tray = getattr(self, "tray", None)
+        if tray:
+            tray.refresh()
 
     def _notify(self, message: str) -> None:
         if self.tray and self.settings.get("notify", True):
@@ -18501,6 +18911,8 @@ def _self_check() -> int:
     # Importytan mot systemmodulen: varje namn GUI/CLI anropar måste finnas.
     for namn in ("search_tesseract", "auto_install_tesseract",
                  "check_for_update", "perform_update",
+                 "pending_installed_update", "mark_update_verified",
+                 "list_update_backups", "rollback_update",
                  "update_python_packages", "autostart_status",
                  "tag_pdf_metadata", "export_year_archive",
                  "lookup_company_name_online",

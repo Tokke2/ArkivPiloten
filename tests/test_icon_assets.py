@@ -120,3 +120,28 @@ def test_brand_window_sets_both_window_and_default_icons_on_windows(
     assert ("iconphoto", (True, *expected)) in window.calls
     assert ("iconbitmap", (str(icon_path),), {}) in window.calls
     assert ("iconbitmap", (), {"default": str(icon_path)}) in window.calls
+
+
+def test_editable_print_vector_asset_exists_with_layered_paths_and_packaging():
+    print_svg = ROOT / "brand" / "arkivpiloten-print.svg"
+    assert print_svg.is_file()
+    tree = ET.parse(print_svg).getroot()
+    assert tree.tag.endswith("svg")
+    assert tree.attrib.get("viewBox")
+    assert not tree.findall(".//{http://www.w3.org/2000/svg}image")
+    assert not tree.findall(".//{http://www.w3.org/2000/svg}text")
+    assert tree.findall(".//{http://www.w3.org/2000/svg}path")
+    layer_ids = {
+        el.attrib.get("id")
+        for el in tree.findall(".//{http://www.w3.org/2000/svg}g")
+        if el.attrib.get("id")
+    }
+    assert {
+        "Layer_Light_Card",
+        "Layer_Dark_Knockout_Card",
+        "Layer_Monochrome_Emblem",
+        "Layer_Print_Swatches",
+    } <= layer_ids
+    assert "brand/arkivpiloten-print.svg" in S.UPDATE_FILES
+    import tools.install_latest as U
+    assert "brand/arkivpiloten-print.svg" in U.FILES

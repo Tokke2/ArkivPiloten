@@ -662,6 +662,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "last_update_check_ok": True,  # falskt -> kortare omförsök (nätet svek)
     "last_update_seen": "",       # senaste versionen GitHub svarade
     "silent_restart": True,       # starta om tyst när en version installerats
+    "silent_restart_window_enabled": False,  # #229: valfritt nattfönster
+    "silent_restart_window_start": "23:00",  # #229: start för tyst omstart
+    "silent_restart_window_end": "05:00",    # #229: slut för tyst omstart
     "pending_review_paths": [],   # återställ granskningskö efter updater-omstart
     "cache_cleanup_enabled": True, # smart diskcache-rensning dagligen + vid avslut
     "low_memory_mode": False,      # begränsa parallell PDF-läsning till 2 filer
