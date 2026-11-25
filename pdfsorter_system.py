@@ -4493,12 +4493,16 @@ def _safe_extract(zippath: Path, dest: Path) -> Tuple[bool, str]:
     try:
         with _zip.ZipFile(zippath) as zf:
             for info in zf.infolist():
-                raw_name = str(info.filename or "")
+                raw_name = str(getattr(info, "orig_filename", "") or info.filename or "")
+                norm_name = str(info.filename or "")
                 mode = (info.external_attr >> 16) & 0o170000
                 if _stat.S_ISLNK(mode):
                     return False, ("zip-filen innehåller en symbolisk länk - "
                                    "avbryter av säkerhetsskäl")
-                if "\\" in raw_name or raw_name.startswith("/") or re.match(r"^[A-Za-z]:", raw_name):
+                if ("\\" in raw_name or "\\" in norm_name
+                        or raw_name.startswith("/") or norm_name.startswith("/")
+                        or re.match(r"^[A-Za-z]:", raw_name)
+                        or re.match(r"^[A-Za-z]:", norm_name)):
                     return False, ("zip-filen försöker skriva utanför "
                                    "appmappen - avbryter")
                 parts = [p for p in raw_name.split("/") if p]
