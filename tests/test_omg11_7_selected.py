@@ -553,3 +553,122 @@ def test_undo_selected_prompts_cleanup_when_archive_dir_becomes_empty(tmp_path, 
     assert len(asks) == 2
     assert "tom(ma)" in asks[1]
     assert cleaned and {Path(p) for p in cleaned[0]} == {target_dir}
+
+
+def test_q_and_h_trees_support_click_sort_and_preserve_selection(monkeypatch):
+    class SortFakeTree:
+        def __init__(self, cols):
+            self.cols = list(cols)
+            self.display = list(cols)
+            self.widths = {c: 150 for c in cols}
+            self.bindings = {}
+            self.rows = []
+            self._selected = []
+            self._region = "heading"
+            self._col_id = "#1"
+
+        def __getitem__(self, key):
+            assert key == "displaycolumns"
+            return list(self.display)
+
+        def __setitem__(self, key, value):
+            assert key == "displaycolumns"
+            self.display = list(value)
+
+        def column(self, col, option=None, **kw):
+            if "width" in kw:
+                self.widths[col] = int(kw["width"])
+                return None
+            if option == "width":
+                return self.widths[col]
+            return {}
+
+        def identify_region(self, _x, _y):
+            return self._region
+
+        def identify_column(self, _x):
+            return self._col_id
+
+        def configure(self, **_kw):
+            pass
+
+        def bind(self, seq, fn, add=None):
+            self.bindings[seq] = fn
+
+        def get_children(self):
+            return [f"r{i}" for i in range(len(self.rows))]
+
+        def delete(self, _row):
+            self.rows.clear()
+
+        def insert(self, _parent, _index, tags=(), values=()):
+            self.rows.append((tags, values))
+
+        def selection(self):
+            return list(self._selected)
+
+        def index(self, item):
+            return int(str(item)[1:])
+
+    app = object.__new__(P.App)
+    app.settings = {}
+    app.theme = SimpleNamespace(pixel_scale=1.0, px=lambda v: int(v))
+    app.root = SimpleNamespace(after=lambda _ms, fn: fn())
+    app.nb = SimpleNamespace(tab=lambda *_a, **_kw: None)
+    app.tab_review = object()
+    app.lbl_queue = SimpleNamespace(configure=lambda **_kw: None)
+    app._update_stats = lambda: None
+    app._sync_tray = lambda: None
+
+    q_tree = SortFakeTree(P.Q_COLUMNS)
+    app.q_tree = q_tree
+    app._q_sort = ("", True)
+    d1 = SimpleNamespace(
+        path=Path("zeta.pdf"), reason="tvetydig",
+        best=SimpleNamespace(name="Bank", score=2.0),
+        extraction=SimpleNamespace(used_ocr=False, ocr_logo=False),
+    )
+    d2 = SimpleNamespace(
+        path=Path("alpha.pdf"), reason="låg poäng",
+        best=SimpleNamespace(name="El", score=5.0),
+        extraction=SimpleNamespace(used_ocr=True, ocr_logo=False),
+    )
+    app.queue = [d1, d2]
+    P.App._install_tree_column_customization(
+        app, q_tree, P.Q_COLUMNS, "q_column_order", "q_column_widths",
+        sort_callback=lambda c: P.App._sort_queue(app, c))
+
+    # Clean click on column #1 ("file") sorts ascending then toggles descending
+    q_tree._region = "heading"
+    q_tree._col_id = "#1"
+    q_tree.bindings["<ButtonPress-1>"](SimpleNamespace(x=10, y=5))
+    q_tree.bindings["<ButtonRelease-1>"](SimpleNamespace(x=12, y=5))
+    assert [d.path.name for d in app.queue] == ["alpha.pdf", "zeta.pdf"]
+    q_tree._selected = ["r1"]
+    assert P.App._queue_index(app) == 1
+
+    q_tree.bindings["<ButtonPress-1>"](SimpleNamespace(x=10, y=5))
+    q_tree.bindings["<ButtonRelease-1>"](SimpleNamespace(x=10, y=5))
+    assert [d.path.name for d in app.queue] == ["zeta.pdf", "alpha.pdf"]
+
+    # History sort by score keeps _selected_events aligned to displayed row order
+    h_tree = SortFakeTree(P.H_COLUMNS)
+    app.h_tree = h_tree
+    app._h_sort = ("", True)
+    ev1 = {"time": "2026-11-24T10:00:00", "source": "b.pdf",
+           "category": "Bank", "score": 1.0, "decided_by": "auto", "matched": ["a"]}
+    ev2 = {"time": "2026-11-24T11:00:00", "source": "a.pdf",
+           "category": "El", "score": 8.0, "decided_by": "manuell", "matched": ["b"]}
+    monkeypatch.setattr(P, "load_history", lambda: [ev1, ev2])
+    app._history = [ev1, ev2]
+    app._history_shown = []
+    P.App._install_tree_column_customization(
+        app, h_tree, P.H_COLUMNS, "h_column_order", "h_column_widths",
+        sort_callback=lambda c: P.App._sort_history(app, c))
+    h_tree._region = "heading"
+    h_tree._col_id = "#4"  # score
+    h_tree.bindings["<ButtonPress-1>"](SimpleNamespace(x=10, y=5))
+    h_tree.bindings["<ButtonRelease-1>"](SimpleNamespace(x=10, y=5))
+    assert [row[1][1] for row in h_tree.rows] == ["b.pdf", "a.pdf"]
+    h_tree._selected = ["r0"]
+    assert P.App._selected_events(app) == [ev1]

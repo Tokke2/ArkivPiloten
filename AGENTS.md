@@ -4,23 +4,27 @@ Detta dokument sammanfattar projektets stående regler (anpassade efter ArkivPil
 
 ---
 
-## 1. Git, grenar, merge och regelsparande (HÅRDA REGLER)
+## 1. Git, grenar, merge, PR och regelsparande (HÅRDA REGLER)
 
-- **Endast en aktiv branch — arbeta aldrig mot `main` (hård regel):**
-  - Endast en branch ska finnas i repot (`arena/317ae491-arkivpiloten`), och allt arbete samt alla pushar sker **endast** mot den aktiva grenen.
+- **Endast en aktiv standardbranch (`default_branch`), även efter byte av chatt — arbeta aldrig mot `main` (hård regel):**
+  - Endast en branch ska finnas i repot (`arena/317ae491-arkivpiloten`), satt som GitHubs **standardbranch** (`default_branch`).
+  - Alla ändringar, commits och pushar sker **endast** mot denna enda branch, **även efter byte av chatt** (varje ny session/chatt fortsätter strikt på samma aktiva standardbranch).
   - Arbeta **aldrig** mot `main` — särskilt inte vid appuppdateringar (uppdateraren hämtar alltid via GitHub Releases, aldrig från `main` eller annan gren).
-- **Aldrig merga (hård regel):**
-  - Merga aldrig grenar eller pull requests (`git merge`, `gh pr merge`).
+- **Aldrig merga eller skapa/hantera PR (hård regel):**
+  - Merga aldrig grenar eller pull requests (`git merge`, `gh pr merge`) och skapa, öppna eller använd aldrig pull requests (`gh pr create`, PR-arbetsflöden). Allt arbete stannar och pushas direkt på den enda aktiva standardbranchen.
 - **Skriv alltid nya regler till GitHub (hård regel):**
   - När användaren skriver **`- hård regel`** eller **`regel`** i chatten ska den regeln alltid läggas in här i `AGENTS.md` på GitHub (commit + push till den aktiva grenen, följt av release- och CI-kontroll).
 - **Anpassa regler efter varje app:**
   - Generella regler från användarens standardlista tillämpas utifrån ArkivPilotens faktiska arkitektur.
-  - Egen underflik i Inställningar för att skapa profiler gäller **endast appar som använder profiler** (ArkivPiloten arbetar med kategorier och stödordsregler, inte användarprofiler); delar från andra appar (som projektskaparen) införs inte utan uppdrag.
+  - Egen underflik i Inställningar för att skapa profiler gäller **endast appar som använder profiler** (ArkivPiloten arbetar med kategorier och stödordsregler, inte användarprofiler).
+  - Valet av kryssruta i projektskaparen (som fanns i TTK-versionen) gäller **enbart appar som hade det** (ArkivPiloten har ingen projektskapare och inför den inte utan uppdrag).
 
 ---
 
 ## 2. Release och autouppdatering (HÅRD REGEL)
 
+- **Autouppdatering kl. 00:00 varje dag om det finns en uppdatering:**
+  - Versionsvakten (`uppdaterings_dags(..., midnight_daily=True)` med `update_midnight_check: True` som standard i `DEFAULT_SETTINGS`) kontrollerar GitHub Releases **kl. 00:00 varje dag** (utöver intervallkontrollen) och laddar ned, verifierar och installerar automatiskt om en ny version eller ändrad release-fil i manifestet finns.
 - **Uppdatera alltid GitHub-releasen vid varje kodändring + markera som `Latest` (hård regel):**
   - `.github/workflows/release.yml` körs vid varje kodpush till den aktiva grenen, bygger färskt paket via `python tools/build_release.py --out dist`, flyttar/skapar taggen `v$VERSION` till `$GITHUB_SHA`, laddar upp alla release-filer med `--clobber`, bäddar in `dist/BUILD-MANIFEST.json` i release-texten och kör alltid:
     ```bash
@@ -84,4 +88,4 @@ Kör alltid lokalt innan commit/push:
 4. `pytest -q` (hela testsviten)
 5. `PDFSORTER_HOME=<tmp> python pdfsorter.py --ai-rapport` (`FEL: 0`)
 
-Efter push till GitHub: verifiera att endast en branch finns kvar, att både **`release`** och **`tests`** går igenom 100 % grönt och att **`Latest`**-releasen pekar på senaste commit.
+Efter push till GitHub: verifiera att endast `arena/317ae491-arkivpiloten` finns kvar som branch (och som `default_branch`, utan PR/merge), att både **`release`** och **`tests`** går igenom 100 % grönt och att **`Latest`**-releasen pekar på senaste commit.

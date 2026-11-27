@@ -8544,6 +8544,8 @@ _UI_EN = {
     "Sök efter ny version automatiskt (tyst)": "Check for new versions automatically (silent)",
     "Installera automatiskt när paketet är verifierat": "Install automatically when verified",
     "Starta om tyst när en ny version installerats": "Restart silently when a new version is installed",
+    "Autouppdatera kl. 00:00 varje dag om ny version finns":
+        "Auto-update daily at 00:00 if a new version is available",
     "Begränsa tyst omstart till tidsfönster:": "Limit silent restart to time window:",
     "till": "to",
     "Schemalagd sortering": "Scheduled sorting",
@@ -8955,36 +8957,57 @@ def _intervall(last: str, per_dygn: int, forra_lyckades: bool) -> float:
 
 def uppdaterings_dags(last: str, per_dygn: int = UPPDATERING_PER_DYGN,
                       forra_lyckades: bool = True,
-                      nu: Optional[datetime] = None) -> bool:
+                      nu: Optional[datetime] = None,
+                      midnight_daily: bool = False) -> bool:
     """Är det dags för nästa tysta sökning?
 
     Tiden sparas i inställningarna, så antalet gäller över omstarter: en
     app som startas tio gånger om dagen frågar inte GitHub tio gånger.
+    Med ``midnight_daily=True`` körs dessutom en automatisk sökning och
+    uppdatering så snart dygnet slagit om till ``00:00``.
     """
     sen = _iso_tid(last)
     if sen is None:                     # aldrig sökt (eller trasig tid)
         return True
+    nu_eff = nu or datetime.now()
+    if midnight_daily and nu_eff.date() > sen.date():
+        return True
     kvar = _intervall(last, per_dygn, forra_lyckades) - \
-        ((nu or datetime.now()) - sen).total_seconds()
+        (nu_eff - sen).total_seconds()
     return kvar <= 0
 
 
 def uppdaterings_nasta_text(last: str, per_dygn: int = UPPDATERING_PER_DYGN,
                             forra_lyckades: bool = True,
-                            nu: Optional[datetime] = None) -> str:
+                            nu: Optional[datetime] = None,
+                            midnight_daily: bool = False) -> str:
     """Kort text om när nästa sökning sker: "om 3 t 12 min" eller "nu"."""
     sen = _iso_tid(last)
     if sen is None:
         return "nu"
-    kvar = int(_intervall(last, per_dygn, forra_lyckades)
-               - ((nu or datetime.now()) - sen).total_seconds())
+    nu_eff = nu or datetime.now()
+    if midnight_daily and nu_eff.date() > sen.date():
+        return "nu"
+    next_interval = sen + timedelta(
+        seconds=_intervall(last, per_dygn, forra_lyckades))
+    next_run = next_interval
+    at_midnight = False
+    if midnight_daily:
+        next_midnight = datetime.combine(
+            sen.date() + timedelta(days=1), datetime.min.time())
+        if next_midnight < next_interval:
+            next_run = next_midnight
+            at_midnight = True
+    kvar = int((next_run - nu_eff).total_seconds())
     if kvar <= 0:
         return "nu"
     minuter = max(1, kvar // 60)
     tim, min_ = divmod(minuter, 60)
     if tim and min_:
-        return f"om {tim} t {min_} min"
-    return f"om {tim} t" if tim else f"om {minuter} min"
+        suffix = f"om {tim} t {min_} min"
+    else:
+        suffix = f"om {tim} t" if tim else f"om {minuter} min"
+    return f"kl. 00:00 ({suffix})" if at_midnight else suffix
 
 
 def tid_kort(iso: str, nu: Optional[datetime] = None) -> str:
@@ -9843,10 +9866,13 @@ class App:
         inst = getattr(self, "settings", None) or {}
         if inst.get("check_updates", True):
             per_dygn = uppdateringar_per_dygn(inst)
+            midnight = bool(inst.get("update_midnight_check", True))
             nasta = uppdaterings_nasta_text(
                 inst.get("last_update_check", ""), per_dygn=per_dygn,
-                forra_lyckades=bool(inst.get("last_update_check_ok", True)))
-            rader.append(f"  Automatisk sökning: {per_dygn} ggr/dygn "
+                forra_lyckades=bool(inst.get("last_update_check_ok", True)),
+                midnight_daily=midnight)
+            extra = " + kl. 00:00 varje dag" if midnight else ""
+            rader.append(f"  Automatisk sökning: {per_dygn} ggr/dygn{extra} "
                          f"(tyst), nästa {nasta}")
             rader.append("  Tyst omstart vid uppdatering: "
                          + ("på" if inst.get("silent_restart", True) else "av"))
@@ -10834,6 +10860,8 @@ class App:
             value=self.settings.get("auto_update", True))
         self.var_tystomstart = tk.BooleanVar(
             value=self.settings.get("silent_restart", True))
+        self.var_upd_midnight = tk.BooleanVar(
+            value=bool(self.settings.get("update_midnight_check", True)))
         self.var_silent_window_enabled = tk.BooleanVar(
             value=bool(self.settings.get("silent_restart_window_enabled", False)))
         self.var_silent_window_start = tk.StringVar(
@@ -10854,7 +10882,14 @@ class App:
                         text="Starta om tyst när en ny version installerats",
                         style="Card.TCheckbutton",
                         variable=self.var_tystomstart).grid(
-            row=1, column=0, columnspan=4, sticky="w", padx=8, pady=2)
+            row=1, column=0, columnspan=2, sticky="w", padx=8, pady=2)
+        ttk.Checkbutton(
+            updb,
+            text="Autouppdatera kl. 00:00 varje dag om ny version finns",
+            style="Card.TCheckbutton",
+            variable=self.var_upd_midnight,
+            command=self._refresh_update_status,
+        ).grid(row=1, column=2, columnspan=2, sticky="w", padx=8, pady=2)
         win_rad = ttk.Frame(updb, style="CardInner.TFrame")
         win_rad.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=2)
         ttk.Checkbutton(
@@ -11464,8 +11499,9 @@ class App:
                 pass
 
     def _install_tree_column_customization(self, tree, columns: Tuple[str, ...],
-                                           order_key: str, width_key: str) -> None:
-        """Aktivera omordning av kolumnrubriker och sparade kolumnbredder."""
+                                           order_key: str, width_key: str,
+                                           sort_callback: Optional[Callable[[str], None]] = None) -> None:
+        """Aktivera omordning/sortering av kolumnrubriker och sparade kolumnbredder."""
         self._apply_tree_column_order(
             tree, columns, order_key, self.settings.get(order_key, []), save=False)
         self._apply_tree_column_widths(tree, columns, width_key)
@@ -11518,6 +11554,10 @@ class App:
                             tree, columns, width_key))
                 except Exception:
                     pass
+                return
+            if mode == "reorder" and not moved and col:
+                if callable(sort_callback):
+                    sort_callback(col)
                 return
             if mode != "reorder" or not moved or not col:
                 return
@@ -12622,6 +12662,11 @@ class App:
             "check_updates": bool(self.var_checkupd.get()),
             "auto_update": bool(self.var_autoupd.get()),
             "silent_restart": bool(self.var_tystomstart.get()),
+            "update_midnight_check": (
+                bool(self.var_upd_midnight.get())
+                if hasattr(self, "var_upd_midnight")
+                else bool(self.settings.get("update_midnight_check", True))
+            ),
             "silent_restart_window_enabled": (
                 bool(self.var_silent_window_enabled.get())
                 if hasattr(self, "var_silent_window_enabled")
@@ -15536,8 +15581,10 @@ class App:
                    pady=(0, T.INNER))
         self.q_tree.configure(yscrollcommand=q_ysb.set, xscrollcommand=q_xsb.set)
         self.theme.zebra(self.q_tree)
+        self._q_sort: Tuple[str, bool] = ("", True)
         self._install_tree_column_customization(
-            self.q_tree, Q_COLUMNS, "q_column_order", "q_column_widths")
+            self.q_tree, Q_COLUMNS, "q_column_order", "q_column_widths",
+            sort_callback=self._sort_queue)
         self.q_tree.bind("<Double-1>", lambda e: self._process_queue(self._queue_index()))
 
     def _toggle_review_auto_advance(self) -> None:
@@ -15562,7 +15609,36 @@ class App:
             return 0
         return max(0, self.q_tree.index(sel[0]))
 
+    @staticmethod
+    def _queue_sort_key(d: Decision, col: str):
+        best = d.best
+        läst = ("ocr" if d.extraction.used_ocr else (
+            "text + logga" if getattr(d.extraction, "ocr_logo", False)
+            else "text"))
+        if col == "file":
+            return d.path.name.casefold()
+        if col == "reason":
+            return (d.reason or "").casefold()
+        if col == "guess":
+            return (0 if best else 1,
+                    best.name.casefold() if best else "",
+                    -(best.score if best else 0.0))
+        if col == "ocr":
+            return läst
+        return d.path.name.casefold()
+
+    def _sort_queue(self, col: str) -> None:
+        current, asc = getattr(self, "_q_sort", ("", True))
+        asc = (not asc) if col == current else True
+        self._q_sort = (col, asc)
+        self._refresh_queue()
+
     def _refresh_queue(self) -> None:
+        sort_col, asc = getattr(self, "_q_sort", ("", True))
+        if sort_col and self.queue:
+            self.queue.sort(
+                key=lambda d: self._queue_sort_key(d, sort_col),
+                reverse=not asc)
         for row in self.q_tree.get_children():
             self.q_tree.delete(row)
         for i, d in enumerate(self.queue):
@@ -16151,16 +16227,52 @@ class App:
                    pady=(0, T.INNER))
         self.h_tree.configure(yscrollcommand=h_ysb.set, xscrollcommand=h_xsb.set)
         self.theme.zebra(self.h_tree)
+        self._h_sort: Tuple[str, bool] = ("", True)
         self._install_tree_column_customization(
-            self.h_tree, H_COLUMNS, "h_column_order", "h_column_widths")
+            self.h_tree, H_COLUMNS, "h_column_order", "h_column_widths",
+            sort_callback=self._sort_history)
         self.h_tree.bind("<Double-1>", lambda e: self._open_hist_target())
         self._history: List[Dict[str, Any]] = []
+        self._history_shown: List[Dict[str, Any]] = []
 
-    def _refresh_history(self) -> None:
+    @staticmethod
+    def _history_sort_key(ev: Dict[str, Any], col: str):
+        if col == "time":
+            return str(ev.get("time", "") or "")
+        if col == "file":
+            return Path(ev.get("source", "")).name.casefold()
+        if col == "category":
+            return str(ev.get("category", "") or "").casefold()
+        if col == "score":
+            try:
+                return float(ev.get("score", 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        if col == "by":
+            return str(ev.get("decided_by", "") or "").casefold()
+        if col == "matched":
+            return ", ".join(ev.get("matched", [])).casefold()
+        return str(ev.get("time", "") or "")
+
+    def _sort_history(self, col: str) -> None:
+        current, asc = getattr(self, "_h_sort", ("", True))
+        asc = (not asc) if col == current else (col != "time")
+        self._h_sort = (col, asc)
+        self._refresh_history(reload=False)
+
+    def _refresh_history(self, reload: bool = True) -> None:
         for row in self.h_tree.get_children():
             self.h_tree.delete(row)
-        self._history = load_history()
-        for i, ev in enumerate(reversed(self._history[-500:])):
+        if reload or not getattr(self, "_history", None):
+            self._history = load_history()
+        recent = list(reversed(self._history[-500:]))
+        sort_col, asc = getattr(self, "_h_sort", ("", True))
+        if sort_col and recent:
+            recent.sort(
+                key=lambda ev: self._history_sort_key(ev, sort_col),
+                reverse=not asc)
+        self._history_shown = recent
+        for i, ev in enumerate(recent):
             t = ev.get("time", "")[:19].replace("T", "  ")
             self.h_tree.insert("", "end", tags=("odd" if i % 2 else "even",), values=(
                 t, Path(ev.get("source", "")).name, ev.get("category", ""),
@@ -16168,7 +16280,8 @@ class App:
                 ", ".join(ev.get("matched", []))[:80]))
 
     def _selected_events(self) -> List[Dict[str, Any]]:
-        recent = list(reversed(self._history[-500:]))
+        shown = getattr(self, "_history_shown", None)
+        recent = list(shown) if shown is not None else list(reversed(self._history[-500:]))
         out = []
         for item in self.h_tree.selection():
             idx = self.h_tree.index(item)
@@ -16737,17 +16850,19 @@ class App:
                 pass
 
     def _uppdatering_dags(self) -> bool:
-        """Är det dags för nästa tysta sökning (2 ggr/dygn)?"""
+        """Är det dags för nästa tysta sökning (kl. 00:00 dagligen + 2 ggr/dygn)?"""
         return uppdaterings_dags(
             self.settings.get("last_update_check", ""),
             per_dygn=uppdateringar_per_dygn(self.settings),
-            forra_lyckades=bool(self.settings.get("last_update_check_ok", True)))
+            forra_lyckades=bool(self.settings.get("last_update_check_ok", True)),
+            midnight_daily=bool(self.settings.get("update_midnight_check", True)))
 
     def _uppdatering_nasta(self) -> str:
         text = uppdaterings_nasta_text(
             self.settings.get("last_update_check", ""),
             per_dygn=uppdateringar_per_dygn(self.settings),
-            forra_lyckades=bool(self.settings.get("last_update_check_ok", True)))
+            forra_lyckades=bool(self.settings.get("last_update_check_ok", True)),
+            midnight_daily=bool(self.settings.get("update_midnight_check", True)))
         return "nästa sökning nu" if text == "nu" else f"nästa sökning {text}"
 
     def _check_updates_from_tray(self) -> None:
@@ -16855,14 +16970,22 @@ class App:
 
     def _uppdatering_status_text(self) -> str:
         """Rad i inställningarna: när appen sökte och när den gör det igen."""
-        if not self.settings.get("check_updates", True):
+        var_check = getattr(self, "var_checkupd", None)
+        check_on = (bool(var_check.get()) if var_check is not None
+                    else bool(self.settings.get("check_updates", True)))
+        if not check_on:
             return "Automatisk versionssökning är avstängd."
+        var_mid = getattr(self, "var_upd_midnight", None)
+        midnight = (bool(var_mid.get()) if var_mid is not None
+                    else bool(self.settings.get("update_midnight_check", True)))
         per_dygn = uppdateringar_per_dygn(self.settings)
         lyckades = bool(self.settings.get("last_update_check_ok", True))
         senast = self.settings.get("last_update_check", "")
         nasta = uppdaterings_nasta_text(
-            senast, per_dygn=per_dygn, forra_lyckades=lyckades)
-        text = (f"Tyst sökning {per_dygn} ggr/dygn · senast "
+            senast, per_dygn=per_dygn, forra_lyckades=lyckades,
+            midnight_daily=midnight)
+        extra = " + kl. 00:00 varje dag" if midnight else ""
+        text = (f"Tyst sökning {per_dygn} ggr/dygn{extra} · senast "
                 f"{tid_kort(senast)} · nästa {nasta}")
         if not lyckades:
             text += " (förra försöket misslyckades)"

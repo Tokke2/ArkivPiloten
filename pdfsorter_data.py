@@ -658,6 +658,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # 2026-10-26: versionsvakten söker tyst två gånger per dygn i stället
     # för vid varje start (en app som startas ofta frågade GitHub lika ofta).
     "update_checks_per_day": 2,
+    # 2026-11-24: automatisk kontroll och installation kl. 00:00 varje dag
+    # när en ny eller uppdaterad release finns på GitHub Releases.
+    "update_midnight_check": True,
     "last_update_check": "",      # ISO-tid för senaste sökningen
     "last_update_check_ok": True,  # falskt -> kortare omförsök (nätet svek)
     "last_update_seen": "",       # senaste versionen GitHub svarade

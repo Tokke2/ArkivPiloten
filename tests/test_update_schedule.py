@@ -873,3 +873,77 @@ def test_silent_restart_quiet_window_overnight_and_manual_override(monkeypatch):
     app._omstart_nar_ledig()
     assert app.omstarter == [False, True]
     assert app._omstart_vantar is False
+
+
+def test_daily_midnight_auto_update_schedule_and_settings(tmp_path, monkeypatch):
+    assert D.DEFAULT_SETTINGS["update_midnight_check"] is True
+    assert "Autouppdatera kl. 00:00 varje dag om ny version finns" in P._UI_EN
+
+    # 23:55 -> 00:00 triggers immediately when midnight_daily=True
+    last_eve = datetime(2026, 11, 24, 23, 55, 0).isoformat(timespec="seconds")
+    assert P.uppdaterings_dags(
+        last_eve, per_dygn=2, nu=datetime(2026, 11, 24, 23, 59, 0),
+        midnight_daily=True) is False
+    assert P.uppdaterings_dags(
+        last_eve, per_dygn=2, nu=datetime(2026, 11, 25, 0, 0, 10),
+        midnight_daily=True) is True
+    assert P.uppdaterings_nasta_text(
+        datetime(2026, 11, 24, 16, 0, 0).isoformat(timespec="seconds"),
+        per_dygn=2, nu=datetime(2026, 11, 24, 18, 0, 0),
+        midnight_daily=True) == "kl. 00:00 (om 6 t)"
+
+    # Already checked right after 00:00 -> does not re-check at 00:01
+    last_midnight = datetime(2026, 11, 25, 0, 0, 5).isoformat(timespec="seconds")
+    assert P.uppdaterings_dags(
+        last_midnight, per_dygn=2, nu=datetime(2026, 11, 25, 0, 1, 5),
+        midnight_daily=True) is False
+    # Next midnight -> triggers again
+    assert P.uppdaterings_dags(
+        last_midnight, per_dygn=2, nu=datetime(2026, 11, 26, 0, 0, 5),
+        midnight_daily=True) is True
+
+    # Full watchdog run at 00:00 installs silently only when an update exists
+    monkeypatch.setenv("PDFSORTER_HOME", str(tmp_path / "data"))
+    fake_now = datetime(2026, 11, 25, 0, 0, 15)
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fake_now
+
+    monkeypatch.setattr(P, "datetime", _FakeDatetime)
+    app = _tyst_uppdatering(monkeypatch, _Sken())
+    app.settings["update_midnight_check"] = True
+    app.settings["last_update_check"] = datetime(
+        2026, 11, 24, 15, 0, 0).isoformat(timespec="seconds")
+    assert app._uppdatering_dags() is True
+    monkeypatch.setattr(P, "check_for_update",
+                        lambda *a, **k: _info_med_ny_version())
+    app._check_updates_gui(manual=False)
+    assert app.omstarter == [True]
+    # Next tick 30 seconds later at 00:00:45 does NOT re-check
+    fake_now = datetime(2026, 11, 25, 0, 0, 45)
+    assert app._uppdatering_dags() is False
+
+    # When NO update exists at 00:00, silent check logs without installing/restarting
+    fake_now = datetime(2026, 11, 26, 0, 0, 10)
+    app2 = _Sken()
+    app2.settings["update_midnight_check"] = True
+    app2.settings["last_update_check"] = datetime(
+        2026, 11, 25, 15, 0, 0).isoformat(timespec="seconds")
+    assert app2._uppdatering_dags() is True
+    monkeypatch.setattr(P, "check_for_update",
+                        lambda *a, **k: {"ok": True, "available": False,
+                                         "remote": P.APP_VERSION})
+    monkeypatch.setattr(P.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(P, "session_log", lambda *a, **k: None)
+    installs = []
+    monkeypatch.setattr(P, "perform_update", lambda *a, **k: installs.append(True))
+    app2._check_updates_gui(manual=False)
+    assert installs == []
+    assert app2.omstarter == []
+
+    # Settings UI + _collect_settings wire var_upd_midnight
+    assert "var_upd_midnight" in ast.unparse(_metod("_build_sort_tab"))
+    collect_src = ast.unparse(_metod("_collect_settings"))
+    assert "update_midnight_check" in collect_src and "var_upd_midnight" in collect_src

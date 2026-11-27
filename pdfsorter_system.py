@@ -2316,8 +2316,9 @@ HELP_CONTENT: List[Tuple[str, str]] = [
              "bevakas utan att du öppnar appen."),
 
     ("h2", "Uppdateringar sköter sig själva"),
-    ("body", "Appen letar efter en ny version två gånger per dygn — tyst, i "
-             "bakgrunden. Hittar den en nyare version som kan verifieras mot "
+    ("body", "Appen letar efter en ny version kl. 00:00 varje dag samt "
+             "två gånger per dygn — tyst, i bakgrunden. Hittar den en nyare "
+             "version eller ändrad releasefil som kan verifieras mot "
              "releasens kontrollsumma installeras den direkt, och appen "
              "startar om sig själv så att den nya versionen börjar gälla. Du "
              "behöver inte göra något."),
