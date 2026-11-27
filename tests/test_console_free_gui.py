@@ -92,3 +92,17 @@ def test_main_performs_handoff_before_gui_initialization(monkeypatch):
 
     assert P.main([]) == 0
     assert seen == [[]]
+
+
+def test_hidden_subprocess_kwargs_used_for_background_pip_calls(monkeypatch):
+    monkeypatch.setattr(P.sys, "platform", "win32")
+    monkeypatch.setattr(P.subprocess, "CREATE_NO_WINDOW", 0x08000000,
+                        raising=False)
+    kw = P._hidden_subprocess_kwargs()
+    assert kw["creationflags"] == 0x08000000
+
+    src = P.Path(P.__file__).read_text(encoding="utf-8")
+    pip_jobba = src[src.index("    def _pip_jobba"):src.index("    def _visa_progress")]
+    assert "**_hidden_subprocess_kwargs()" in pip_jobba
+    pip_inst = src[src.index("            def _pip_installera"):src.index("            def _kolla_igen")]
+    assert "**_hidden_subprocess_kwargs()" in pip_inst

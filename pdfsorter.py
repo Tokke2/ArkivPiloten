@@ -145,6 +145,20 @@ if sys.platform.startswith("win"):
         pass
 
 
+def _hidden_subprocess_kwargs() -> Dict[str, Any]:
+    """Windows: säkerställ att underprocesser aldrig visar ett konsolfönster."""
+    if not sys.platform.startswith("win"):
+        return {}
+    kwargs: Dict[str, Any] = {}
+    if hasattr(subprocess, "STARTUPINFO"):
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        si.wShowWindow = 0
+        kwargs["startupinfo"] = si
+    kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    return kwargs
+
+
 # ==========================================================================
 # DEL 1 - LÄSA PDF OCH TA FRAM STÖDORD
 # ==========================================================================
@@ -10376,16 +10390,6 @@ class App:
         confirm_all.grid(row=0, column=2, columnspan=2,
                          sticky="w", padx=8, pady=(6, 2))
         confirm_all.state(["disabled"])
-        opt_hint = ttk.Label(
-            opt,
-            text=("Stödordsförslag sparas först när du väljer dem. En kategori "
-                  "behöver 100 manuella bekräftelser och två exklusiva exakta "
-                  "stödord. Dokumenttyper lärs från dina undermappsval; vid "
-                  "osäkerhet lämnas filen för granskning."),
-            style="CardMuted.TLabel", wraplength=460, justify="left",
-        )
-        opt_hint.grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=2)
-        _bind_responsive_wrap(opt, opt_hint, reserve=420, minimum=260, maximum=760)
         ocr_cb = ttk.Checkbutton(opt, text="OCR för skannade PDF:er",
                                  style="Card.TCheckbutton", variable=self.var_ocr)
         ocr_cb.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=2)
@@ -10401,6 +10405,10 @@ class App:
         ocr_q_cb.grid(row=1, column=2, columnspan=2, sticky="w", padx=8, pady=2)
         if not ocr_available():
             ocr_q_cb.state(["disabled"])
+        ttk.Checkbutton(opt, text="Testkörning (visa vad som skulle hänt, flytta inget)",
+                        style="Card.TCheckbutton",
+                        variable=self.var_dry).grid(row=2, column=0, columnspan=2,
+                                                    sticky="w", padx=8, pady=2)
         ttk.Checkbutton(opt, text="Poppa upp dialogen direkt under bevakning",
                         style="Card.TCheckbutton",
                         variable=self.var_popup).grid(row=2, column=2, columnspan=2,
@@ -10411,10 +10419,6 @@ class App:
                         style="Card.TCheckbutton",
                         variable=self.var_rescan).grid(row=3, column=0, columnspan=2,
                                                        sticky="w", padx=8, pady=2)
-        ttk.Checkbutton(opt, text="Testkörning (visa vad som skulle hänt, flytta inget)",
-                        style="Card.TCheckbutton",
-                        variable=self.var_dry).grid(row=2, column=0, columnspan=2,
-                                                    sticky="w", padx=8, pady=2)
         act = ttk.Frame(opt, style="CardInner.TFrame")
         act.grid(row=3, column=2, columnspan=2, sticky="w", padx=8, pady=2)
         ttk.Label(act, text="Åtgärd:", style="Card.TLabel").pack(side="left")
@@ -10425,8 +10429,19 @@ class App:
                         style="Card.TRadiobutton",
                         variable=self.var_action).pack(side="left", padx=(8, 0))
 
+        opt_hint = ttk.Label(
+            opt,
+            text=("Stödordsförslag sparas först när du väljer dem. En kategori "
+                  "behöver 100 manuella bekräftelser och två exklusiva exakta "
+                  "stödord. Dokumenttyper lärs från dina undermappsval; vid "
+                  "osäkerhet lämnas filen för granskning."),
+            style="CardMuted.TLabel", wraplength=720, justify="left",
+        )
+        opt_hint.grid(row=4, column=0, columnspan=4, sticky="w", padx=16, pady=(2, 2))
+        _bind_responsive_wrap(opt, opt_hint, reserve=48, minimum=280, maximum=1100)
+
         learning_actions = ttk.Frame(opt, style="CardInner.TFrame")
-        learning_actions.grid(row=4, column=0, columnspan=4, sticky="w",
+        learning_actions.grid(row=5, column=0, columnspan=4, sticky="w",
                               padx=8, pady=(4, 2))
         ttk.Button(learning_actions, text="Testa inlärningen mot historik…",
                    command=self._learned_backtest).pack(side="left", padx=(0, 6))
@@ -10443,11 +10458,11 @@ class App:
                   "stödordsträff kan göra det."),
             style="CardMuted.TLabel", wraplength=720, justify="left",
         )
-        opt_learn_hint.grid(row=5, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 4))
+        opt_learn_hint.grid(row=6, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 4))
         _bind_responsive_wrap(opt, opt_learn_hint, reserve=48, minimum=280, maximum=1100)
 
         adv = ttk.Frame(opt, style="CardInner.TFrame")
-        adv.grid(row=6, column=0, columnspan=4, sticky="w",
+        adv.grid(row=7, column=0, columnspan=4, sticky="w",
                  padx=8, pady=(8, T.INNER))
         self.var_unmatched = tk.StringVar(value=self.settings.get("unmatched_folder", ""))
         ttk.Label(adv, text="Osorterat-mapp:", style="Card.TLabel").pack(side="left")
@@ -17975,10 +17990,7 @@ class App:
             except Exception:
                 pass
         try:
-            popen_kw: Dict[str, Any] = {"cwd": str(rot)}
-            if sys.platform.startswith("win"):
-                popen_kw["creationflags"] = getattr(
-                    subprocess, "CREATE_NO_WINDOW", 0)
+            popen_kw: Dict[str, Any] = {"cwd": str(rot), **_hidden_subprocess_kwargs()}
             subprocess.Popen(cmd, **popen_kw)
         except Exception as exc:
             session_error("uppdatering", exc)
@@ -18173,14 +18185,14 @@ class App:
     def _pip_jobba(self, paket: tuple, status_etikett, progress, win,
                    uppgradera: bool = False):
         """Kör pip i bakgrundstråd med live-rader till progressfönstret."""
-        import subprocess
         args = [sys.executable, "-m", "pip", "install",
                 "--disable-pip-version-check"]
         args += (["--upgrade"] if uppgradera else []) + list(paket)
         try:
             proc = subprocess.Popen(args, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True,
-                                    encoding="utf-8", errors="replace")
+                                    encoding="utf-8", errors="replace",
+                                    **_hidden_subprocess_kwargs())
             sista = ""
             for rad in proc.stdout or []:
                 rad = rad.strip()
@@ -18258,9 +18270,8 @@ class App:
         def ensure() -> None:
             args = ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden",
                     "-ExecutionPolicy", "Bypass", "-File", str(script)]
-            kwargs = {"capture_output": True, "text": True, "timeout": 45}
-            if hasattr(subprocess, "CREATE_NO_WINDOW"):
-                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            kwargs = {"capture_output": True, "text": True, "timeout": 45,
+                      **_hidden_subprocess_kwargs()}
             try:
                 result = subprocess.run(args, **kwargs)
                 if result.returncode:
@@ -18359,7 +18370,8 @@ class App:
                     try:
                         r = subprocess.run(
                             [sys.executable, "-m", "pip", "install"] + paket,
-                            capture_output=True, text=True, timeout=600)
+                            capture_output=True, text=True, timeout=600,
+                            **_hidden_subprocess_kwargs())
                         sv = "klart" if r.returncode == 0 else "misslyckades"
                         tail = (r.stdout or r.stderr or "").strip().splitlines()
                         self._h("tillägg", f"pip install {paket}: {sv} "
@@ -19424,8 +19436,8 @@ def _start_gui_without_console(argv: List[str]) -> bool:
     }
     if not use_pythonw:
         # Alla normala Windows-Python-installationer har pythonw.exe, men
-        # CREATE_NO_WINDOW håller även reservvägen konsolfri.
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # dolda underprocessflaggor håller även reservvägen konsolfri.
+        kwargs.update(_hidden_subprocess_kwargs())
     try:
         subprocess.Popen(command, **kwargs)
         return True
